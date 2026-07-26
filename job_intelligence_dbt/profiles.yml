@@ -1,0 +1,9 @@
+job_intelligence:
+  target: dev
+
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('JOB_INTELLIGENCE_DB_PATH') }}"
+      schema: analytics
+      threads: 4

@@ -1,0 +1,103 @@
+version: 2
+
+models:
+  - name: stg_jobs
+    description: Thin staging view over Python-owned raw job records.
+    columns:
+      - name: record_key
+        tests:
+          - not_null
+          - unique
+      - name: job_fingerprint
+        tests:
+          - not_null
+      - name: canonical_job_key
+        tests:
+          - not_null
+      - name: source
+        tests:
+          - not_null
+      - name: title
+        tests:
+          - not_null
+      - name: company_name
+        tests:
+          - not_null
+      - name: apply_url
+        tests:
+          - not_null
+
+  - name: stg_rule_matches
+    description: Thin staging view over rule-based job matching results.
+    columns:
+      - name: record_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_jobs')
+                field: record_key
+      - name: search_id
+        tests:
+          - not_null
+      - name: match_score
+        tests:
+          - not_null
+
+  - name: stg_resume_profiles
+    description: Thin staging view over generated resume profiles.
+    columns:
+      - name: resume_hash
+        tests:
+          - not_null
+          - unique
+      - name: filename
+        tests:
+          - not_null
+      - name: model_name
+        tests:
+          - not_null
+
+  - name: stg_resume_job_scores
+    description: Thin staging view over AI resume-to-job scoring results.
+    columns:
+      - name: resume_hash
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_resume_profiles')
+                field: resume_hash
+      - name: record_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_jobs')
+                field: record_key
+      - name: overall_score
+        tests:
+          - not_null
+      - name: recommendation
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['apply', 'review', 'skip']
+      - name: confidence
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['high', 'medium', 'low']
+
+  - name: stg_processed_emails
+    description: Thin staging view over email ingestion checkpoints.
+    columns:
+      - name: email_key
+        tests:
+          - not_null
+          - unique
+      - name: source
+        tests:
+          - not_null

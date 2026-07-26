@@ -1,0 +1,11 @@
+duckdb
+PyYAML
+python-dotenv
+beautifulsoup4
+pytz
+pypdf
+python-docx
+google-genai
+pydantic
+httpx
+dbt-duckdb

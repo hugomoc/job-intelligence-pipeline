@@ -1,0 +1,96 @@
+defaults:
+  recommendation_threshold: 50
+
+  employment_types:
+    - full-time
+
+  exclude_keywords:
+    - security clearance
+    - active clearance
+    - commission only
+    - unpaid
+    - volunteer
+
+searches:
+  - search_id: data_engineer_remote
+    title: Data Engineer
+    location: United States
+    remote: true
+
+    keywords:
+      all:
+        - SQL
+      any:
+        - Python
+        - Snowflake
+        - dbt
+        - Airflow
+        - Spark
+        - AWS
+
+    enabled: true
+
+  - search_id: analytics_engineer_remote
+    title: Analytics Engineer
+    location: United States
+    remote: true
+
+    keywords:
+      any:
+        - dbt
+        - Snowflake
+        - SQL
+        - Python
+        - Looker
+        - data modeling
+
+    enabled: true
+
+  - search_id: bi_engineer_remote
+    title: Business Intelligence Engineer
+    location: United States
+    remote: true
+
+    keywords:
+      any:
+        - SQL
+        - Looker
+        - LookML
+        - Snowflake
+        - dimensional modeling
+        - data warehouse
+
+    enabled: true
+
+  - search_id: looker_developer_remote
+    title: Looker Developer
+    location: United States
+    remote: true
+
+    keywords:
+      any:
+        - Looker
+        - LookML
+        - SQL
+        - Snowflake
+        - semantic layer
+
+    enabled: true
+
+  - search_id: data_engineer_san_diego
+    title: Data Engineer
+    location: San Diego, CA
+    remote: false
+
+    keywords:
+      all:
+        - SQL
+      any:
+        - Python
+        - Snowflake
+        - AWS
+        - Spark
+        - ETL
+        - data modeling
+
+    enabled: true

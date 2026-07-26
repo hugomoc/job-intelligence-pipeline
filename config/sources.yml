@@ -1,0 +1,26 @@
+email_provider:
+  provider: yahoo
+  ingestion_method: imap
+  username_env: YAHOO_EMAIL
+  password_env: YAHOO_APP_PASSWORD
+
+sources:
+  - source_id: linkedin
+    source_name: LinkedIn
+    mailbox_folder: jobs/Linkedin
+    enabled: true
+
+  - source_id: indeed
+    source_name: Indeed
+    mailbox_folder: jobs/Indeed
+    enabled: true
+
+  - source_id: glassdoor
+    source_name: Glassdoor
+    mailbox_folder: jobs/Glassdoor
+    enabled: true
+
+  - source_id: ziprecruiter
+    source_name: ZipRecruiter
+    mailbox_folder: jobs/ZipRecruiter
+    enabled: true

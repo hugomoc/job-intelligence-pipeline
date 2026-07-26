@@ -1,0 +1,61 @@
+version: 2
+
+models:
+  - name: mart_job_recommendations
+    description: Streamlit-ready personalized job recommendations ranked by resume and AI score.
+    columns:
+      - name: resume_hash
+        tests:
+          - not_null
+      - name: job_fingerprint
+        tests:
+          - not_null
+      - name: canonical_job_key
+        tests:
+          - not_null
+      - name: canonical_record_key
+        tests:
+          - not_null
+      - name: scored_record_key
+        tests:
+          - not_null
+      - name: job_title
+        tests:
+          - not_null
+      - name: company_name
+        tests:
+          - not_null
+      - name: apply_url
+        tests:
+          - not_null
+      - name: ai_score
+        tests:
+          - not_null
+      - name: ai_score_rank
+        tests:
+          - not_null
+      - name: recommendation
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['apply', 'review', 'skip']
+      - name: confidence
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['high', 'medium', 'low']
+
+  - name: mart_pipeline_summary
+    description: One-row operational summary of ingestion, matching, and AI scoring coverage.
+    columns:
+      - name: summarized_at
+        tests:
+          - not_null
+      - name: raw_job_count
+        tests:
+          - not_null
+      - name: deduplicated_job_count
+        tests:
+          - not_null

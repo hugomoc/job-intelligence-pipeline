@@ -1,0 +1,113 @@
+version: 2
+
+sources:
+  - name: job_pipeline
+    schema: main
+    description: >
+      Operational tables created by the Python job-ingestion
+      and AI-scoring pipeline.
+
+    tables:
+      - name: raw_jobs
+        description: Python-owned operational table containing ingested job postings.
+        columns:
+          - name: record_key
+            tests:
+              - not_null
+              - unique
+          - name: job_fingerprint
+            tests:
+              - not_null
+          - name: source
+            tests:
+              - not_null
+          - name: title
+            tests:
+              - not_null
+          - name: company_name
+            tests:
+              - not_null
+          - name: apply_url
+            tests:
+              - not_null
+
+      - name: job_matches
+        description: Python-owned operational table containing rule-based job search matches.
+        columns:
+          - name: record_key
+            tests:
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source('job_pipeline', 'raw_jobs')
+                    field: record_key
+          - name: search_id
+            tests:
+              - not_null
+          - name: search_title
+            tests:
+              - not_null
+          - name: match_score
+            tests:
+              - not_null
+
+      - name: resume_profiles
+        description: Python-owned operational table containing AI-generated resume profiles.
+        columns:
+          - name: resume_hash
+            tests:
+              - not_null
+              - unique
+          - name: filename
+            tests:
+              - not_null
+          - name: model_name
+            tests:
+              - not_null
+          - name: profile_json
+            tests:
+              - not_null
+
+      - name: resume_job_scores
+        description: Python-owned operational table containing AI resume-to-job scores.
+        columns:
+          - name: resume_hash
+            tests:
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source('job_pipeline', 'resume_profiles')
+                    field: resume_hash
+          - name: record_key
+            tests:
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source('job_pipeline', 'raw_jobs')
+                    field: record_key
+          - name: overall_score
+            tests:
+              - not_null
+          - name: recommendation
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['apply', 'review', 'skip']
+          - name: confidence
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['high', 'medium', 'low']
+
+      - name: processed_emails
+        description: Python-owned operational table containing email ingestion checkpoints.
+        columns:
+          - name: email_key
+            tests:
+              - not_null
+              - unique
+          - name: source
+            tests:
+              - not_null
