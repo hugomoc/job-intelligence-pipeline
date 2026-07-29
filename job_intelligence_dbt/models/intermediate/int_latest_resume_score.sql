@@ -8,7 +8,8 @@ with ranked_scores as (
                 scores.scored_at desc nulls last,
                 scores.overall_score desc,
                 scores.record_key,
-                scores.model_name
+                scores.model_name,
+                scores.prompt_version
         ) as resume_score_rank
     from {{ ref('stg_resume_job_scores') }}
         as scores
@@ -37,6 +38,7 @@ select
     description_word_count,
     description_complete,
     model_name as ai_model_name,
+    prompt_version as ai_prompt_version,
     scored_at as ai_scored_at
 from ranked_scores
 where resume_score_rank = 1

@@ -46,6 +46,9 @@ models:
           - accepted_values:
               arguments:
                 values: ['high', 'medium', 'low']
+      - name: ai_prompt_version
+        tests:
+          - not_null
 
   - name: mart_pipeline_summary
     description: One-row operational summary of ingestion, matching, and AI scoring coverage.

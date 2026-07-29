@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from src.ai.resume_matcher import (
+    MATCHER_PROMPT_VERSION,
     ResumeJobMatch,
     ResumeMatcherError,
     score_resume_against_job,
@@ -71,6 +72,8 @@ def initialize_ai_tables() -> None:
                 description_complete BOOLEAN NOT NULL,
 
                 model_name VARCHAR NOT NULL,
+                prompt_version VARCHAR NOT NULL
+                    DEFAULT 'v1',
                 scored_at TIMESTAMPTZ
                     DEFAULT CURRENT_TIMESTAMP,
 
@@ -79,6 +82,15 @@ def initialize_ai_tables() -> None:
                     record_key
                 )
             )
+            """
+        )
+
+        connection.execute(
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS
+                prompt_version VARCHAR
+                DEFAULT 'v1'
             """
         )
 
@@ -234,6 +246,7 @@ def load_cached_job_score(
     resume_hash: str,
     record_key: str,
     model_name: str,
+    prompt_version: str = MATCHER_PROMPT_VERSION,
 ) -> dict[str, Any] | None:
     with get_connection() as connection:
         cursor = connection.execute(
@@ -253,11 +266,13 @@ def load_cached_job_score(
             WHERE resume_hash = ?
               AND record_key = ?
               AND model_name = ?
+              AND coalesce(prompt_version, 'v1') = ?
             """,
             [
                 resume_hash,
                 record_key,
                 model_name,
+                prompt_version,
             ],
         )
 
@@ -314,6 +329,7 @@ def save_job_score(
         match.description_word_count,
         match.description_complete,
         match.model_name,
+        match.prompt_version,
     ]
 
     with get_connection() as connection:
@@ -350,11 +366,12 @@ def save_job_score(
                 summary,
                 description_word_count,
                 description_complete,
-                model_name
+                model_name,
+                prompt_version
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             values,
@@ -646,6 +663,9 @@ def main() -> None:
                             job["record_key"]
                         ),
                         model_name=model_name,
+                        prompt_version=(
+                            MATCHER_PROMPT_VERSION
+                        ),
                     )
                 )
 

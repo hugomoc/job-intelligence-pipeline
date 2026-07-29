@@ -6,6 +6,8 @@ pytz
 pypdf
 python-docx
 google-genai
+openai
 pydantic
 httpx
 dbt-duckdb
+streamlit

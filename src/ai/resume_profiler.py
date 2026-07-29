@@ -363,6 +363,17 @@ Rules:
    return null.
 10. Do not assume people-management experience unless the
     resume explicitly supports it.
+11. Preserve named cloud platforms and cloud services,
+    including AWS, Azure, GCP and equivalent aliases, when
+    the resume explicitly demonstrates them.
+12. Preserve named data warehouses and databases, including
+    Snowflake, Redshift and BigQuery, when present.
+13. Preserve version-control tools, CI/CD tools and automation
+    platforms such as Git, Jenkins, GitHub Actions, GitLab CI,
+    Azure DevOps and CircleCI when present.
+14. Preserve delivery methodologies such as Agile, Scrum,
+    sprint-based delivery and Kanban only when the resume
+    explicitly states or reasonably demonstrates them.
 
 RESUME:
 

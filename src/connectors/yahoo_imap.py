@@ -92,7 +92,7 @@ def extract_email_content(message: Message) -> tuple[str, str]:
             html_parts.append(decode_payload(message))
 
     plain_text = unescape(
-    "\n".join(plain_text_parts).strip()
+        "\n".join(plain_text_parts).strip()
     )
     html = "\n".join(html_parts).strip()
 
@@ -223,8 +223,9 @@ def read_messages(
                     ),
                     "date": message.get("Date", ""),
                     "text": text,
+                    "html": html,
                     "links": links,
                 }
-)
+            )
 
     return messages

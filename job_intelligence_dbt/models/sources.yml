@@ -9,7 +9,7 @@ sources:
 
     tables:
       - name: raw_jobs
-        description: Python-owned operational table containing ingested job postings.
+        description: Application-managed operational table containing ingested job postings.
         columns:
           - name: record_key
             tests:
@@ -32,7 +32,7 @@ sources:
               - not_null
 
       - name: job_matches
-        description: Python-owned operational table containing rule-based job search matches.
+        description: Application-managed operational table containing rule-based job search matches.
         columns:
           - name: record_key
             tests:
@@ -52,7 +52,7 @@ sources:
               - not_null
 
       - name: resume_profiles
-        description: Python-owned operational table containing AI-generated resume profiles.
+        description: Application-managed operational table containing AI-generated resume profiles.
         columns:
           - name: resume_hash
             tests:
@@ -69,7 +69,7 @@ sources:
               - not_null
 
       - name: resume_job_scores
-        description: Python-owned operational table containing AI resume-to-job scores.
+        description: Application-managed operational table containing AI resume-to-job scores.
         columns:
           - name: resume_hash
             tests:
@@ -100,9 +100,10 @@ sources:
               - accepted_values:
                   arguments:
                     values: ['high', 'medium', 'low']
+          - name: prompt_version
 
       - name: processed_emails
-        description: Python-owned operational table containing email ingestion checkpoints.
+        description: Application-managed operational table containing email ingestion checkpoints.
         columns:
           - name: email_key
             tests:

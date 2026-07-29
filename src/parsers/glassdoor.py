@@ -35,6 +35,10 @@ LOCATION_PATTERN = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+MATCH_PERCENT_PATTERN = re.compile(
+    r"^\d{1,3}%$"
+)
+
 IGNORED_COMPANY_LINES = {
     "easy apply",
     "just posted",
@@ -74,7 +78,22 @@ def is_rating(value: str) -> bool:
 
 
 def is_salary(value: str) -> bool:
-    return bool(SALARY_PATTERN.fullmatch(value))
+    normalized = clean_line(value).replace("–", "-")
+
+    if bool(SALARY_PATTERN.fullmatch(normalized)):
+        return True
+
+    return (
+        "$" in normalized
+        and bool(re.search(r"\d", normalized))
+        and bool(
+            re.search(
+                r"\b(?:yr|year|hour|month|week|day)\b",
+                normalized,
+                re.IGNORECASE,
+            )
+        )
+    )
 
 
 def is_location(value: str) -> bool:
@@ -82,11 +101,12 @@ def is_location(value: str) -> bool:
 
 
 def is_glassdoor_job_url(url: str) -> bool:
-    url_lower = url.lower()
+    parsed = urlparse(url)
+    query_parameters = parse_qs(parsed.query)
 
     return (
-        "glassdoor.com/partner/joblisting.htm" in url_lower
-        and "joblistingid=" in url_lower
+        "glassdoor.com" in parsed.netloc.lower()
+        and "jobListingId" in query_parameters
     )
 
 
@@ -208,20 +228,83 @@ def parse_listing_text(
     return jobs
 
 
+def parse_super_match_text(
+    lines: list[str],
+) -> list[dict[str, Any]]:
+    """
+    Parses Glassdoor's "New roles to put on your radar"
+    template, which exposes one featured job plus a
+    "Review N new matches" CTA.
+    """
+    percent_index = None
+
+    for index, line in enumerate(lines):
+        if MATCH_PERCENT_PATTERN.fullmatch(line):
+            percent_index = index
+            break
+
+    if percent_index is None:
+        return []
+
+    detail_lines = lines[:percent_index]
+
+    if not detail_lines:
+        return []
+
+    salary_text = None
+
+    if is_salary(detail_lines[-1]):
+        salary_text = detail_lines[-1]
+        detail_lines = detail_lines[:-1]
+
+    if len(detail_lines) < 3:
+        return []
+
+    location = detail_lines[-1]
+
+    if not is_location(location):
+        return []
+
+    title = detail_lines[-2]
+    company_name = detail_lines[-3]
+    description = None
+
+    if len(detail_lines) >= 4:
+        description = detail_lines[-4]
+
+    return [
+        {
+            "source": "glassdoor",
+            "source_job_id": None,
+            "title": title,
+            "company_name": company_name,
+            "location": location,
+            "salary_text": salary_text,
+            "description": description,
+            "apply_url": None,
+        }
+    ]
+
+
 def parse_glassdoor_email(
     text: str,
     links: list[str],
 ) -> list[dict[str, Any]]:
     lines = normalize_lines(text)
-
-    start_index, end_index = find_listing_range(lines)
-
-    listing_lines = lines[start_index:end_index]
-
-    jobs = parse_listing_text(listing_lines)
     job_links = extract_job_links(links)
 
-    if len(jobs) != len(job_links):
+    try:
+        start_index, end_index = find_listing_range(lines)
+        listing_lines = lines[start_index:end_index]
+        jobs = parse_listing_text(listing_lines)
+
+    except ValueError:
+        jobs = parse_super_match_text(lines)
+
+        if not jobs:
+            raise
+
+    if len(job_links) < len(jobs):
         raise ValueError(
             "Glassdoor parser count mismatch: "
             f"{len(jobs)} jobs found in the text, but "
@@ -231,7 +314,6 @@ def parse_glassdoor_email(
     for job, job_url in zip(
         jobs,
         job_links,
-        strict=True,
     ):
         job["apply_url"] = job_url
         job["source_job_id"] = extract_source_job_id(

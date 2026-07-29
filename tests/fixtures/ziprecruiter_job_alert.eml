@@ -1,0 +1,708 @@
+Received: from 10.217.136.215
+ by atlas128.free.mail.ne1.yahoo.com pod-id NONE with HTTPS; Sun, 26 Jul 2026 15:21:42 +0000
+Return-Path: <bounce+591b6c.2ba27-hugomoc20=yahoo.com@mg.ziprecruiter.com>
+X-Originating-Ip: [161.38.201.108]
+Received-SPF: pass (domain of mg.ziprecruiter.com designates 161.38.201.108 as permitted sender)
+Authentication-Results: mta.yahoo.com;
+ dkim=pass header.i=@mg.ziprecruiter.com header.s=pdk1 arc_overridden_status=NOT_OVERRIDDEN;
+ dkim=pass header.i=@mailgun.org header.s=mg arc_overridden_status=NOT_OVERRIDDEN;
+ spf=pass smtp.mailfrom=mg.ziprecruiter.com arc_overridden_status=NOT_OVERRIDDEN;
+ dmarc=pass(p=QUARANTINE,sp=QUARANTINE) header.from=ziprecruiter.com arc_overridden_status=NOT_OVERRIDDEN;
+X-Apparently-To: hugomoc20@yahoo.com; Sun, 26 Jul 2026 15:21:42 +0000
+X-YMailISG: vWDMluIWLDsxagelSGyhxdBtoOt5e_14_cJRLRGvRZ5G92PQ
+ ol4Ivzflu_0WWGkwF1XsdqgoDxXAtYpvG9brAOtxQ8GvPwiuBq0HN4C0ZEC9
+ ja1Sr.xfbtET8foRH_K.iCC8QNOFcfi57TLr0_fGknnRMRBw6bHvfLxsvoan
+ MEXDpKCSds_KbtVAKQv.cj.Tv6UBFUYsKozkHJupSdLkxItCiL_rksLR_mv6
+ cg3RJCXWbS4RABbVkwwjJ0DjoMNaqtgFmOrYSx7g8Wtap4n9XENPhfYSMbDp
+ qsG1bQ3unkuZs13HELV_SeTtTguYoKYJpO2tcZUmfOuL.CBFgGk0nseD08MX
+ 3t6TGnOx5olQLmCSJWY1wuNQtdg890Uf2R177lh651fIF_2RxUc0GT1qdmgj
+ Je00XvTjOrzfnYYiB390AlQVcPmTCfB8dsvlZ_4V5e3trv7TSq28mRFqHoTd
+ 6AArMdBzFdNRIGuu_r64rdMOr8lSg19Nw2Fm8qMJsQpV2CxYnzs1yLcIG8xZ
+ KrIHQtPA4WDzx_H1.tjep8S52voRCwsfOyuoSfTxLbdEXnxraJcdKmx.e.OZ
+ QPHooXkE4GfGpjprWuUieW6mIn.X5Sru4luY0eonHbpx.iAooKh6sje9exXp
+ aWKQ6W84JbZ9dgLwRJvyt.ABn6PiHrf8JScBmJKeqadz_Q7TixWi._IVe_VQ
+ BcrHaKhQcw2RBZcuBMONAIGoQc7SxcYPkMFPRKhWuykKlwvZzJ9aitxmgHmu
+ Ehsk65GMeHjGdy22.6BytPR14dBbaDL9IZpWIcKSphbph4XZy5RUHSDlXTeC
+ zYtUHkZ0RFNRfYcP9e8fjQEoIKO.bZ8E6A86fcaR97MDFCS5tdWaqR3dzv8m
+ awLu5eJTnhebSmvys9O47.mEaUM9ANXf68_iSmcWiDXVfNY65wLgYAuKCOBT
+ dIjsICAS0VTyDkhOFzyohuqCUVCTYwWZcEy00ts26_0M704xZoRzigUKDf2a
+ nJNIwm56LLppvp6HiTb0hJ1bZdh.ni4mtsqgLjJefYHcMn5OW4cj.Fs0sv3J
+ ttfVPJa4mo5iXRy.sYEx1kVjzxXzKFHZKYaLrcYBOoQEZsw.2cf7ypSJaUnF
+ 9vXxA6HFwnSON.6hcggCALSoNsxjTO8DSiKg2VnFPb63eg9t8BARZPYDocqU
+ Bp69p_RMP6mkF8htwNhj.KVwq1q01QLbrgeI6cUHksv11wmcQ0FNG7lPDFQU
+ gBS2SCcjFe9ZQJrSjjVBWAg_WsP3ZofHDGe4E9tu
+Received: from 161.38.201.108 (EHLO v5108.v5075e2e3.usw1.send.mailgun.net)
+ by 10.217.136.215 with SMTPs
+ (version=TLS1_2 cipher=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256);
+ Sun, 26 Jul 2026 15:21:42 +0000
+DKIM-Signature: a=rsa-sha256; v=1; c=relaxed/relaxed; d=mg.ziprecruiter.com; q=dns/txt; s=pdk1; t=1785079302; x=1785086502;
+ h=Message-Id: List-Id: List-Unsubscribe-Post: List-Unsubscribe: To: To: From: From: Subject: Subject: Content-Type: Mime-Version: Date: Sender: Sender;
+ bh=6YDOgA4RkqdYGkCyvcyyA/dDb17MQ2cGYCcbqbctH1U=;
+ b=pcItZJzfv2GaxLa8JBriiWpkWAJw/JyG2KKWoyH0lyeeGVKoiTIVltsnuI5/Es/5voFsSrGkqhbIoA4sX4ruMmsXUlqslB9q7eR0F7qfevsosEysCIM50/C7O39/a+842xBrEZN2ntEtBImWLKdhMvckupdIcO9qfkIlvOYMk+LJHvNzM9BfjgN5dSt7bt2kMXerMlqvaI+KxbSdsYfSGovzN2AP78m/3no1ITnqpqBuhTGAcSCQPVmPodxt0I8PnFLyIk9W6NeVLBZlhU/ho61KUR5S8H+f1YbB7+ik2vd2QuznThMB0tGDfHny3pW3ZRWKcf+EIbpLs2hCNbxALg==
+DKIM-Signature: a=rsa-sha256; v=1; c=relaxed/relaxed; d=mailgun.org; q=dns/txt; s=mg; t=1785079302; x=1785086502;
+ h=Message-Id: List-Id: List-Unsubscribe-Post: List-Unsubscribe: To: To: From: From: Subject: Subject: Content-Type: Mime-Version: Date: Sender: Sender;
+ bh=6YDOgA4RkqdYGkCyvcyyA/dDb17MQ2cGYCcbqbctH1U=;
+ b=Dx7TsMN3lDlNcZmvJYDmMCCWXCiViJ9l8xMdfRh0vyyxcmekFfytWFIZjkO2aIJnrCZiGwFZac0TZXCogWc+bY5duQ/ltiiarJ7WRa/eyvh8HSEDROB0niF+948Hk/bKY0PPOevSrK0M03748bnAq1Ck49BQU+ah7cPF5/8qAkk=
+X-Mailgun-Sid: WyJhN2UzMiIsImh1Z29tb2MyMEB5YWhvby5jb20iLCIyYmEyNyJd
+Received: by 8cc7d3bdf83246b8f44cb1f7cb9371ede2ad361d33559514c797c47527ef6cd0 with HTTP
+ id 6a66260681dd0400c065b6a0; Sun, 26 Jul 2026 15:21:42 GMT
+X-Mailgun-Sending-Ip: 161.38.201.108
+Sender: phil=ziprecruiter.com@mg.ziprecruiter.com
+Date: Sun, 26 Jul 2026 15:21:42 +0000
+Mime-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="ba16d5faa334503e9740472d30cb0e6d9f61c5d0296ba40052adfb4ab7a3"
+Subject: Volt is looking for candidates like you!
+From: "Phil @ ZipRecruiter" <phil@ziprecruiter.com>
+To: hugomoc20@yahoo.com
+X-Mailgun-Tag: templateclass=candidate_job_posted
+X-Mailgun-Tag: platform-email
+List-Unsubscribe: <https://www.ziprecruiter.com/candidate/one-click-unsubscribe/edd0ef09/candidate_job_posted/5u_1785079301_XNqG4FlPVdog4rJmTE9LV8vid4O3v7afGdTd-0tfJ-8/1790263301>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+List-Id: <new-magic5-jobs.ziprecruiter.com>
+Feedback-Id: new-magic5-jobs:candidate_job_posted:mg.ziprecruiter.com:js_ziprecruiter
+X-Mailgun-Variables: {"zr_message_id": "495d9cc4-42cc-4063-9784-240c58289e6c"}
+Message-Id: <20260726152142.5e4feedbd288f41d@mg.ziprecruiter.com>
+Content-Length: 33212
+
+--ba16d5faa334503e9740472d30cb0e6d9f61c5d0296ba40052adfb4ab7a3
+Content-Transfer-Encoding: quoted-printable
+Content-Type: text/plain; charset="utf-8"
+
+ <https://www.ziprecruiter.com/km/AAHsZZ6u1M89bqlAab8rUU7ZkY6YYVHeA-MJhObr5=
+CuSzM_QNvYp3SwGzr9lcte4RAlm59VCtcUTC-AXE2MACRKGY35bss27zj2ajeT9xee9_SFn6-nP=
+8mGJexuiJmWzh7QJJeM3SIVjiAuzaHcCMyVt62kJahgOue_yribc9kxmWMcAvvd7-qIzQu9C7NG=
+GLFNtlNH1qSWyE7Oji1pCdzj5_m_tJY2ACsSbzuQmjM2U344gGzT5VfvAfeilrkrD26CD62_fPe=
+M4Ls5zz4wtsiHhIY-ll2eX9ck9DXC1LX9WYuxIXzJkn-klvPOG6cqv86u78AxLLGrs6V0iGuz63=
+uF4brSztCf7H0twOg?tsid=3D111000275>=20
+
+ Hi HUGO,=20
+
+ I recently found a Inventory Analyst job at Volt for you! I think you'd be=
+ a great fit for it.
+
+ If it looks right for you, take a look at the job details or go ahead and =
+apply now to get a head start.=20
+
+ Inventory Analyst=20
+ <https://www.ziprecruiter.com/km/AAGgvopndL4R_8phTaIvPbxgL6jFpg4E81km7wtdg=
+t6DMmkQ3R3gH0sFaCB2jKieYEVa9eHEG_GxxYhU0A_g2phBanE6Ffvs3jq7RV5339gd7ufHxvYL=
+ALu_85q-6tfsjjcFYFM9WeLAXJbj7W83gR0ONAOtmkZDsKD0qT-L4j5c-hvgmSL8BZFK3sDFK05=
+BsdMQQN9sO-6fedqkCS2HnE5KQpXgofHkAQB2j4HVApXz7p4Zlc4McZhe1G9thiKUymjCKmiQjS=
+AUjcvnhXqjKE8iQ4ofBnYFAeTE6H1sYmwS2LJ179ZSRklVOj-le-5rq4j8ewLOdrpPr5z09FAmQ=
+hCLcl9nQ6h45t3ABB60IlXU7WZFzCpQDW19JMWkYJg7?tsid=3D111000275&auth_token=3D5=
+_1785079301_QvFK9NU_h9bIbW_McvYUcl2Sf_mT9DRM5COGCGJ-I8E&contact_id=3Dedd0ef=
+09&expires=3D1785424901>=20
+ * Volt=20
+ * San Diego, CA=20
+ *=20
+$39 / hr
+
+ *=20
+Full-Time
+
+ *=20
+Medical, Vision, Dental, Life, Retirement
+
+ * New=20
+
+ 1-Click Apply  <https://www.ziprecruiter.com/km/AAE5CkRoTqATFVx2S-3vOF_tvZ=
+V2ExjmzdJmCze3I_YIZsRidkIwHQg8lbhci-X5AtOm2k69_RwQHbx_X4PB5xrfnrMjlD119o3uN=
+7L_pE2KPuYcCRMoI9_GpYXCEH7UYRCRwU4Pm1wzTOTFJQRqYUziI9dIZDx0tM8SuRLkQUJeyzlv=
+-xbYDtgP_y8_YvrePKxUbzwq_PbWWSsfn8zeIbT5hBj5ooVehPhO-N4BNNpc7jKY9-YAa4x2xdO=
+d8prfP_3wH5yxVhfjjqid5jnDFYz9-aUME6phPbW6Wxzd40pN6mh8oq42oq_BH4f3YCrC4w5XjL=
+Is64mvBio-gS1xN-RvWWO70fzqfUbxQ6OppOeThbKwhHdEJqPrXOube_G2WKgwvHrRLFl66IekF=
+QTUw23ehygwK1KuN76Q6c3YROFGvbx81962GoRlY5hKR6E_Yt8hc0h4e8gHiNu-6SVFgkYVmbw9=
+6DLTyxrPePe6TmG9?tsid=3D111000275&auth_token=3D5_1785079301_QvFK9NU_h9bIbW_=
+McvYUcl2Sf_mT9DRM5COGCGJ-I8E&contact_id=3Dedd0ef09&expires=3D1785424901>=20
+
+ View Details  <https://www.ziprecruiter.com/km/AAGgvopndL4R_8phTaIvPbxgL6j=
+Fpg4E81km7wtdgt6DMmkQ3R3gH0sFaCB2jKieYEVa9eHEG_GxxYhU0A_g2phBanE6Ffvs3jq7RV=
+5339gd7ufHxvYLALu_85q-6tfsjjcFYFM9WeLAXJbj7W83gR0ONAOtmkZDsKD0qT-L4j5c-hvgm=
+SL8BZFK3sDFK05BsdMQQN9sO-6fedqkCS2HnE5KQpXgofHkAQB2j4HVApXz7p4Zlc4McZhe1G9t=
+hiKUymjCKmiQjSAUjcvnhXqjKE8iQ4ofBnYFAeTE6H1sYmwS2LJ179ZSRklVOj-le-5rq4j8ewL=
+OdrpPr5z09FAmQhCLcl9nQ6h45t3ABB60IlXU7WZFzCpQDW19JMWkYJg7?tsid=3D111000275&=
+auth_token=3D5_1785079301_QvFK9NU_h9bIbW_McvYUcl2Sf_mT9DRM5COGCGJ-I8E&conta=
+ct_id=3Dedd0ef09&expires=3D1785424901>=20
+
+ View More Jobs  <https://www.ziprecruiter.com/km/AAEGLR7LOt47TIP9U9PnBYTD8=
+UDK7TL-iwbVOxnRDS6JQPpfVs_cFiwJU4Pefqu8091x0Fm_bLDxhfijE5SLkNP_ZQQMIqClf3ek=
+qUBoAPh48YVtHGB3Z3qsKSEef3DEzC2xN3dmkZKhM48uoz8iCfeG_b9AlkLT55kidHoX7yG9tp4=
+xVYnHQPB9w7oNuYRgzxYpO5taZkQQySzIQP4Xo56eh0BnnirZ0yCREJCCdYQVLHbqJIHcqj6mHo=
+8M0IsQNWfDFgqC2vL84s9kyqM2iKKYWr_YxZAlfcc5od270dmV1tkJeQcJwQZ3TklF2teuehQZq=
+33Ml6iTEjTSRW4GrqlS30vyWZNzYDDMyA?tsid=3D111000275>=20
+
+ Phil=20
+ Your Career Advisor=20
+
+ Get Hired Faster=20
+ Download the free iOS or Android app and search millions of jobs from anyw=
+here.=20
+ <https://www.ziprecruiter.com/ekm/AAGdkcTRdcd_A7i7OkxciHXA7gqy2PkSHX7J4tpW=
+0X2FlyxUyN6laun5fRZhrQ8eN9gZ81AnGDJY2HexlCR3v5DMj2Rnve3wYfyLPnFwVg1Ak5swv6a=
+qs7H14QHK7RgMVFfBR6TMKHZwtUMNry9CNdtsSforkf_OLxOZ5jF70bnKbZCQe9s1i0bGXlk1T3=
+jZEA7R0D8RenhdyiIquePzaVWS80jBeyAx_ZojGYlOPYiVMEkJxHLhy6piimfmBcAdEG2LlEV98=
+5FGuhoMYnyDki1sLLRD8rRVhnxeuS7YxajiOkynv_7_n9RRvGrsoum3mtlMzdtQ2fcFjjw5g0TT=
+WpkWgjvE5Yq_G2tAd5skR3yO?tsid=3D111000275>  <https://www.ziprecruiter.com/e=
+km/AAGFC9CLqHC6qu4qePNoJc5-fBkpoB12rJ2uQxkISKhP8_Ln6pMZNQPy3W2sfhP0NZZYV-OD=
+Hh3BVFUIgnbuHAReiaGX_t-kgM3UMj16KnFhnneST8ehN7ZTjTk2nHYmZUJvyj0BzRAdOgy87YD=
+x5HjJCSLeZxOvhW1kP7PRQcCNLGWXFIkwyiAu-RAJXTQVWP87VrZGZzwZr-HLtA-JGGPy1qzPho=
+24ui20toAnL8I0o2xWWOK5zKfA6TGUhhQOS5gjICGlqMRHIDbqu5WtQoL4CvSAj7sRx7Zmlrrge=
+O5WdOHUHlAHsqVpmROvCoVFUqkE5L4o8v6YdMjzdN8JnPDf7p-jvnMRtEVQkqudDVb0?tsid=3D=
+111000275>=20
+
+ ZipRecruiter, Inc. =C2=A9 All Rights Reserved Worldwide
+ 3000 Ocean Park Blvd., Suite 3000, Santa Monica, CA 90405, USA=20
+ ZipRecruiter provides pay estimates when companies do not include pay in t=
+he job post. ZipRecruiter estimates are based on pay from similar jobs (in =
+similar areas), may change over time, and may not be indicative of pay for =
+the position. ZipRecruiter provides estimates for convenience only, and mak=
+es no guarantees or promises regarding any expected or actual job payment.=
+=20
+ Apple and the Apple logo are registered trademarks of Apple Inc. Google Pl=
+ay is a trademark of Google LLC.=20
+Logos provided by Logo.dev <https://logo.dev>=20
+Privacy Policy <https://www.ziprecruiter.com/ekm/AAEj1NC8TWQweCh7g4H5O-3Tat=
+9UTqsEMK_hnm9ON7RwG8xuQD1XRUbbvm21KMUY9PloLoDBzECMtNgUydB77l_bjlZG4Ufm8aQH2=
+_9JyAEvtzRCIOioU1DEKjB9O3LktUnUXperb4c_pTZuc2tH2guBNb2dGTFtTC7zYw_QNmQYiXvi=
+OIq35o8DBqm9cGAOrBEHJhFIK1QYM2O9da6b5HzlMIn4PB2X7sCQ7Ins1ieIxzqjyF5y-3YJ7kc=
+ldOZTGnJ-vcHN8kcFYU7xBuNsLQWU_rUtKVLrXg3cuweppc5M87x8BopnVk4KpgJrdw-rFUxT4V=
+1lQM5QldA2cW3GdQDJkVwl?tsid=3D111000275> | Unsubscribe <https://www.ziprecr=
+uiter.com/ekm/AAFn0FXCVmWqO8sfPS884PCKOfdQyUcqvalhrbIYzi28EqzG3EKVWfavsonff=
+abofDQ6zvJkJBfFGTorBrXitlRqdP3pp7xPPf7agQX-YW_x1Rtl31ieXI2g-4pSY8ycLj_S99SY=
+3A1cL0Q-Fujuuh7VRDZJ5c7becd5T-AlxDkIv_J9FcsX4owubPAJPuaKm3Ac9eljdx3DHfN_LeN=
+UcGbXC7fdGAh1uzzi_d1nbZFzJP5QjFNG0B6TTC43oyHRqSqywe-EF1NvOU_4HpPhXLiAcHcgbd=
+edpmGr7e1JytrS3H5spF5t0N2idDfr1C0_NAlXdr6EK4t9eXkqPSWenrQqUZ-VUO-7Lr9xNaJ6g=
+5Fg1C-6QPC9r2LWrGHfoKnZtOBtLjZP_qoMdxWvhy5bH_7G8E9bdBTHM1ldSRJXI1uru_FuPyXg=
+ECJX510iAZ9aDRlbmsGwlcS14FGN2zPPSTSI_6YW0C1erVJ0dB-wx5PaNCliEr-GfVXnNSo-qTc=
+jWDdnEK7vhbO28sKH7TfKKnDmyjUDr9sOjsOFePpyIy2DcSMdB3b1OPGIi_8RUQTWl1dEFWnEJn=
+7VuCDedRCzsD-56Y2DmJIxEB_g7DCqYszl?tsid=3D111000275>=20
+
+--ba16d5faa334503e9740472d30cb0e6d9f61c5d0296ba40052adfb4ab7a3
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+<!DOCTYPE html>
+<html lang=3D"en" xmlns=3D"http://www.w3.org/1999/xhtml" xmlns:v=3D"urn:sch=
+emas-microsoft-com:vml" xmlns:o=3D"urn:schemas-microsoft-com:office:office"=
+>
+<head>
+<meta charset=3D"utf-8"><meta name=3D"viewport" content=3D"width=3Ddevice-w=
+idth"><meta http-equiv=3D"X-UA-Compatible" content=3D"IE=3Dedge"><meta name=
+=3D"x-apple-disable-message-reformatting"><meta name=3D"format-detection" c=
+ontent=3D"telephone=3Dno,address=3Dno,email=3Dno,date=3Dno,url=3Dno"><meta =
+name=3D"color-scheme" content=3D"light dark">
+<meta name=3D"supported-color-schemes" content=3D"light dark">
+<title></title><!--[if gte mso 9]><xml><o:OfficeDocumentSettings><o:PixelsP=
+erInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml>
+<![endif]--><!--[if mso]>
+<style>*{font-family:sans-serif !important;}
+</style>
+<![endif]--><!--[if !mso]><!--><!-- insert web font reference, eg:
+<link href=3D'https://fonts.googleapis.com/css?family=3DRoboto:400,700' rel=
+=3D'stylesheet' type=3D'text/css'> -->
+<!--<![endif]--><style>:root{color-scheme:light dark;supported-color-scheme=
+s:light dark;}html,body{margin:0 auto!important;padding:0!important;height:=
+100%!important;width:100%!important;}h1,h2,h3,p,a,ul,li{margin:0;padding:0;=
+border:0;}.no-inline--paragraph-spacing p+p{margin-top:12px;}*{-ms-text-siz=
+e-adjust:100%;-webkit-text-size-adjust:100%;}div[style*=3D"margin:16px 0"]{=
+margin:0!important;}#MessageViewBody,#MessageWebViewDiv{width:100%!importan=
+t;}table,td{mso-table-lspace:0pt!important;mso-table-rspace:0pt
+!important;}table{border-spacing:0!important;border-collapse:collapse!impor=
+tant;table-layout:fixed!important;margin:0 auto!important;}img{-ms-interpol=
+ation-mode:bicubic;}a{text-decoration:none;}a[x-apple-data-detectors],.unst=
+yle-auto-detected-links a,.aBn{border-bottom:0!important;cursor:default!imp=
+ortant;color:inherit!important;text-decoration:none!important;font-size:inh=
+erit!important;font-family:inherit!important;font-weight:inherit!important;=
+line-height:inherit!important;}.a6S{display:none
+!important;opacity:0.01!important;}.im{color:inherit!important;}img.g-img+d=
+iv{display:none!important;}@media only screen and (min-device-width:320px) =
+and (max-device-width:374px){u~div .no-inline--email-container{min-width:32=
+0px!important;width:100vw;}.no-inline--two-col-jc{width:calc(100vw - 48px);=
+} }@media only screen and (min-device-width:375px) and (max-device-width:41=
+3px){u~div .no-inline--email-container{min-width:375px!important;width:100v=
+w;}.no-inline--two-col-jc{width:calc(100vw - 48px);} }@media only screen an=
+d (min-device-width:414px){u~div .no-inline--email-container{min-width:414p=
+x!important;width:100vw;}.no-inline--two-col-jc{width:calc(100vw - 48px);} =
+}
+</style><style>.no-inline--button-td-primary,.no-inline--button-a-primary,.=
+no-inline--button-td-white,.no-inline--button-a-white{transition:all 100ms =
+ease-in;}.no-inline--button-a-primary:hover{background:#016560!important;}.=
+no-inline--button-a-white:hover{background:#F2F4F4!important;}.no-inline--j=
+ob-title-link-a{color:#1576c1}.no-inline--job-title-link-a:visited{color:#6=
+e20ec!important;}.no-inline--job-title-link-a:hover{text-decoration:underli=
+ne!important;color:#166AA8!important;}
+=2Eno-inline--stack-col.no-inline--resp=
+onsive-stack-col{padding:5px;}@media s=
+creen and (max-width:480px){.no-inline--stack-col,.no-inline--stack-col-cen=
+ter{display:block!important;max-width:100%!important;direction:ltr!importan=
+t;}.no-inline--stack-col.no-inline--responsive-stack-col{padding:0 12px 10p=
+x 12px;}.no-inline--stack-col-center{text-align:center!important;}.no-inlin=
+e--center-on-narrow{text-align:center!important;display:block!important;mar=
+gin-left:auto!important;margin-right:auto!important;float:none!important;}t=
+able.no-inline--center-on-narrow{display:
+inline-block!important;} }@media (prefers-color-scheme:dark){.no-inline--em=
+ail-bg{background:#111111!important;}.no-inline--darkmode-bg{background:#22=
+2222!important;}h1,h2,h3,p,li,.no-inline--darkmode-text,.no-inline--email-c=
+ontainer a:not([class]){color:#F7F7F9!important;}td.no-inline--button-td-pr=
+imary,td.no-inline--button-td-primary a{color:#ffffff!important;border-widt=
+h:1px!important;border-color:#00706C!important;}td.no-inline--button-td-whi=
+te,td.no-inline--button-td-white a{background:#222222!important;
+border-color:#ffffff!important;border-width:1px!important;color:#ffffff!imp=
+ortant;}td.no-inline--button-td-white:hover,td.no-inline--button-td-white a=
+:hover{background:#333333!important;}.no-inline--footer td{color:#aaaaaa!im=
+portant;}.no-inline--darkmode-surface-secondary{background-color:#333333!im=
+portant;color:#F7F7F9!important;}.no-inline--darkmode-fullbleed-bg{backgrou=
+nd-color:#0F3016!important;}.no-inline--pill-box{background-color:#333333!i=
+mportant;}.no-inline--new-badge{background-color:
+#333333!important;color:#F7F7F9!important;}.no-inline--zr-logo{content:url(=
+'https://ziprecruiter.com/img/email/ziprecruiter-logo-email-darkmode-280px@=
+2x.png')!important;width:140px!important;height:32px!important;} }.no-inlin=
+e--bsf-badge{background-color:#F0ECFD;border-radius:4px;vertical-align:top;=
+display:inline-block;padding:4px 8px 4px 4px;color:#592691;font-size:12px;f=
+ont-style:normal;font-weight:500;line-height:16px;letter-spacing:0.24px;}.n=
+o-inline--bsf-badge img{width:16px;height:16px;
+margin-right:4px;vertical-align:middle;}.bsf-response-card{background:linea=
+r-gradient(to right,#9658E4,#CCD3D3);border-radius:12px;padding:2px;margin:=
+12px 0;}.no-inline--bsf-card-inner{background-color:#ffffff;border-radius:1=
+0px;padding:12px 16px;}.no-inline--new-badge{background-color:#E5F0FB;borde=
+r-radius:4px;padding:4px 8px;color:#1A4C74;vertical-align:top;display:inlin=
+e-block;font-size:12px;font-style:normal;font-weight:500;line-height:16px;l=
+etter-spacing:0.24px;}
+@media (prefers-color-scheme:dark){.no-inline--bsf-badge{background-color:#=
+333333!important;color:#F7F7F9!important;}.bsf-response-card{background:lin=
+ear-gradient(to right,#7B3FC2,#444444)!important;}.no-inline--bsf-card-inne=
+r{background-color:#222222!important;}.no-inline--bsf-card-name{color:#F7F7=
+F9!important;}.no-inline--bsf-card-text{color:#CCCCCC!important;} }
+</style><style>[[[css]]]
+</style>
+</head><body width=3D"100%" style=3D"margin:0;mso-line-height-rule:exactly;=
+background-color:#f2f4f4;padding:0;" class=3D"no-inline--email-bg bg-zr-bac=
+kground-gray"><center role=3D"article" aria-roledescription=3D"email" lang=
+=3D"en" style=3D"width:100%;background-color:#f2f4f4;" class=3D"no-inline--=
+email-bg bg-zr-background-gray">
+<!--[if mso | IE]>
+<table role=3D"presentation" border=3D"0" cellpadding=3D"0" cellspacing=3D"=
+0" width=3D"100%" class=3D"no-inline--darkmode-bg bg-zr-background-gray" st=
+yle=3D"background-color:#f2f4f4"><tr><td>
+<![endif]--> <div class=3D"no-inline--email-container"
+style=3D"max-width:550px;margin:0 auto;padding-top:24px;">=20
+<!--[if mso]>
+<table align=3D"center" role=3D"presentation" cellspacing=3D"0" cellpadding=
+=3D"0" border=3D"0" style=3D"max-width:550px"><tr><td>
+<![endif]-->
+
+<table class=3D"bg-zr-white no-inline--darkmode-bg" align=3D"center" role=
+=3D"presentation" cellspacing=3D"0" cellpadding=3D"0" border=3D"0" width=3D=
+"100%" style=3D"background-color:#FFFFFF;margin:auto;background:#ffffff;"> =
+        <tr><td aria-hidden=3D"true" height=3D"24" style=3D"font-size:0;lin=
+e-height:0px;"> &nbsp;
+        </td></tr>
+ <tr><td align=3D"center"> <table border=3D"0" cellspacing=3D"0" cellpaddin=
+g=3D"0" style=3D"border-collapse:collapse;"><tr><td style=3D"text-align:lef=
+t;"> <a href=3D"https://www.ziprecruiter.com/km/AAHsZZ6u1M89bqlAab8rUU7ZkY6=
+YYVHeA-MJhObr5CuSzM_QNvYp3SwGzr9lcte4RAlm59VCtcUTC-AXE2MACRKGY35bss27zj2aje=
+T9xee9_SFn6-nP8mGJexuiJmWzh7QJJeM3SIVjiAuzaHcCMyVt62kJahgOue_yribc9kxmWMcAv=
+vd7-qIzQu9C7NGGLFNtlNH1qSWyE7Oji1pCdzj5_m_tJY2ACsSbzuQmjM2U344gGzT5VfvAfeil=
+rkrD26CD62_fPeM4Ls5zz4wtsiHhIY-ll2eX9ck9DXC1LX9WYuxIXzJkn-klvPOG6cqv86u78Ax=
+LLGrs6V0iGuz63uF4brSztCf7H0twOg?tsid&#x3D;111000275" target=3D"_blank" styl=
+e=3D"display:inline-block;">=20
+<img class=3D"no-inline--zr-logo" src=3D"https://ziprecruiter.com/img/email=
+/ziprecruiter-greener-logo-email-300px@2x.png" width=3D"150" height=3D"42">=
+  </a>
+</td></tr></table>
+
+
+</td></tr>         <tr><td aria-hidden=3D"true" height=3D"16" style=3D"font=
+-size:0;line-height:0px;"> &nbsp;
+        </td></tr>
+ </table>=20
+<table class=3D"zr-email-table no-inline--darkmode-bg" align=3D"center" rol=
+e=3D"presentation" cellspacing=3D"0" cellpadding=3D"0" border=3D"0" width=
+=3D"100%" style=3D"background-color:#FFFFFF;color:#2F3639;border-collapse:c=
+ollapse;border:none;display:block;margin:auto;"><tr><td class=3D"pt-9 pb-3 =
+px-6 font-bold no-inline--darkmode-text" style=3D"padding-left:24px;padding=
+-right:24px;padding-bottom:12px;padding-top:36px;font-weight:700;vertical-a=
+lign:top;text-align:left;font-family:Arial,sans-serif;font-size:16px;
+line-height:24px;">  Hi HUGO,=20
+</td></tr><tr><td id=3D"zr-job-posted-greeting" style=3D"padding-left:24px;=
+padding-right:24px;vertical-align:top;text-align:left;font-family:Arial,san=
+s-serif;font-size:16px;line-height:24px;"><p style=3D"margin:0;">=20
+   =20
+        I recently found a Inventory Analyst job at Volt for you! I think y=
+ou'd be a great fit for it.<br><br> If it looks right for you, take a look =
+at the job details or go ahead and <b>apply now</b> to get a head start.
+   =20
+ </p>
+</td></tr><tr><td style=3D"padding-left:24px;padding-right:24px;padding-bot=
+tom:0;padding-top:24px;vertical-align:top;text-align:left;font-family:Arial=
+,sans-serif;font-size:16px;line-height:24px;">=20
+<table id=3D"zr-job-card-0" class=3D"block pt-6 pb-2 border-solid border bo=
+rder-zr-border-gray rounded-xl text-zr-text-primary no-inline--darkmode-bg"=
+ border=3D"0" cellspacing=3D"0" cellpadding=3D"0" width=3D"100%" style=3D"d=
+isplay:block;border-radius:12px;border-width:1px;border-style:solid;border-=
+color:#CCD3D3;padding-bottom:8px;padding-top:24px;color:#002325;">         =
+     <tr style=3D"display:block;color:#F2F4F4;"><td style=3D"padding-left:2=
+4px;padding-right:24px;"> <img src=3D"https://www.ziprecruiter.com/svc/foto=
+mat/public-nosensitive-ziprecruiter-logos/company/221405ca.png" alt=3D"Volt=
+" style=3D"width:50px">
+            </td></tr>=20
+
+                <tr><td aria-hidden=3D"true" height=3D"10" style=3D"font-si=
+ze:0;line-height:0px;"> &nbsp;
+        </td></tr>
+ <tr><td style=3D"padding-left:24px;padding-right:24px;"> <a href=3D"https:=
+//www.ziprecruiter.com/km/AAGgvopndL4R_8phTaIvPbxgL6jFpg4E81km7wtdgt6DMmkQ3=
+R3gH0sFaCB2jKieYEVa9eHEG_GxxYhU0A_g2phBanE6Ffvs3jq7RV5339gd7ufHxvYLALu_85q-=
+6tfsjjcFYFM9WeLAXJbj7W83gR0ONAOtmkZDsKD0qT-L4j5c-hvgmSL8BZFK3sDFK05BsdMQQN9=
+sO-6fedqkCS2HnE5KQpXgofHkAQB2j4HVApXz7p4Zlc4McZhe1G9thiKUymjCKmiQjSAUjcvnhX=
+qjKE8iQ4ofBnYFAeTE6H1sYmwS2LJ179ZSRklVOj-le-5rq4j8ewLOdrpPr5z09FAmQhCLcl9nQ=
+6h45t3ABB60IlXU7WZFzCpQDW19JMWkYJg7?tsid&#x3D;111000275&amp;auth_token&#x3D=
+;5_1785079301_QvFK9NU_h9bIbW_McvYUcl2Sf_mT9DRM5COGCGJ-I8E&amp;contact_id&#x=
+3D;edd0ef09&amp;expires&#x3D;1785424901" title=3D"Inventory Analyst" id=3D"=
+zr-job-title-YdnPXrEAtaT8Dlct03iJ5g" target=3D"_blank"><h1 style=3D"display=
+:inline;font-size:24px;font-weight:700;color:#1576c1;text-decoration-line:n=
+one;"> Inventory Analyst
+</h1></a><ul style=3D"margin:0;padding:0;padding-top:8px;list-style-type:no=
+ne;">  <li style=3D"padding-bottom:0;">Volt</li>=20
+                     <li style=3D"padding-bottom:16px;">San Diego, CA</li>=
+=20
+                         <li style=3D"padding-top:4px;padding-bottom:4px;">
+<img src=3D"https://ziprecruiter.com/img/email/salary-coin-email-48px@2x.pn=
+g" width=3D"24" height=3D"24" alt=3D"Salary Coin" style=3D"margin:0;display=
+:inline;vertical-align:top;"><p style=3D"margin:0;display:inline;padding:1p=
+x;vertical-align:top;">$39 / hr</p>  </li>=20
+                         <li style=3D"padding-top:4px;padding-bottom:4px;">=
+ <img src=3D"https://ziprecruiter.com/img/email/briefcase-email-48px@2x.png=
+" width=3D"24" height=3D"24" alt=3D"Briefcase" style=3D"margin:0;display:in=
+line;vertical-align:top;"><p style=3D"margin:0;display:inline;padding:1px;v=
+ertical-align:top;">Full-Time</p></li>=20
+                         <li style=3D"padding-top:4px;padding-bottom:4px;">=
+ <img src=3D"https://ziprecruiter.com/img/email/medical-benefits-email-48px=
+@2x.png" width=3D"24" height=3D"24" alt=3D"Plus Sign" style=3D"margin:0;dis=
+play:inline;vertical-align:top;"><p style=3D"margin:0;display:inline;paddin=
+g:1px;vertical-align:top;">Medical, Vision, Dental, Life, Retirement</p></l=
+i>=20
+                     <li style=3D"padding-top:4px;padding-bottom:4px;">=20
+
+                         <sup class=3D"no-inline--darkmode-text no-inline--=
+new-badge">New</sup>  </li></ul>
+</td></tr>         <tr><td aria-hidden=3D"true" height=3D"15" style=3D"font=
+-size:0;line-height:0px;"> &nbsp;
+        </td></tr>
+
+
+           =20
+             <tr><td align=3D"center" valign=3D"top" style=3D"padding-left:=
+12px;padding-right:12px;font-size:0;">
+
+            <!--[if mso]>
+
+            <table role=3D"presentation" border=3D"0" cellspacing=3D"0" cel=
+lpadding=3D"0" width=3D"450"><tr><td valign=3D"top" width=3D"215">
+
+            <![endif]-->  <div class=3D"no-inline--stack-col no-inline--res=
+ponsive-stack-col" style=3D"display:inline-block;min-width:100px;max-width:=
+47%;">
+<table role=3D"presentation" cellspacing=3D"0" cellpadding=3D"0" border=3D"=
+0" width=3D"100%"><tr><td>
+<table role=3D"presentation" cellspacing=3D"0" cellpadding=3D"0" border=3D"=
+0" width=3D"100%" style=3D"font-size:14px;text-align:left;"><tr>=20
+
+
+               =20
+               =20
+                 <td class=3D"no-inline--button-td-primary rounded-lg" styl=
+e=3D"border-radius:8px;background-color:#00706C;"> <a href=3D"https://www.z=
+iprecruiter.com/km/AAE5CkRoTqATFVx2S-3vOF_tvZV2ExjmzdJmCze3I_YIZsRidkIwHQg8=
+lbhci-X5AtOm2k69_RwQHbx_X4PB5xrfnrMjlD119o3uN7L_pE2KPuYcCRMoI9_GpYXCEH7UYRC=
+RwU4Pm1wzTOTFJQRqYUziI9dIZDx0tM8SuRLkQUJeyzlv-xbYDtgP_y8_YvrePKxUbzwq_PbWWS=
+sfn8zeIbT5hBj5ooVehPhO-N4BNNpc7jKY9-YAa4x2xdOd8prfP_3wH5yxVhfjjqid5jnDFYz9-=
+aUME6phPbW6Wxzd40pN6mh8oq42oq_BH4f3YCrC4w5XjLIs64mvBio-gS1xN-RvWWO70fzqfUbx=
+Q6OppOeThbKwhHdEJqPrXOube_G2WKgwvHrRLFl66IekFQTUw23ehygwK1KuN76Q6c3YROFGvbx=
+81962GoRlY5hKR6E_Yt8hc0h4e8gHiNu-6SVFgkYVmbw96DLTyxrPePe6TmG9?tsid&#x3D;111=
+000275&amp;auth_token&#x3D;5_1785079301_QvFK9NU_h9bIbW_McvYUcl2Sf_mT9DRM5CO=
+GCGJ-I8E&amp;contact_id&#x3D;edd0ef09&amp;expires&#x3D;1785424901" class=3D=
+"no-inline--button-a-primary button-responsive apply-button-square" target=
+=3D"_blank" id=3D"zr-one-click-apply-link-0" style=3D"text-decoration:none;=
+border-radius:8px;text-align:center;font-weight:bold;width:100%;display:blo=
+ck;padding:12px 0px;background-color:#00706C;color:#FFFFFF;border-color:#00=
+706C;
+                border-width:1px;border-style:solid;"> 1-Click Apply </a>
+                </td>=20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+           =20
+                             </tr></table>
+</td></tr></table></div>=20
+
+
+            <!--[if mso]>
+
+            </td><td valign=3D"top" width=3D"215">
+
+            <![endif]-->  <div class=3D"no-inline--stack-col no-inline--res=
+ponsive-stack-col" style=3D"display:inline-block;min-width:100px;max-width:=
+47%;">
+<table role=3D"presentation" cellspacing=3D"0" cellpadding=3D"0" border=3D"=
+0" width=3D"100%"><tr><td>
+<table role=3D"presentation" cellspacing=3D"0" cellpadding=3D"0" border=3D"=
+0" width=3D"100%" style=3D"font-size:14px;text-align:left;"><tr>=20
+
+                 <td class=3D"no-inline--button-td-white rounded-lg" style=
+=3D"border-radius:8px;background-color:#FFFFFF;"> <a href=3D"https://www.zi=
+precruiter.com/km/AAGgvopndL4R_8phTaIvPbxgL6jFpg4E81km7wtdgt6DMmkQ3R3gH0sFa=
+CB2jKieYEVa9eHEG_GxxYhU0A_g2phBanE6Ffvs3jq7RV5339gd7ufHxvYLALu_85q-6tfsjjcF=
+YFM9WeLAXJbj7W83gR0ONAOtmkZDsKD0qT-L4j5c-hvgmSL8BZFK3sDFK05BsdMQQN9sO-6fedq=
+kCS2HnE5KQpXgofHkAQB2j4HVApXz7p4Zlc4McZhe1G9thiKUymjCKmiQjSAUjcvnhXqjKE8iQ4=
+ofBnYFAeTE6H1sYmwS2LJ179ZSRklVOj-le-5rq4j8ewLOdrpPr5z09FAmQhCLcl9nQ6h45t3AB=
+B60IlXU7WZFzCpQDW19JMWkYJg7?tsid&#x3D;111000275&amp;auth_token&#x3D;5_17850=
+79301_QvFK9NU_h9bIbW_McvYUcl2Sf_mT9DRM5COGCGJ-I8E&amp;contact_id&#x3D;edd0e=
+f09&amp;expires&#x3D;1785424901" class=3D"no-inline--button-a-white button-=
+responsive apply-button-square" target=3D"_blank" id=3D"zr-view-details-lin=
+k-0" style=3D"text-decoration:none;border-radius:8px;text-align:center;font=
+-weight:bold;width:100%;display:block;padding:12px 0px;background-color:#FF=
+FFFF;color:#002325;border-width:1px;border-style:solid;"> View Details
+                </a>
+                </td>=20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+               =20
+
+                             </tr></table>
+</td></tr></table></div>=20
+
+
+            <!--[if mso]>
+
+            </td></tr></table>
+
+            <![endif]-->
+
+            </td></tr>
+
+       =20
+ </table>=20
+
+</td></tr><tr><td style=3D"padding-left:24px;padding-right:24px;padding-top=
+:20px;vertical-align:top;text-align:left;font-family:Arial,sans-serif;font-=
+size:16px;line-height:24px;">
+<table role=3D"presentation" cellspacing=3D"0" cellpadding=3D"0" border=3D"=
+0" width=3D"100%"><tr> <td class=3D"no-inline--button-td-white rounded-xl" =
+style=3D"border-radius:12px;background-color:#FFFFFF;"> <a href=3D"https://=
+www.ziprecruiter.com/km/AAEGLR7LOt47TIP9U9PnBYTD8UDK7TL-iwbVOxnRDS6JQPpfVs_=
+cFiwJU4Pefqu8091x0Fm_bLDxhfijE5SLkNP_ZQQMIqClf3ekqUBoAPh48YVtHGB3Z3qsKSEef3=
+DEzC2xN3dmkZKhM48uoz8iCfeG_b9AlkLT55kidHoX7yG9tp4xVYnHQPB9w7oNuYRgzxYpO5taZ=
+kQQySzIQP4Xo56eh0BnnirZ0yCREJCCdYQVLHbqJIHcqj6mHo8M0IsQNWfDFgqC2vL84s9kyqM2=
+iKKYWr_YxZAlfcc5od270dmV1tkJeQcJwQZ3TklF2teuehQZq33Ml6iTEjTSRW4GrqlS30vyWZN=
+zYDDMyA?tsid&#x3D;111000275" style=3D"font-size:14px;text-decoration:none;b=
+order-radius:8px;text-align:center;font-weight:bold;width:100%;display:bloc=
+k;padding:12px 0px;background-color:#FFFFFF;color:#002325;border-width:1px;=
+border-style:solid;border:1px solid #ccd3d3;"
+class=3D"no-inline--button-a-white apply-button-square button-responsive ro=
+unded-xl text-sm" target=3D"_blank" id=3D"zr-view-jobs"> View More Jobs </a=
+>
+</td>
+ </tr></table>
+</td></tr>  </table>=20
+
+<table class=3D"bg-zr-white no-inline--darkmode-bg" align=3D"center" role=
+=3D"presentation" cellspacing=3D"0" cellpadding=3D"0" border=3D"0" width=3D=
+"100%" style=3D"background-color:#FFFFFF;margin:auto;background:#ffffff;">=
+=20
+
+     <tr><td width=3D"100%" valign=3D"top" align=3D"left" style=3D"padding:=
+32px 24px 32px 24px"> <table align=3D"left" border=3D"0" cellspacing=3D"0" =
+cellpadding=3D"0" style=3D"border-collapse:collapse;"><tr>  <td style=3D"pa=
+dding-right:8px;"> <img src=3D"https://ziprecruiter.com/img/email/phil_new.=
+png" alt=3D"Phil, your career advisor" height=3D"62" width=3D"62" style=3D"=
+margin:0 auto;display:block;width:62px;height:62px;" border=3D"0">
+</td>  <td>
+<table border=3D"0" cellspacing=3D"0" cellpadding=3D"0" style=3D"border-col=
+lapse:collapse;"><tr><td class=3D"no-inline--darkmode-text" style=3D"color:=
+#2F3639;font-family:Arial,sans-serif;font-weight:700;font-size:16px;line-he=
+ight:21px;"> Phil
+</td></tr><tr><td class=3D"no-inline--darkmode-text" style=3D"color:#2F3639=
+;font-family:Arial,sans-serif;font-size:16px;line-height:24px;"> Your Caree=
+r Advisor
+</td></tr></table>
+</td></tr></table>
+
+
+</td></tr>  </table>
+
+<table align=3D"center" role=3D"presentation" cellspacing=3D"0" cellpadding=
+=3D"0" border=3D"0" width=3D"100%" style=3D"margin:auto;">         <tr><td =
+aria-hidden=3D"true" height=3D"25" style=3D"font-size:0;line-height:0px;"> =
+&nbsp;
+        </td></tr>
+ </table>
+
+<table class=3D"bg-zr-white no-inline--darkmode-bg" align=3D"center" role=
+=3D"presentation" cellspacing=3D"0" cellpadding=3D"0" border=3D"0" width=3D=
+"100%" style=3D"background-color:#FFFFFF;margin:auto;background:#ffffff;"> =
+ <tr><td style=3D"padding:0 24px 24px 24px">
+
+<table id=3D"zr-mobile-app-download-footer" style=3D"letter-spacing:0.025em=
+;"> <tr><td class=3D"text-zr-email-app-download-black no-inline--darkmode-t=
+ext" style=3D"color:#002325;font-family:Arial,sans-serif;padding-top:24px;f=
+ont-size:1.25rem;font-weight:bold;" colspan=3D"3"> Get Hired Faster
+</td></tr><tr><td style=3D"font-family:Arial,sans-serif;padding-top:12px;pa=
+dding-bottom:12px" colspan=3D"3"> Download the free iOS or Android app and =
+search millions of jobs from anywhere.
+</td></tr><tr><td style=3D"padding-right:12px"> <a href=3D"https://www.zipr=
+ecruiter.com/ekm/AAGdkcTRdcd_A7i7OkxciHXA7gqy2PkSHX7J4tpW0X2FlyxUyN6laun5fR=
+ZhrQ8eN9gZ81AnGDJY2HexlCR3v5DMj2Rnve3wYfyLPnFwVg1Ak5swv6aqs7H14QHK7RgMVFfBR=
+6TMKHZwtUMNry9CNdtsSforkf_OLxOZ5jF70bnKbZCQe9s1i0bGXlk1T3jZEA7R0D8RenhdyiIq=
+uePzaVWS80jBeyAx_ZojGYlOPYiVMEkJxHLhy6piimfmBcAdEG2LlEV985FGuhoMYnyDki1sLLR=
+D8rRVhnxeuS7YxajiOkynv_7_n9RRvGrsoum3mtlMzdtQ2fcFjjw5g0TTWpkWgjvE5Yq_G2tAd5=
+skR3yO?tsid&#x3D;111000275" target=3D"_blank"> <img src=3D"https://ziprecru=
+iter.com/img/email/download-from-app-store-badge-239x80.png" alt=3D"Downloa=
+d on the App Store" style=3D"height:40px;width:auto;display:block;"></a>
+</td><td> <a href=3D"https://www.ziprecruiter.com/ekm/AAGFC9CLqHC6qu4qePNoJ=
+c5-fBkpoB12rJ2uQxkISKhP8_Ln6pMZNQPy3W2sfhP0NZZYV-ODHh3BVFUIgnbuHAReiaGX_t-k=
+gM3UMj16KnFhnneST8ehN7ZTjTk2nHYmZUJvyj0BzRAdOgy87YDx5HjJCSLeZxOvhW1kP7PRQcC=
+NLGWXFIkwyiAu-RAJXTQVWP87VrZGZzwZr-HLtA-JGGPy1qzPho24ui20toAnL8I0o2xWWOK5zK=
+fA6TGUhhQOS5gjICGlqMRHIDbqu5WtQoL4CvSAj7sRx7ZmlrrgeO5WdOHUHlAHsqVpmROvCoVFU=
+qkE5L4o8v6YdMjzdN8JnPDf7p-jvnMRtEVQkqudDVb0?tsid&#x3D;111000275" target=3D"=
+_blank"> <img src=3D"https://ziprecruiter.com/img/email/download-from-googl=
+e-play-badge-270x80.png" alt=3D"Download on the Google Play" style=3D"heigh=
+t:40px;width:auto;display:block;"></a>
+</td><td style=3D"width:100%">
+</td></tr>
+ </table>
+
+</td></tr>  </table><table align=3D"center" role=3D"presentation" cellspaci=
+ng=3D"0" cellpadding=3D"0" border=3D"0" width=3D"100%" style=3D"margin:auto=
+;text-align:center;color:#4D6566" class=3D"no-inline--footer">         <tr>=
+<td aria-hidden=3D"true" height=3D"35" style=3D"font-size:0;line-height:0px=
+;"> &nbsp;
+        </td></tr>
+ <tr><td style=3D"font-family:Arial,sans-serif;font-size:12px;letter-spacin=
+g:0.025em;color:#4D6566;"> ZipRecruiter, Inc. &copy; All Rights Reserved Wo=
+rldwide<br> 3000 Ocean Park Blvd., Suite 3000, Santa Monica, CA 90405, USA
+
+</td></tr>  <tr><td id=3D"zr-estimated-pay-footer" style=3D"font-family:Ari=
+al,sans-serif;font-size:12px;letter-spacing:0.025em;color:#4D6566;padding:8=
+px;">  ZipRecruiter provides pay estimates when companies do not include pa=
+y in the job post. ZipRecruiter estimates are based on pay from similar job=
+s (in similar areas), may change over time, and may not be indicative
+of pay for the position. ZipRecruiter provides estimates for convenience on=
+ly, and makes no guarantees or promises regarding any expected or actual jo=
+b payment.=20
+
+
+</td></tr>=20
+
+
+
+     <tr><td style=3D"font-family:Arial,sans-serif;font-size:12px;letter-sp=
+acing:0.025em;color:#4D6566;"> Apple and the Apple logo are registered trad=
+emarks of Apple Inc. Google Play is a trademark of Google LLC.
+
+</td></tr>=20
+
+
+
+     <tr><td style=3D"padding:8px"> <a href=3D"https://logo.dev" class=3D"n=
+o-inline--darkmode-text text-xs underline font-sans tracking-wide" style=3D=
+"font-family:Arial,sans-serif;font-size:12px;letter-spacing:0.025em;text-de=
+coration-line:underline;color:#4D6566;" target=3D"_blank">Logos provided by=
+ Logo.dev</a>
+
+</td></tr>  <tr><td style=3D"font-family:Arial,sans-serif;font-weight:bold;=
+padding:8px;font-size:14px;color:#002325;"> <a href=3D"https://www.ziprecru=
+iter.com/ekm/AAEj1NC8TWQweCh7g4H5O-3Tat9UTqsEMK_hnm9ON7RwG8xuQD1XRUbbvm21KM=
+UY9PloLoDBzECMtNgUydB77l_bjlZG4Ufm8aQH2_9JyAEvtzRCIOioU1DEKjB9O3LktUnUXperb=
+4c_pTZuc2tH2guBNb2dGTFtTC7zYw_QNmQYiXviOIq35o8DBqm9cGAOrBEHJhFIK1QYM2O9da6b=
+5HzlMIn4PB2X7sCQ7Ins1ieIxzqjyF5y-3YJ7kcldOZTGnJ-vcHN8kcFYU7xBuNsLQWU_rUtKVL=
+rXg3cuweppc5M87x8BopnVk4KpgJrdw-rFUxT4V1lQM5QldA2cW3GdQDJkVwl?tsid&#x3D;111=
+000275" class=3D"no-inline--darkmode-text" style=3D"color:#2F3639;text-deco=
+ration:underline;font-weight:700;" target=3D"_blank">Privacy Policy</a> &nb=
+sp;|&nbsp;
+
+<a href=3D"https://www.ziprecruiter.com/ekm/AAFn0FXCVmWqO8sfPS884PCKOfdQyUc=
+qvalhrbIYzi28EqzG3EKVWfavsonffabofDQ6zvJkJBfFGTorBrXitlRqdP3pp7xPPf7agQX-YW=
+_x1Rtl31ieXI2g-4pSY8ycLj_S99SY3A1cL0Q-Fujuuh7VRDZJ5c7becd5T-AlxDkIv_J9FcsX4=
+owubPAJPuaKm3Ac9eljdx3DHfN_LeNUcGbXC7fdGAh1uzzi_d1nbZFzJP5QjFNG0B6TTC43oyHR=
+qSqywe-EF1NvOU_4HpPhXLiAcHcgbdedpmGr7e1JytrS3H5spF5t0N2idDfr1C0_NAlXdr6EK4t=
+9eXkqPSWenrQqUZ-VUO-7Lr9xNaJ6g5Fg1C-6QPC9r2LWrGHfoKnZtOBtLjZP_qoMdxWvhy5bH_=
+7G8E9bdBTHM1ldSRJXI1uru_FuPyXgECJX510iAZ9aDRlbmsGwlcS14FGN2zPPSTSI_6YW0C1er=
+VJ0dB-wx5PaNCliEr-GfVXnNSo-qTcjWDdnEK7vhbO28sKH7TfKKnDmyjUDr9sOjsOFePpyIy2D=
+cSMdB3b1OPGIi_8RUQTWl1dEFWnEJn7VuCDedRCzsD-56Y2DmJIxEB_g7DCqYszl?tsid&#x3D;=
+111000275" class=3D"no-inline--darkmode-text" style=3D"color:#2F3639;text-d=
+ecoration:underline;font-weight:700;" target=3D"_blank">Unsubscribe</a>
+
+</td></tr>         <tr><td aria-hidden=3D"true" height=3D"20" style=3D"font=
+-size:0;line-height:0px;"> &nbsp;
+        </td></tr>
+ </table> <img src=3D"https://www.ziprecruiter.com/ekm/AAHMsZrGTDM7MGEVzhlB=
+vr3FCWgut4799uPh4-gajEw_zDXsn92fZw4IP84LXcVpid3V14JvfEYqaKH7BF0BsBVkxcO4NDE=
+h1p1TtVCk0AgTy9jFuXkil6Yxi740qgwMz2QhF6VTN89fSJqg_wdKxeFAj5DRGHko6ojwRrl7FZ=
+ijv9k0hoGnM1EOnJutFfofOyJG" width=3D"1" height=3D"1" alt=3D"">
+
+<!--[if mso]>
+</td></tr></table>
+<![endif]--></div>
+<!--[if mso | IE]>
+</td></tr></table>
+<![endif]--></div></center>
+<img width=3D"1" height=3D"1" alt=3D"" src=3D"https://email.mg.ziprecruiter=
+=2Ecom/o/eJwcyktuxCAMANDTDLuMiDG_BbveIy=
+K2k1CFEhGmUuf0Vbt9epxgzeCVpNkHq300GtSR=
+EOYV1pwdscNoDBCjFXTOes5GSJUEGpz24GYLM8LTCm4ivDKEsOHMD9R1f77L1YX6qwzpT2pV9XS=
+89lYbgX6g_slHa_8-0pB6nXkInfm-H-aD8hcXzkOWz7YuV7uHsBrp72yt10lqLqf6TqDefaly33=
+mXpXDCaDkS4YRANKF2Zoo-4ASoyQYIURz9BgAA__-030yt"></body>
+</html>
+--ba16d5faa334503e9740472d30cb0e6d9f61c5d0296ba40052adfb4ab7a3--

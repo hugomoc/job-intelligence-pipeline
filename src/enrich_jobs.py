@@ -315,15 +315,29 @@ def update_job_description(
         )
 
         # Existing AI scores are stale after the
-        # description changes.
+        # description changes. Clear all scores for the
+        # canonical job identity so duplicate email
+        # occurrences cannot keep an old empty-description
+        # score alive.
         if table_exists(
             connection,
             "resume_job_scores",
         ):
             connection.execute(
                 """
-                DELETE FROM resume_job_scores
-                WHERE record_key = ?
+                DELETE FROM resume_job_scores AS scores
+                USING raw_jobs AS scored_jobs,
+                    raw_jobs AS updated_job
+                WHERE scores.record_key =
+                    scored_jobs.record_key
+                  AND updated_job.record_key = ?
+                  AND COALESCE(
+                      NULLIF(scored_jobs.job_fingerprint, ''),
+                      scored_jobs.record_key
+                  ) = COALESCE(
+                      NULLIF(updated_job.job_fingerprint, ''),
+                      updated_job.record_key
+                  )
                 """,
                 [job["record_key"]],
             )

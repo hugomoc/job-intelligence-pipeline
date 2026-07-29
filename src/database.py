@@ -32,6 +32,7 @@ def initialize_database() -> None:
                 location VARCHAR,
                 salary_text VARCHAR,
                 description VARCHAR,
+                posted_age_text VARCHAR,
                 apply_url VARCHAR NOT NULL,
 
                 email_message_id VARCHAR,
@@ -46,6 +47,13 @@ def initialize_database() -> None:
 
         connection.execute(
             """
+            ALTER TABLE raw_jobs
+            ADD COLUMN IF NOT EXISTS posted_age_text VARCHAR
+            """
+        )
+
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS processed_emails (
                 email_key VARCHAR PRIMARY KEY,
                 source VARCHAR NOT NULL,
@@ -54,6 +62,16 @@ def initialize_database() -> None:
                 email_date VARCHAR,
                 source_folder VARCHAR,
                 processed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS application_status (
+                record_key VARCHAR PRIMARY KEY,
+                status VARCHAR NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -255,13 +273,14 @@ def insert_jobs(
                     location,
                     salary_text,
                     description,
+                    posted_age_text,
                     apply_url,
                     email_message_id,
                     email_subject,
                     email_date,
                     source_folder
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     record_key,
@@ -273,6 +292,7 @@ def insert_jobs(
                     job.get("location"),
                     job.get("salary_text"),
                     job.get("description"),
+                    job.get("posted_age_text"),
                     job.get("apply_url"),
                     email_message_id,
                     email_metadata.get("subject"),

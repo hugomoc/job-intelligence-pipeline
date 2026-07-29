@@ -14,6 +14,7 @@ select
     location,
     salary_text,
     description,
+    posted_age_text,
     apply_url,
     email_message_id,
     email_subject,

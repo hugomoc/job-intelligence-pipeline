@@ -23,5 +23,6 @@ select
     description_word_count,
     description_complete,
     model_name,
+    coalesce(prompt_version, 'v1') as prompt_version,
     scored_at
 from source

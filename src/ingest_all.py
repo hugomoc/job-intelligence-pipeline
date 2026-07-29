@@ -12,6 +12,8 @@ from src.database import (
 )
 from src.parsers.glassdoor import parse_glassdoor_email
 from src.parsers.indeed import parse_indeed_email
+from src.parsers.linkedin import parse_linkedin_email
+from src.parsers.ziprecruiter import parse_ziprecruiter_email
 
 
 ParserFunction = Callable[
@@ -37,9 +39,31 @@ def parse_glassdoor_message(
     )
 
 
+def parse_linkedin_message(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return parse_linkedin_email(
+        text=message.get("text", ""),
+        html=message.get("html"),
+        links=message.get("links", []),
+    )
+
+
+def parse_ziprecruiter_message(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return parse_ziprecruiter_email(
+        text=message.get("text", ""),
+        html=message.get("html"),
+        links=message.get("links", []),
+    )
+
+
 PARSERS: dict[str, ParserFunction] = {
     "indeed": parse_indeed_message,
     "glassdoor": parse_glassdoor_message,
+    "linkedin": parse_linkedin_message,
+    "ziprecruiter": parse_ziprecruiter_message,
 }
 
 

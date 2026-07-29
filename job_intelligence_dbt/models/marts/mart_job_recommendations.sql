@@ -12,6 +12,8 @@ select
     jobs.salary_text,
     jobs.source,
     jobs.apply_url,
+    jobs.posted_age_text,
+    jobs.discovered_at,
 
     rules.rule_score,
     rules.best_search_id,
@@ -27,7 +29,13 @@ select
     rules.rule_needs_review,
 
     scores.ai_score,
-    scores.recommendation,
+    case
+        when scores.recommendation = 'review'
+            and scores.ai_score >= 85
+            and not scores.description_complete
+        then 'apply'
+        else scores.recommendation
+    end as recommendation,
     scores.confidence,
     scores.title_fit,
     scores.skills_fit,
@@ -44,16 +52,21 @@ select
     scores.description_complete,
     not scores.description_complete as has_incomplete_description,
     scores.ai_model_name,
+    scores.ai_prompt_version,
     scores.ai_scored_at,
 
     row_number() over (
         partition by scores.resume_hash
         order by
             scores.ai_score desc,
-            case scores.recommendation
-                when 'apply' then 3
-                when 'review' then 2
-                when 'skip' then 1
+            case
+                when scores.recommendation = 'review'
+                    and scores.ai_score >= 85
+                    and not scores.description_complete
+                then 3
+                when scores.recommendation = 'apply' then 3
+                when scores.recommendation = 'review' then 2
+                when scores.recommendation = 'skip' then 1
                 else 0
             end desc,
             rules.rule_score desc nulls last,
