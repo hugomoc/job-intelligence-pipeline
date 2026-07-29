@@ -8,19 +8,19 @@ __pycache__/
 .pytest_cache/
 
 # Local database
-data/*.duckdb
-data/*.duckdb.wal
+data/
+*.duckdb
+*.duckdb.wal
 
-# Personal resume
+# Personal documents
 src/HugoBatista_Resume.pdf
+*.pdf
+*.docx
 
 # dbt generated files
 job_intelligence_dbt/target/
 job_intelligence_dbt/logs/
 job_intelligence_dbt/dbt_packages/
-
-# macOS
-.DS_Storejob_intelligence_dbt/.user.yml
 
 # macOS metadata
 .DS_Store
