@@ -7,7 +7,7 @@ This project is designed as a daily job-search cockpit: open the UI, ingest new 
 ## What It Does
 
 - Reads job-alert emails from Yahoo IMAP folders.
-- Parses job cards from LinkedIn, Indeed, Glassdoor, and ZipRecruiter alerts.
+- Parses job cards from LinkedIn, Indeed, Glassdoor, Ladders, RemoteHunter, and ZipRecruiter alerts.
 - Stores operational job data in DuckDB.
 - Deduplicates repeated job records with a canonical job identity.
 - Enriches postings by fetching public job-description pages when available.

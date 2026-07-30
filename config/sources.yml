@@ -20,6 +20,16 @@ sources:
     mailbox_folder: jobs/Glassdoor
     enabled: true
 
+  - source_id: ladders
+    source_name: Ladders
+    mailbox_folder: jobs/Ladders
+    enabled: true
+
+  - source_id: remotehunter
+    source_name: RemoteHunter
+    mailbox_folder: jobs/RemoteHunter
+    enabled: true
+
   - source_id: ziprecruiter
     source_name: ZipRecruiter
     mailbox_folder: jobs/ZipRecruiter
