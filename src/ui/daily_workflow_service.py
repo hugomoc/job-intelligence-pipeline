@@ -23,6 +23,13 @@ from src.score_jobs import (
     refresh_job_matches,
 )
 from src.score_backlog import BacklogSummary, score_backlog
+from src.score_backlog import load_latest_resume_hash
+from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
+from src.ai.resume_profiler import get_model_name
+from src.repositories.recommendation_repository import (
+    count_cached_canonical_scores,
+    count_unscored_candidate_jobs,
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,13 @@ class UiBacklogSummary:
     quota_exhausted: bool
     dbt_was_run: bool
     log_lines: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ScoringBacklogStatus:
+    resume_hash: str | None
+    cached_scores: int
+    unscored_candidates: int
 
 
 class DailyWorkflowError(Exception):
@@ -304,3 +318,37 @@ def run_unscored_job_backlog(
         raise DailyWorkflowError(
             "Unscored jobs could not be scored. Please try again later."
         ) from error
+
+
+def load_scoring_backlog_status(
+    resume_hash: str | None,
+    minimum_rule_score: int,
+) -> ScoringBacklogStatus:
+    model_name = get_model_name()
+    selected_resume_hash = resume_hash or load_latest_resume_hash(
+        model_name=model_name,
+    )
+
+    if selected_resume_hash is None:
+        return ScoringBacklogStatus(
+            resume_hash=None,
+            cached_scores=0,
+            unscored_candidates=0,
+        )
+
+    return ScoringBacklogStatus(
+        resume_hash=selected_resume_hash,
+        cached_scores=count_cached_canonical_scores(
+            resume_hash=selected_resume_hash,
+            model_name=model_name,
+            prompt_version=MATCHER_PROMPT_VERSION,
+            reuse_any_model=True,
+        ),
+        unscored_candidates=count_unscored_candidate_jobs(
+            resume_hash=selected_resume_hash,
+            model_name=model_name,
+            minimum_rule_score=minimum_rule_score,
+            prompt_version=MATCHER_PROMPT_VERSION,
+            reuse_any_model=True,
+        ),
+    )

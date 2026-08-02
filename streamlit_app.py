@@ -11,6 +11,7 @@ from src.repositories.recommendation_repository import (
 from src.resume.extractor import ResumeExtractionError
 from src.ui.daily_workflow_service import (
     DailyWorkflowError,
+    load_scoring_backlog_status,
     run_description_enrichment,
     run_email_ingestion,
     run_unscored_job_backlog,
@@ -105,6 +106,37 @@ def render_run_log(
 
     with st.expander(title):
         st.code("\n".join(log_lines), language="text")
+
+
+def render_scoring_backlog_status(
+    placeholder,
+    resume_hash: str | None,
+    minimum_rule_score: int,
+):
+    backlog_status = load_scoring_backlog_status(
+        resume_hash=resume_hash,
+        minimum_rule_score=minimum_rule_score,
+    )
+
+    with placeholder.container():
+        if backlog_status.resume_hash is None:
+            st.caption(
+                "Upload a resume once before AI scoring backlog "
+                "counts are available."
+            )
+            return backlog_status
+
+        st.metric(
+            "Still without AI score",
+            backlog_status.unscored_candidates,
+        )
+        st.caption(
+            "Already scored for this resume: "
+            f"{backlog_status.cached_scores}. "
+            "Already-scored jobs will not be sent again."
+        )
+
+    return backlog_status
 
 
 def remove_generic_incomplete_risks(
@@ -291,26 +323,11 @@ if "show_saved_jobs" not in st.session_state:
 
 with st.sidebar:
     st.header("Scoring")
-    limit = st.number_input(
-        "New jobs to score",
-        min_value=1,
-        max_value=10,
-        value=5,
-        step=1,
-    )
-    minimum_rule_score = st.number_input(
+    daily_minimum_rule_score = st.number_input(
         "Minimum rule score",
         min_value=0,
         max_value=100,
-        value=35,
-        step=5,
-    )
-    st.header("Daily Run")
-    daily_score_limit = st.number_input(
-        "Unscored jobs to score",
-        min_value=1,
-        max_value=100,
-        value=20,
+        value=0,
         step=5,
     )
     enrichment_limit = st.number_input(
@@ -320,12 +337,29 @@ with st.sidebar:
         value=20,
         step=5,
     )
-    daily_minimum_rule_score = st.number_input(
-        "Daily minimum rule score",
-        min_value=0,
-        max_value=100,
-        value=0,
-        step=5,
+    backlog_status_placeholder = st.empty()
+    backlog_status = render_scoring_backlog_status(
+        placeholder=backlog_status_placeholder,
+        resume_hash=st.session_state.get("resume_hash"),
+        minimum_rule_score=int(daily_minimum_rule_score),
+    )
+    score_limit_choice = st.selectbox(
+        "Unscored jobs to process",
+        options=[
+            "20",
+            "50",
+            "100",
+            "All unscored",
+        ],
+        help=(
+            "Batch size for this run. Already-scored jobs are "
+            "skipped automatically."
+        ),
+    )
+    daily_score_limit = (
+        max(backlog_status.unscored_candidates, 1)
+        if score_limit_choice == "All unscored"
+        else int(score_limit_choice)
     )
 
 run_ingestion_clicked = st.sidebar.button(
@@ -367,8 +401,8 @@ if uploaded_file and st.button("Score jobs", type="primary"):
         with st.status("Processing resume...", expanded=True) as status:
             result = process_resume_upload(
                 uploaded_file=uploaded_file,
-                limit=int(limit),
-                minimum_rule_score=int(minimum_rule_score),
+                limit=int(daily_score_limit),
+                minimum_rule_score=int(daily_minimum_rule_score),
             )
 
             st.write(f"Words extracted: {result.word_count}")
@@ -386,6 +420,11 @@ if uploaded_file and st.button("Score jobs", type="primary"):
 
         st.session_state["resume_hash"] = result.resume_hash
         st.session_state["show_saved_jobs"] = True
+        render_scoring_backlog_status(
+            placeholder=backlog_status_placeholder,
+            resume_hash=st.session_state.get("resume_hash"),
+            minimum_rule_score=int(daily_minimum_rule_score),
+        )
 
     except ResumeExtractionError:
         st.error("The resume could not be read. Please upload a readable PDF or DOCX.")
@@ -418,6 +457,11 @@ if run_ingestion_clicked or run_daily_clicked:
             status.update(label="Email ingestion complete", state="complete")
             ingestion_succeeded = True
             st.session_state["show_saved_jobs"] = True
+            render_scoring_backlog_status(
+                placeholder=backlog_status_placeholder,
+                resume_hash=st.session_state.get("resume_hash"),
+                minimum_rule_score=int(daily_minimum_rule_score),
+            )
 
     except DailyWorkflowError:
         st.error("Email ingestion could not be completed. Please try again later.")
@@ -448,6 +492,11 @@ if enrich_descriptions_clicked or (run_daily_clicked and ingestion_succeeded):
             )
             enrichment_succeeded = True
             st.session_state["show_saved_jobs"] = True
+            render_scoring_backlog_status(
+                placeholder=backlog_status_placeholder,
+                resume_hash=st.session_state.get("resume_hash"),
+                minimum_rule_score=int(daily_minimum_rule_score),
+            )
 
     except DailyWorkflowError:
         st.error("Job descriptions could not be enriched. Please try again later.")
@@ -478,6 +527,11 @@ if score_backlog_clicked or (
             )
             status.update(label="Scoring complete", state="complete")
             st.session_state["show_saved_jobs"] = True
+            render_scoring_backlog_status(
+                placeholder=backlog_status_placeholder,
+                resume_hash=st.session_state.get("resume_hash"),
+                minimum_rule_score=int(daily_minimum_rule_score),
+            )
 
     except DailyWorkflowError:
         st.error("Unscored jobs could not be scored. Please try again later.")

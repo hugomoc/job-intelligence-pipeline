@@ -432,6 +432,87 @@ def count_cached_canonical_scores(
     return int(result[0]) if result else 0
 
 
+def count_unscored_candidate_jobs(
+    resume_hash: str,
+    model_name: str | None,
+    minimum_rule_score: int,
+    prompt_version: str = MATCHER_PROMPT_VERSION,
+    reuse_any_model: bool = False,
+) -> int:
+    with get_connection() as connection:
+        result = connection.execute(
+            """
+            WITH jobs AS (
+                SELECT
+                    *,
+                    COALESCE(
+                        NULLIF(job_fingerprint, ''),
+                        record_key
+                    ) AS canonical_job_key
+                FROM raw_jobs
+            ),
+
+            existing_scores AS (
+                SELECT DISTINCT
+                    scored_jobs.canonical_job_key
+                FROM resume_job_scores AS scores
+                INNER JOIN jobs AS scored_jobs
+                    ON scores.record_key =
+                       scored_jobs.record_key
+                WHERE scores.resume_hash = ?
+                  AND (
+                      ? = true
+                      OR scores.model_name = ?
+                  )
+                  AND coalesce(scores.prompt_version, 'v1') = ?
+            ),
+
+            ranked_candidates AS (
+                SELECT
+                    jobs.canonical_job_key,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY jobs.canonical_job_key
+                        ORDER BY
+                            matches.is_recommended DESC,
+                            matches.needs_review DESC,
+                            matches.match_score DESC,
+                            matches.title_score DESC,
+                            CASE
+                                WHEN jobs.description IS NOT NULL
+                                 AND TRIM(jobs.description) <> ''
+                                THEN 1
+                                ELSE 0
+                            END DESC,
+                            jobs.description_updated_at DESC NULLS LAST,
+                            jobs.discovered_at DESC NULLS LAST,
+                            jobs.record_key
+                    ) AS candidate_rank
+                FROM jobs
+                INNER JOIN job_matches AS matches
+                    ON jobs.record_key = matches.record_key
+                LEFT JOIN existing_scores
+                    ON jobs.canonical_job_key =
+                       existing_scores.canonical_job_key
+                WHERE existing_scores.canonical_job_key IS NULL
+                  AND matches.match_score >= ?
+            )
+
+            SELECT COUNT(*)
+            FROM ranked_candidates
+            WHERE candidate_rank = 1
+            """,
+            [
+                resume_hash,
+                reuse_any_model,
+                model_name,
+                prompt_version,
+                minimum_rule_score,
+            ],
+        ).fetchone()
+
+    return int(result[0]) if result else 0
+
+
 def load_recommendations(
     resume_hash: str,
 ) -> list[dict[str, Any]]:
