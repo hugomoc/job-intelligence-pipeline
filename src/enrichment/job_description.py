@@ -14,6 +14,31 @@ from bs4 import BeautifulSoup
 MINIMUM_USEFUL_DESCRIPTION_WORDS = 40
 
 
+NON_DESCRIPTION_PHRASES = (
+    "exact matches for your query ends here",
+    "time to start afresh",
+    "search jobs applyassist careerpilot",
+    "companies insights jobseekers workstyle game",
+)
+
+
+JOB_DESCRIPTION_SIGNAL_PHRASES = (
+    "responsibilities",
+    "qualifications",
+    "requirements",
+    "required qualifications",
+    "preferred qualifications",
+    "what you'll do",
+    "what you will do",
+    "about the role",
+    "job description",
+    "experience with",
+    "we are looking for",
+    "you will",
+    "duties",
+)
+
+
 BLOCK_PAGE_PHRASES = (
     "access denied",
     "verify you are human",
@@ -185,9 +210,37 @@ def count_words(
     )
 
 
+def appears_to_be_non_description_text(
+    value: str,
+) -> bool:
+    normalized = " ".join(
+        value.casefold().split()
+    )
+
+    if not normalized:
+        return True
+
+    if any(
+        phrase in normalized
+        for phrase in NON_DESCRIPTION_PHRASES
+    ):
+        return True
+
+    if any(
+        phrase in normalized
+        for phrase in JOB_DESCRIPTION_SIGNAL_PHRASES
+    ):
+        return False
+
+    return False
+
+
 def is_valid_http_url(
     url: str,
 ) -> bool:
+    if re.search(r"[\x00-\x1f\x7f]", url):
+        return False
+
     try:
         parsed = urlparse(url)
     except ValueError:
@@ -567,6 +620,9 @@ def fetch_job_description(
     if (
         word_count
         < MINIMUM_USEFUL_DESCRIPTION_WORDS
+        or appears_to_be_non_description_text(
+            description
+        )
     ):
         return JobDescriptionResult(
             requested_url=url,

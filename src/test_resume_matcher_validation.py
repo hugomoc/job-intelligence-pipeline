@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 from src.ai.resume_matcher import (
     MATCHER_PROMPT_VERSION,
     JobMatchAnalysis,
+    determine_recommendation,
     validate_missing_qualifications,
 )
 from src.ai.resume_profiler import ResumeProfile
@@ -274,6 +275,30 @@ def test_prompt_version_controls_cache_reuse() -> None:
             )
 
 
+def test_incomplete_description_cannot_be_apply() -> None:
+    analysis = make_analysis(
+        hard_missing=[],
+    )
+
+    assert determine_recommendation(
+        overall_score=95,
+        analysis=analysis,
+        description_complete=False,
+    ) == "review"
+
+
+def test_incomplete_description_can_still_be_skip() -> None:
+    analysis = make_analysis(
+        hard_missing=[],
+    )
+
+    assert determine_recommendation(
+        overall_score=40,
+        analysis=analysis,
+        description_complete=False,
+    ) == "skip"
+
+
 def main() -> None:
     test_cloud_platform_alternatives_are_not_missing()
     test_data_warehouse_alternatives_are_not_missing()
@@ -283,6 +308,8 @@ def main() -> None:
     test_agile_can_remain_missing_when_absent()
     test_agile_is_not_missing_when_demonstrated()
     test_prompt_version_controls_cache_reuse()
+    test_incomplete_description_cannot_be_apply()
+    test_incomplete_description_can_still_be_skip()
     print("Resume matcher validation tests passed.")
 
 

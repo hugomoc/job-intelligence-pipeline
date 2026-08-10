@@ -311,6 +311,22 @@ def load_candidate_jobs(
                   AND coalesce(scores.prompt_version, 'v1') = ?
             ),
 
+            latest_application_status AS (
+                SELECT
+                    status_jobs.canonical_job_key,
+                    status.status,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY status_jobs.canonical_job_key
+                        ORDER BY
+                            status.updated_at DESC NULLS LAST,
+                            status.record_key
+                    ) AS status_rank
+                FROM application_status AS status
+                INNER JOIN jobs AS status_jobs
+                    ON status.record_key =
+                       status_jobs.record_key
+            ),
+
             ranked_candidates AS (
                 SELECT
                     jobs.canonical_job_key,
@@ -350,8 +366,24 @@ def load_candidate_jobs(
                 LEFT JOIN existing_scores
                     ON jobs.canonical_job_key =
                        existing_scores.canonical_job_key
+                LEFT JOIN latest_application_status
+                    ON jobs.canonical_job_key =
+                       latest_application_status.canonical_job_key
+                   AND latest_application_status.status_rank = 1
                 WHERE existing_scores.canonical_job_key IS NULL
                   AND matches.match_score >= ?
+                  AND jobs.description IS NOT NULL
+                  AND TRIM(jobs.description) <> ''
+                  AND array_length(
+                      regexp_split_to_array(
+                          trim(jobs.description),
+                          '\\s+'
+                      )
+                  ) >= 80
+                  AND COALESCE(
+                      latest_application_status.status,
+                      'new'
+                  ) = 'new'
             )
 
             SELECT
@@ -467,6 +499,22 @@ def count_unscored_candidate_jobs(
                   AND coalesce(scores.prompt_version, 'v1') = ?
             ),
 
+            latest_application_status AS (
+                SELECT
+                    status_jobs.canonical_job_key,
+                    status.status,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY status_jobs.canonical_job_key
+                        ORDER BY
+                            status.updated_at DESC NULLS LAST,
+                            status.record_key
+                    ) AS status_rank
+                FROM application_status AS status
+                INNER JOIN jobs AS status_jobs
+                    ON status.record_key =
+                       status_jobs.record_key
+            ),
+
             ranked_candidates AS (
                 SELECT
                     jobs.canonical_job_key,
@@ -493,8 +541,24 @@ def count_unscored_candidate_jobs(
                 LEFT JOIN existing_scores
                     ON jobs.canonical_job_key =
                        existing_scores.canonical_job_key
+                LEFT JOIN latest_application_status
+                    ON jobs.canonical_job_key =
+                       latest_application_status.canonical_job_key
+                   AND latest_application_status.status_rank = 1
                 WHERE existing_scores.canonical_job_key IS NULL
                   AND matches.match_score >= ?
+                  AND jobs.description IS NOT NULL
+                  AND TRIM(jobs.description) <> ''
+                  AND array_length(
+                      regexp_split_to_array(
+                          trim(jobs.description),
+                          '\\s+'
+                      )
+                  ) >= 80
+                  AND COALESCE(
+                      latest_application_status.status,
+                      'new'
+                  ) = 'new'
             )
 
             SELECT COUNT(*)

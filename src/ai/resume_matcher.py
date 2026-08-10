@@ -723,12 +723,10 @@ def determine_recommendation(
     "review",
     "skip",
 ]:
-    # Incomplete postings cannot be confidently approved
-    # or rejected unless the fit is very strong or weak.
+    # Incomplete postings must not be approved from title
+    # or email metadata alone. They can still be skipped
+    # when the limited evidence is clearly weak.
     if not description_complete:
-        if overall_score >= 85:
-            return "apply"
-
         if overall_score < 50:
             return "skip"
 

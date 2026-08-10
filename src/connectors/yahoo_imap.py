@@ -19,17 +19,20 @@ YAHOO_IMAP_SERVER = "imap.mail.yahoo.com"
 YAHOO_IMAP_PORT = 993
 
 
-def load_credentials() -> tuple[str, str]:
+def load_credentials(
+    username_env: str = "YAHOO_EMAIL",
+    password_env: str = "YAHOO_APP_PASSWORD",
+) -> tuple[str, str]:
     load_dotenv(ENV_PATH)
 
-    email_address = os.getenv("YAHOO_EMAIL")
-    app_password = os.getenv("YAHOO_APP_PASSWORD")
+    email_address = os.getenv(username_env)
+    app_password = os.getenv(password_env)
 
     if not email_address:
-        raise ValueError("YAHOO_EMAIL is missing from .env.")
+        raise ValueError(f"{username_env} is missing from .env.")
 
     if not app_password:
-        raise ValueError("YAHOO_APP_PASSWORD is missing from .env.")
+        raise ValueError(f"{password_env} is missing from .env.")
 
     return email_address, app_password
 
@@ -143,8 +146,13 @@ def read_messages(
     folder_name: str,
     limit: int = 10,
     unread_only: bool = False,
+    username_env: str = "YAHOO_EMAIL",
+    password_env: str = "YAHOO_APP_PASSWORD",
 ) -> list[dict[str, Any]]:
-    email_address, app_password = load_credentials()
+    email_address, app_password = load_credentials(
+        username_env=username_env,
+        password_env=password_env,
+    )
 
     messages: list[dict[str, Any]] = []
 
@@ -221,6 +229,7 @@ def read_messages(
                     "recipient": decode_header_value(
                         message.get("To")
                     ),
+                    "mailbox_account": email_address,
                     "date": message.get("Date", ""),
                     "text": text,
                     "html": html,

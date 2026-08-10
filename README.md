@@ -39,6 +39,7 @@ Email folders
 - Gemini API
 - OpenAI API
 - BeautifulSoup / httpx
+- Playwright
 - PDF and DOCX resume extraction
 
 ## Repository Layout
@@ -113,6 +114,12 @@ source venv312job/bin/activate
 pip install -r requirements.txt
 ```
 
+Install the Playwright browser used by the standalone Lensa resolver:
+
+```bash
+playwright install chromium
+```
+
 Create a local `.env` file:
 
 ```bash
@@ -129,6 +136,13 @@ OPENAI_MODEL=gpt-4.1-mini
 ```
 
 The `.env` file is ignored by git.
+
+Optional browser resolver settings:
+
+```bash
+PLAYWRIGHT_HEADLESS=true
+JOB_RESOLVER_DELAY_SECONDS=1
+```
 
 ## Running the App
 
@@ -184,6 +198,26 @@ The scorer:
 - uses Gemini first
 - switches to OpenAI fallback when Gemini quota is exhausted
 - runs dbt build after new scores are saved
+
+## Standalone Lensa Resolver
+
+Lensa alert links can open a search-results page instead of the individual
+posting. The standalone resolver uses Playwright to open the Lensa page, locate
+the matching job card by title and company, click that card's `Read more` link,
+and extract the underlying JobLeads posting.
+
+Manual test:
+
+```bash
+python -m src.test_lensa_resolver \
+  --url "<LENSA_URL>" \
+  --title "Remote Data Modeling & BI Analyst (EST)" \
+  --company "Hayward Holdings, Inc." \
+  --headed
+```
+
+The command prints the resolved URL and description length. It does not print the
+full description unless `--verbose` is passed.
 
 ## Tests and Checks
 

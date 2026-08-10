@@ -10,11 +10,17 @@ from src.database import (
     is_email_processed,
     mark_email_processed,
 )
+from src.parsers.builtin import parse_builtin_email
 from src.parsers.glassdoor import parse_glassdoor_email
 from src.parsers.indeed import parse_indeed_email
+from src.parsers.jobright import parse_jobright_email
+from src.parsers.jobot import parse_jobot_email
 from src.parsers.ladders import parse_ladders_email
+from src.parsers.lensa import parse_lensa_email
+from src.parsers.levels import parse_levels_email
 from src.parsers.linkedin import parse_linkedin_email
 from src.parsers.remotehunter import parse_remotehunter_email
+from src.parsers.welcometothejungle import parse_welcometothejungle_email
 from src.parsers.ziprecruiter import parse_ziprecruiter_email
 
 
@@ -29,6 +35,46 @@ def parse_indeed_message(
 ) -> list[dict[str, Any]]:
     return parse_indeed_email(
         message["text"]
+    )
+
+
+def parse_builtin_message(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return parse_builtin_email(
+        text=message.get("text", ""),
+        html=message.get("html"),
+        links=message.get("links", []),
+    )
+
+
+def parse_jobot_message(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return parse_jobot_email(
+        text=message.get("text", ""),
+        html=message.get("html"),
+        links=message.get("links", []),
+    )
+
+
+def parse_levels_message(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return parse_levels_email(
+        text=message.get("text", ""),
+        html=message.get("html"),
+        links=message.get("links", []),
+    )
+
+
+def parse_welcometothejungle_message(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return parse_welcometothejungle_email(
+        text=message.get("text", ""),
+        html=message.get("html"),
+        links=message.get("links", []),
     )
 
 
@@ -61,6 +107,26 @@ def parse_ladders_message(
     )
 
 
+def parse_lensa_message(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return parse_lensa_email(
+        text=message.get("text", ""),
+        html=message.get("html"),
+        links=message.get("links", []),
+    )
+
+
+def parse_jobright_message(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return parse_jobright_email(
+        text=message.get("text", ""),
+        html=message.get("html"),
+        links=message.get("links", []),
+    )
+
+
 def parse_remotehunter_message(
     message: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -82,11 +148,17 @@ def parse_ziprecruiter_message(
 
 
 PARSERS: dict[str, ParserFunction] = {
+    "builtin": parse_builtin_message,
     "indeed": parse_indeed_message,
     "glassdoor": parse_glassdoor_message,
+    "jobright": parse_jobright_message,
+    "jobot": parse_jobot_message,
     "ladders": parse_ladders_message,
+    "levels": parse_levels_message,
+    "lensa": parse_lensa_message,
     "linkedin": parse_linkedin_message,
     "remotehunter": parse_remotehunter_message,
+    "welcometothejungle": parse_welcometothejungle_message,
     "ziprecruiter": parse_ziprecruiter_message,
 }
 
@@ -110,11 +182,23 @@ def ingest_source(
     print(f"\nProcessing {source_name}")
     print(f"Folder: {folder_name}")
 
-    messages = read_messages(
-        folder_name=folder_name,
-        limit=100,
-        unread_only=False,
-    )
+    try:
+        messages = read_messages(
+            folder_name=folder_name,
+            limit=100,
+            unread_only=False,
+            username_env=source.get(
+                "username_env",
+                "YAHOO_EMAIL",
+            ),
+            password_env=source.get(
+                "password_env",
+                "YAHOO_APP_PASSWORD",
+            ),
+        )
+    except ValueError as error:
+        print(f"Skipping {source_name}: {error}")
+        return 0, 0, 0
 
     if not messages:
         print("No emails found.")

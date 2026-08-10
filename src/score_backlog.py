@@ -108,10 +108,29 @@ def score_backlog(
     )
 
     if resume_profile is None:
-        raise ValueError(
-            "No cached resume profile was found for the selected resume. "
-            "Upload the resume in Streamlit once before running the backlog scorer."
+        fallback_resume_hash = load_latest_resume_hash(
+            model_name=model_name,
         )
+
+        if (
+            fallback_resume_hash
+            and fallback_resume_hash != selected_resume_hash
+        ):
+            print(
+                "Selected resume profile was not found. "
+                "Using the latest cached resume profile."
+            )
+            selected_resume_hash = fallback_resume_hash
+            resume_profile = load_cached_profile(
+                resume_hash=selected_resume_hash,
+                model_name=model_name,
+            )
+
+        if resume_profile is None:
+            raise ValueError(
+                "No cached resume profile was found for the selected resume. "
+                "Upload the resume in Streamlit once before running the backlog scorer."
+            )
 
     already_scored = count_cached_canonical_scores(
         resume_hash=selected_resume_hash,

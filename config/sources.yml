@@ -25,6 +25,16 @@ sources:
     mailbox_folder: jobs/Ladders
     enabled: true
 
+  - source_id: lensa
+    source_name: Lensa
+    mailbox_folder: jobs/Lensa
+    enabled: true
+
+  - source_id: jobright
+    source_name: Jobright
+    mailbox_folder: jobs/Jobright
+    enabled: true
+
   - source_id: remotehunter
     source_name: RemoteHunter
     mailbox_folder: jobs/RemoteHunter
@@ -33,4 +43,80 @@ sources:
   - source_id: ziprecruiter
     source_name: ZipRecruiter
     mailbox_folder: jobs/ZipRecruiter
+    enabled: true
+
+  - source_id: builtin
+    source_name: BuiltIn
+    mailbox_folder: jobs/Builtin
+    enabled: true
+
+  - source_id: jobot
+    source_name: Jobot
+    mailbox_folder: jobs/Jobot
+    enabled: true
+
+  - source_id: levels
+    source_name: Levels
+    mailbox_folder: jobs/Levels
+    enabled: true
+
+  - source_id: welcometothejungle
+    source_name: Welcome to the Jungle
+    mailbox_folder: jobs/Welcometothejungle
+    enabled: true
+
+  - source_id: linkedin
+    source_name: LinkedIn (hugobatista20)
+    mailbox_folder: jobs/Linkedin
+    username_env: YAHOO_HUGOBATISTA20_EMAIL
+    password_env: YAHOO_HUGOBATISTA20_APP_PASSWORD
+    enabled: true
+
+  - source_id: indeed
+    source_name: Indeed (hugobatista20)
+    mailbox_folder: jobs/Indeed
+    username_env: YAHOO_HUGOBATISTA20_EMAIL
+    password_env: YAHOO_HUGOBATISTA20_APP_PASSWORD
+    enabled: true
+
+  - source_id: glassdoor
+    source_name: Glassdoor (hugobatista20)
+    mailbox_folder: jobs/glassdoor
+    username_env: YAHOO_HUGOBATISTA20_EMAIL
+    password_env: YAHOO_HUGOBATISTA20_APP_PASSWORD
+    enabled: true
+
+  - source_id: ladders
+    source_name: Ladders (hugobatista20)
+    mailbox_folder: jobs/Ladders
+    username_env: YAHOO_HUGOBATISTA20_EMAIL
+    password_env: YAHOO_HUGOBATISTA20_APP_PASSWORD
+    enabled: true
+
+  - source_id: lensa
+    source_name: Lensa (hugobatista20)
+    mailbox_folder: jobs/Lensa
+    username_env: YAHOO_HUGOBATISTA20_EMAIL
+    password_env: YAHOO_HUGOBATISTA20_APP_PASSWORD
+    enabled: true
+
+  - source_id: jobright
+    source_name: Jobright (hugobatista20)
+    mailbox_folder: jobs/Jobright
+    username_env: YAHOO_HUGOBATISTA20_EMAIL
+    password_env: YAHOO_HUGOBATISTA20_APP_PASSWORD
+    enabled: true
+
+  - source_id: remotehunter
+    source_name: RemoteHunter (hugobatista20)
+    mailbox_folder: jobs/RemoteHunter
+    username_env: YAHOO_HUGOBATISTA20_EMAIL
+    password_env: YAHOO_HUGOBATISTA20_APP_PASSWORD
+    enabled: true
+
+  - source_id: ziprecruiter
+    source_name: ZipRecruiter (hugobatista20)
+    mailbox_folder: jobs/ZipRecruiter
+    username_env: YAHOO_HUGOBATISTA20_EMAIL
+    password_env: YAHOO_HUGOBATISTA20_APP_PASSWORD
     enabled: true

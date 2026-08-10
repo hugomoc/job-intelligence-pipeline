@@ -201,27 +201,7 @@ def render_job_listing(job: dict) -> None:
 
             st.link_button("Open job", job["apply_url"])
 
-            if application_status == "applied":
-                if st.button(
-                    "Mark not applied",
-                    key=f"unapply-{record_key}",
-                ):
-                    update_application_status(
-                        record_key=record_key,
-                        status="new",
-                    )
-                    st.rerun()
-            elif application_status == "removed":
-                if st.button(
-                    "Restore",
-                    key=f"restore-{record_key}",
-                ):
-                    update_application_status(
-                        record_key=record_key,
-                        status="new",
-                    )
-                    st.rerun()
-            else:
+            if application_status == "new":
                 if st.button(
                     "Mark applied",
                     key=f"apply-{record_key}",
@@ -557,11 +537,17 @@ with jobs_tab:
             resume_hash=st.session_state.get("resume_hash")
         )
 
+    visible_jobs = [
+        job
+        for job in all_jobs
+        if job.get("application_status", "new") != "removed"
+    ]
+
     job_dates = [
         job_date
         for job_date in (
             to_date(job.get("sent_at"))
-            for job in all_jobs
+            for job in visible_jobs
         )
         if job_date is not None
     ]
@@ -576,7 +562,7 @@ with jobs_tab:
                 *sorted(
                     {
                         job["source"]
-                        for job in all_jobs
+                        for job in visible_jobs
                     }
                 ),
             ],
@@ -590,7 +576,7 @@ with jobs_tab:
                 *sorted(
                     {
                         get_city(job.get("location"))
-                        for job in all_jobs
+                        for job in visible_jobs
                     }
                 ),
             ],
@@ -622,9 +608,7 @@ with jobs_tab:
             ],
         )
 
-    secondary_filter_cols = st.columns([2, 2])
-
-    with secondary_filter_cols[0]:
+    with st.container():
         recommendation_filter = st.selectbox(
             "Recommendation",
             options=[
@@ -636,25 +620,13 @@ with jobs_tab:
             ],
         )
 
-    with secondary_filter_cols[1]:
-        applied_filter = st.selectbox(
-            "Application status",
-            options=[
-                "Active",
-                "All",
-                "Not applied",
-                "Applied",
-                "Removed",
-            ],
-        )
-
     if isinstance(selected_dates, tuple):
         start_date, end_date = selected_dates
     else:
         start_date = selected_dates
         end_date = selected_dates
 
-    filtered_jobs = all_jobs
+    filtered_jobs = visible_jobs
 
     if source_filter != "All":
         filtered_jobs = [
@@ -680,26 +652,6 @@ with jobs_tab:
                 <= to_date(job.get("sent_at"))
                 <= end_date
             )
-        ]
-
-    if applied_filter == "Active":
-        filtered_jobs = [
-            job
-            for job in filtered_jobs
-            if job.get("application_status", "new")
-            != "removed"
-        ]
-    elif applied_filter != "All":
-        expected_status = {
-            "Not applied": "new",
-            "Applied": "applied",
-            "Removed": "removed",
-        }[applied_filter]
-        filtered_jobs = [
-            job
-            for job in filtered_jobs
-            if job.get("application_status", "new")
-            == expected_status
         ]
 
     if scored_filter == "Scored":
@@ -731,33 +683,59 @@ with jobs_tab:
             == recommendation_filter
         ]
 
-    applied_count = sum(
+    visible_applied_count = sum(
         1
-        for job in all_jobs
+        for job in visible_jobs
         if job.get("application_status") == "applied"
     )
-    removed_count = sum(
+    visible_new_count = sum(
         1
-        for job in all_jobs
-        if job.get("application_status") == "removed"
+        for job in visible_jobs
+        if job.get("application_status", "new") == "new"
     )
     ai_scored_count = sum(
         1
-        for job in all_jobs
+        for job in visible_jobs
         if job.get("ai_score") is not None
     )
 
     st.caption(
-        f"Showing {len(filtered_jobs)} of {len(all_jobs)} "
+        f"Showing {len(filtered_jobs)} of {len(visible_jobs)} "
         f"ingested jobs. AI-scored: {ai_scored_count}. "
-        f"Applied: {applied_count}. Removed: {removed_count}"
+        f"New: {visible_new_count}. Applied: {visible_applied_count}"
     )
 
-    if not filtered_jobs:
-        st.info("No jobs match the selected filters.")
+    new_jobs = [
+        job
+        for job in filtered_jobs
+        if job.get("application_status", "new") == "new"
+    ]
+    applied_jobs_list = [
+        job
+        for job in filtered_jobs
+        if job.get("application_status") == "applied"
+    ]
 
-    for job in filtered_jobs:
-        render_job_listing(job)
+    new_jobs_tab, applied_jobs_tab = st.tabs(
+        [
+            f"New Jobs ({len(new_jobs)})",
+            f"Applied Jobs ({len(applied_jobs_list)})",
+        ]
+    )
+
+    with new_jobs_tab:
+        if not new_jobs:
+            st.info("No new jobs match the selected filters.")
+
+        for job in new_jobs:
+            render_job_listing(job)
+
+    with applied_jobs_tab:
+        if not applied_jobs_list:
+            st.info("No applied jobs match the selected filters.")
+
+        for job in applied_jobs_list:
+            render_job_listing(job)
 
 with operations_tab:
     current_jobs = (
@@ -779,20 +757,14 @@ with operations_tab:
         for job in current_jobs
         if job.get("application_status") == "applied"
     )
-    removed_jobs = sum(
-        1
-        for job in current_jobs
-        if job.get("application_status") == "removed"
-    )
 
     st.subheader("Pipeline Status")
 
-    metric_cols = st.columns(5)
+    metric_cols = st.columns(4)
     metric_cols[0].metric("Stored jobs", total_jobs)
     metric_cols[1].metric("AI-scored", ai_scored_jobs)
     metric_cols[2].metric("Unscored", unscored_jobs)
     metric_cols[3].metric("Applied", applied_jobs)
-    metric_cols[4].metric("Removed", removed_jobs)
 
     st.caption(
         "Use the sidebar daily run controls to ingest email folders "

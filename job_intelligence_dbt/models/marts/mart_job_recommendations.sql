@@ -30,10 +30,9 @@ select
 
     scores.ai_score,
     case
-        when scores.recommendation = 'review'
-            and scores.ai_score >= 85
-            and not scores.description_complete
-        then 'apply'
+        when not scores.description_complete
+            and scores.recommendation = 'apply'
+        then 'review'
         else scores.recommendation
     end as recommendation,
     scores.confidence,
@@ -60,12 +59,13 @@ select
         order by
             scores.ai_score desc,
             case
-                when scores.recommendation = 'review'
-                    and scores.ai_score >= 85
-                    and not scores.description_complete
+                when scores.recommendation = 'apply'
+                    and scores.description_complete
                 then 3
-                when scores.recommendation = 'apply' then 3
                 when scores.recommendation = 'review' then 2
+                when scores.recommendation = 'apply'
+                    and not scores.description_complete
+                then 2
                 when scores.recommendation = 'skip' then 1
                 else 0
             end desc,
