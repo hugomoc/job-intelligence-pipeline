@@ -1,3 +1,5 @@
+"""Parser for Indeed job-alert emails."""
+
 import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse

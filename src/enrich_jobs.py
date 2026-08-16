@@ -1,3 +1,10 @@
+"""CLI and helpers for enriching incomplete job descriptions.
+
+Ingested email alerts often contain thin descriptions. This module tries to
+fetch better public descriptions from the apply URL and records every attempt
+so failed/blocked pages can be retried intentionally.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -26,6 +33,7 @@ FAILED_STATUSES = {
 
 
 def initialize_enrichment_tables() -> None:
+    """Add enrichment metadata tables/columns without changing raw job shape."""
     initialize_database()
 
     with get_connection() as connection:

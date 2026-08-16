@@ -1,3 +1,10 @@
+"""Email ingestion orchestrator for all configured job-alert sources.
+
+Each source owns a parser, but this module owns the common ingestion loop:
+read Yahoo messages, skip already processed emails, parse jobs, store new raw
+records, and refresh rule-match inputs after ingestion.
+"""
+
 from collections.abc import Callable
 from typing import Any
 
@@ -214,6 +221,7 @@ PARSERS: dict[str, ParserFunction] = {
 def ingest_source(
     source: dict[str, Any],
 ) -> tuple[int, int, int]:
+    """Ingest one configured mailbox folder without deleting source emails."""
     source_id = source["source_id"]
     source_name = source["source_name"]
     folder_name = source["mailbox_folder"]

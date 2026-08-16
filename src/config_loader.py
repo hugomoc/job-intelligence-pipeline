@@ -1,3 +1,9 @@
+"""Small YAML loader for source and search configuration.
+
+Keeping config parsing here lets ingestion/matching code work with plain Python
+dicts and keeps Streamlit away from file-format details.
+"""
+
 from pathlib import Path
 from typing import Any
 

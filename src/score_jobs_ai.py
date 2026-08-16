@@ -1,3 +1,10 @@
+"""Full resume-to-job AI scoring workflow.
+
+This module owns durable resume profiles and detailed AI fit scores. Streamlit
+and CLI workflows reuse these helpers so scores are cached by resume/job instead
+of recomputed on every click.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -28,6 +35,7 @@ from src.resume.extractor import (
 
 
 def initialize_ai_tables() -> None:
+    """Create cached resume-profile and job-score tables."""
     initialize_database()
 
     with get_connection() as connection:
@@ -294,6 +302,7 @@ def save_job_score(
     resume_hash: str,
     match: ResumeJobMatch,
 ) -> None:
+    """Replace one resume/job score so the latest model output is canonical."""
     analysis = match.analysis
 
     values = [

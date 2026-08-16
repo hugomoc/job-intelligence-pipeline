@@ -1,3 +1,10 @@
+"""Yahoo IMAP reader for job-alert folders.
+
+The connector returns normalized message dictionaries with text, HTML, links,
+and stable metadata. It only reads mail; ingestion decides whether an email has
+already been processed and whether parsed jobs should be stored.
+"""
+
 import imaplib
 import os
 import re
@@ -23,6 +30,7 @@ def load_credentials(
     username_env: str = "YAHOO_EMAIL",
     password_env: str = "YAHOO_APP_PASSWORD",
 ) -> tuple[str, str]:
+    """Load Yahoo credentials from environment variables named by config."""
     load_dotenv(ENV_PATH)
 
     email_address = os.getenv(username_env)

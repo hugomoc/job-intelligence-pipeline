@@ -1,3 +1,5 @@
+"""Parser for Welcome to the Jungle job-alert emails."""
+
 import re
 from typing import Any
 

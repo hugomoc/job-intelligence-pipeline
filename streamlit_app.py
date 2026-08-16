@@ -1,3 +1,10 @@
+"""Streamlit entrypoint for the daily job-intelligence workflow.
+
+This file should stay presentation-focused: collect user input, call service
+functions, and render results. Database queries, email ingestion, enrichment,
+and AI scoring live in src/ so they can be tested without Streamlit.
+"""
+
 from __future__ import annotations
 
 from datetime import date

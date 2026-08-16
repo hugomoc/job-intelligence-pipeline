@@ -1,3 +1,9 @@
+"""DuckDB persistence helpers for operational job-ingestion tables.
+
+Python owns these source tables. dbt reads them into analytics models, but it
+should never recreate or mutate the operational tables defined here.
+"""
+
 import hashlib
 import re
 from pathlib import Path
@@ -12,11 +18,13 @@ DATABASE_PATH = DATA_DIR / "jobs.duckdb"
 
 
 def get_connection() -> duckdb.DuckDBPyConnection:
+    """Open a DuckDB connection to the local application database."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     return duckdb.connect(str(DATABASE_PATH))
 
 
 def initialize_database() -> None:
+    """Create operational tables idempotently for local app runs."""
     with get_connection() as connection:
         connection.execute(
             """
@@ -224,6 +232,7 @@ def insert_jobs(
     jobs: list[dict[str, Any]],
     email_metadata: dict[str, Any],
 ) -> tuple[int, int]:
+    """Insert parsed jobs while preserving idempotency per source email."""
     initialize_database()
 
     inserted = 0

@@ -1,3 +1,10 @@
+"""Service layer for resume upload and recommendation generation.
+
+Streamlit gives this module an uploaded file and display limits. The service
+extracts the resume in memory, reuses or creates a cached profile, screens jobs,
+scores eligible candidates, refreshes dbt, and returns safe UI summaries.
+"""
+
 from __future__ import annotations
 
 import subprocess
@@ -18,6 +25,7 @@ from src.ai.resume_profiler import (
     profile_resume,
 )
 from src.resume.extractor import ExtractedResume, ResumeExtractionError, extract_resume
+from src.job_screening import screen_unscreened_jobs
 from src.repositories.recommendation_repository import (
     count_cached_canonical_scores,
     load_candidate_jobs,
@@ -60,6 +68,7 @@ def get_or_create_resume_profile(
     resume: ExtractedResume,
     model_name: str,
 ) -> tuple[ResumeProfile, bool]:
+    """Reuse a cached profile for the resume hash, or create one once."""
     cached_profile = load_cached_profile(
         resume_hash=resume.resume_hash,
         model_name=model_name,
@@ -84,6 +93,7 @@ def get_or_create_resume_profile(
 
 
 def run_dbt_build() -> None:
+    """Refresh dbt analytics after new scores change mart output."""
     command = [
         str(PROJECT_ROOT / "scripts" / "dbt_jobs.sh"),
         "build",
@@ -141,6 +151,7 @@ def process_resume_upload(
     limit: int,
     minimum_rule_score: int,
 ) -> ScoringSummary:
+    """Profile a resume and score a bounded set of eligible jobs."""
     try:
         resume = extract_resume(uploaded_file)
         model_name = get_model_name()
@@ -157,6 +168,13 @@ def process_resume_upload(
             model_name=None,
             prompt_version=MATCHER_PROMPT_VERSION,
             reuse_any_model=True,
+        )
+
+        screen_unscreened_jobs(
+            resume_hash=resume.resume_hash,
+            resume_profile=resume_profile,
+            limit=limit,
+            model_name=model_name,
         )
 
         candidate_jobs = load_candidate_jobs(

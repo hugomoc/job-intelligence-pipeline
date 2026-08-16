@@ -1,3 +1,10 @@
+"""Persist rule-based search/job match results.
+
+The rule matcher is intentionally deterministic and cheap. Its scores decide
+which raw jobs deserve enrichment or AI review, and dbt later reads this table
+as part of the analytics lineage.
+"""
+
 import json
 from typing import Any
 
@@ -13,6 +20,7 @@ from src.matching.job_matcher import (
 
 
 def initialize_match_table() -> None:
+    """Create the rule-match table used before AI scoring."""
     initialize_database()
 
     with get_connection() as connection:

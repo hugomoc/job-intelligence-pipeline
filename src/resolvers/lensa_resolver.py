@@ -1,3 +1,9 @@
+"""Resolver for Lensa links that open multi-job pages.
+
+The resolver finds the intended Lensa card, clicks its Read more action, follows
+the JobLeads page, and extracts the richer job description when possible.
+"""
+
 from __future__ import annotations
 
 import asyncio

@@ -1,3 +1,5 @@
+"""Parser for Jobot single-job alert emails."""
+
 import re
 from typing import Any
 from urllib.parse import urlparse

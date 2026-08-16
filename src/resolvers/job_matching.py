@@ -1,3 +1,10 @@
+"""Fuzzy title/company matching for resolver candidate pages.
+
+Some job-alert links open a page with many jobs. These helpers score each card
+against the expected title/company and reject ambiguous matches instead of
+clicking the wrong job.
+"""
+
 from __future__ import annotations
 
 import re

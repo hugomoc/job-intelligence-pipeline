@@ -1,3 +1,9 @@
+"""Conservative parser for JobLeads emails.
+
+The mailbox samples seen so far are marketing and resume-review emails, not job
+alerts. Returning an empty list is safer than inserting fake jobs.
+"""
+
 from typing import Any
 
 

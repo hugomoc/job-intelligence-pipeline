@@ -1,3 +1,5 @@
+"""Resolver for JobDiva-powered company career portals."""
+
 from __future__ import annotations
 
 import argparse

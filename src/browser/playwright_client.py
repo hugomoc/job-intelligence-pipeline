@@ -1,3 +1,9 @@
+"""Small Playwright lifecycle wrapper for dynamic job pages.
+
+Resolvers use this instead of creating browsers directly so headed/headless mode
+and browser cleanup are controlled consistently from environment variables.
+"""
+
 from __future__ import annotations
 
 import os

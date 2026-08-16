@@ -1,3 +1,10 @@
+"""CLI workflow for catching up unscored jobs for a cached resume profile.
+
+This is the non-Streamlit path for morning/backlog runs. It reuses cached
+resume profiles, screens jobs for eligibility, scores only unscored canonical
+jobs, and refreshes dbt analytics when new scores are saved.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -16,6 +23,7 @@ from src.repositories.recommendation_repository import (
     load_candidate_jobs,
 )
 from src.database import get_connection
+from src.job_screening import screen_unscreened_jobs
 from src.score_jobs_ai import (
     initialize_ai_tables,
     load_cached_profile,
@@ -89,6 +97,7 @@ def score_backlog(
     limit: int,
     minimum_rule_score: int,
 ) -> BacklogSummary:
+    """Run eligibility screening and full scoring for a batch of jobs."""
     initialize_ai_tables()
 
     model_name = get_model_name()
@@ -138,6 +147,21 @@ def score_backlog(
         prompt_version=MATCHER_PROMPT_VERSION,
         reuse_any_model=True,
     )
+
+    screening_summary = screen_unscreened_jobs(
+        resume_hash=selected_resume_hash,
+        resume_profile=resume_profile,
+        limit=limit,
+        model_name=model_name,
+    )
+
+    if screening_summary.screened:
+        print(
+            "Eligibility screening summary: "
+            f"{screening_summary.eligible} eligible, "
+            f"{screening_summary.needs_description} need description, "
+            f"{screening_summary.excluded} excluded."
+        )
 
     candidate_jobs = load_candidate_jobs(
         resume_hash=selected_resume_hash,

@@ -1,3 +1,9 @@
+"""Parser for JobLookup email alerts.
+
+The current JobLookup sample exposes title/location and a dispatch URL but no
+company name, so the parser stores an explicit unknown company placeholder.
+"""
+
 import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse

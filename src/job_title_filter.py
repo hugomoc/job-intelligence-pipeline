@@ -1,3 +1,9 @@
+"""Deterministic title exclusions for obviously wrong-fit jobs.
+
+This is the fast, auditable guardrail before AI screening. It catches malformed
+parser rows and clearly unrelated titles so we avoid spending API calls on them.
+"""
+
 import re
 
 

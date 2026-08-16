@@ -1,3 +1,5 @@
+"""Extractor for JobLeads job-detail pages reached from resolvers."""
+
 from __future__ import annotations
 
 import json

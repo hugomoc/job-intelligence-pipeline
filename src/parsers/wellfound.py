@@ -1,3 +1,5 @@
+"""Parser for Wellfound digest emails with repeated title/company blocks."""
+
 import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse

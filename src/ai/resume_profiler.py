@@ -1,3 +1,10 @@
+"""AI resume profiler used to cache a structured candidate profile.
+
+The app hashes the uploaded resume and stores only this structured profile, not
+the uploaded file or original resume text. The profile becomes the reusable
+input for title screening and full job scoring.
+"""
+
 from __future__ import annotations
 
 import os
@@ -338,6 +345,7 @@ def redact_personal_information(
 def build_resume_profile_prompt(
     redacted_resume_text: str,
 ) -> str:
+    """Build a privacy-aware prompt for converting resume text into JSON."""
     return f"""
 You are an expert technical recruiter and resume analyst.
 

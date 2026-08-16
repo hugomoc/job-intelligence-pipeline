@@ -1,3 +1,5 @@
+"""Parser for Levels.fyi job-alert emails."""
+
 from typing import Any
 
 from src.parsers.builtin import parse_builtin_email

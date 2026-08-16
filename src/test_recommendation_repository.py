@@ -5,6 +5,12 @@ from src import database
 from src.repositories.recommendation_repository import (
     count_unscored_candidate_jobs,
     load_candidate_jobs,
+    save_job_eligibility_decision,
+)
+from src.ai.job_eligibility import (
+    ELIGIBILITY_PROMPT_VERSION,
+    JobEligibilityAnalysis,
+    JobEligibilityDecision,
 )
 from src.job_title_filter import (
     excluded_job_title_reason,
@@ -147,6 +153,35 @@ def test_candidate_jobs_require_description() -> None:
                     * 12
                 ),
                 title="Remote Data Engineer III Power BI Expert",
+            )
+            seed_job(
+                "ai-excluded-job",
+                " ".join(
+                    [
+                        "Builds reliable data pipelines and analytics models"
+                    ]
+                    * 12
+                ),
+                title="Forward Deployed Engineer",
+            )
+
+            save_job_eligibility_decision(
+                JobEligibilityDecision(
+                    canonical_job_key="ai-excluded-job",
+                    record_key="ai-excluded-job",
+                    resume_hash="resume-1",
+                    model_name="model-1",
+                    prompt_version=ELIGIBILITY_PROMPT_VERSION,
+                    analysis=JobEligibilityAnalysis(
+                        decision="exclude",
+                        confidence="high",
+                        reason="Outside target role lane.",
+                        matched_resume_signals=[],
+                        missing_or_mismatched_signals=[
+                            "Forward deployed role"
+                        ],
+                    ),
+                )
             )
 
             candidates = load_candidate_jobs(

@@ -1,3 +1,10 @@
+"""Rule-based job matcher used as the first cheap relevance pass.
+
+This module does deterministic scoring from titles, descriptions, locations,
+freshness, and configured keywords. AI scoring happens later only for jobs that
+survive this inexpensive filter.
+"""
+
 from __future__ import annotations
 
 import re

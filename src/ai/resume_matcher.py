@@ -1,3 +1,10 @@
+"""Detailed AI resume-to-job fit scoring.
+
+This is the expensive matcher that produces APPLY/REVIEW/SKIP, component fit
+scores, strengths, gaps, risks, and a summary. It expects jobs to have already
+passed ingestion, rule matching, eligibility screening, and description checks.
+"""
+
 from __future__ import annotations
 
 import json
@@ -259,6 +266,7 @@ def build_job_match_prompt(
     description: str,
     description_complete: bool,
 ) -> str:
+    """Build the full evidence-bound prompt for fit scoring."""
     completeness = (
         "COMPLETE"
         if description_complete
@@ -903,6 +911,7 @@ def build_resume_job_match(
     description_word_count: int,
     description_complete: bool,
 ) -> ResumeJobMatch:
+    """Normalize model output into the durable score object stored in DuckDB."""
     record_key = str(
         job.get("record_key") or ""
     )

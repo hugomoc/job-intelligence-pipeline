@@ -1,3 +1,10 @@
+"""Parser for Lensa email alerts.
+
+Lensa emails mix real job cards with header, image, and Markdown tracking-link
+fragments. The validation helpers are conservative so wrapper text does not
+become fake jobs in the UI.
+"""
+
 import re
 from typing import Any
 from urllib.parse import urlparse

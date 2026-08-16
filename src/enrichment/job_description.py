@@ -1,3 +1,11 @@
+"""Public job-description extraction helpers.
+
+This module extracts useful job-description text from public HTML, structured
+data, and common job-board pages. It deliberately validates length and content
+quality so login pages, navigation, and marketing copy do not overwrite better
+descriptions.
+"""
+
 from __future__ import annotations
 
 import html

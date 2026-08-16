@@ -1,3 +1,9 @@
+"""Parser for LinkedIn job-alert emails.
+
+LinkedIn emails can expose both text links and HTML cards. This parser extracts
+stable LinkedIn job IDs when possible so duplicate alerts collapse cleanly.
+"""
+
 import re
 from typing import Any
 from urllib.parse import urlparse

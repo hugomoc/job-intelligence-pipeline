@@ -1,3 +1,10 @@
+"""Parser for Glassdoor job-alert emails.
+
+Glassdoor sends several layouts, including digest emails and single-job
+messages. The parser prefers structured card sections and fails loudly when the
+card/link counts do not line up.
+"""
+
 import re
 import unicodedata
 from typing import Any

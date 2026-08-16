@@ -1,3 +1,5 @@
+"""Parser for Ladders job-alert emails."""
+
 import re
 from typing import Any
 from urllib.parse import urlparse

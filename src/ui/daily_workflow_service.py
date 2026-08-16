@@ -1,3 +1,10 @@
+"""Service layer behind the Streamlit daily-operations buttons.
+
+The UI calls these functions for ingest, enrichment, rule matching, and backlog
+scoring. Keeping this orchestration outside streamlit_app.py makes it easier to
+test and keeps raw exception details out of the browser.
+"""
+
 from __future__ import annotations
 
 import contextlib
@@ -84,6 +91,7 @@ class DailyWorkflowError(Exception):
 
 
 def capture_stdout_lines(function, *args, **kwargs):
+    """Run a CLI-style function and return its printed lines for the UI log."""
     buffer = io.StringIO()
 
     with contextlib.redirect_stdout(buffer):
@@ -99,6 +107,7 @@ def capture_stdout_lines(function, *args, **kwargs):
 
 
 def run_email_ingestion() -> IngestionSummary:
+    """Read configured folders, parse emails, store jobs, and refresh rules."""
     try:
         sources = load_sources()
 
@@ -182,6 +191,7 @@ def run_description_enrichment(
     source: str | None = None,
     retry_failed: bool = False,
 ) -> EnrichmentSummary:
+    """Fetch richer descriptions for stored jobs without changing source rows."""
     try:
         jobs = load_jobs_to_enrich(
             limit=limit,

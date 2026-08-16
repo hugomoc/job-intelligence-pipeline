@@ -1,3 +1,9 @@
+"""In-memory PDF/DOCX resume extraction.
+
+Uploaded resumes are read into text and hashed, but the original file and raw
+text are not persisted. Downstream steps cache only the structured AI profile.
+"""
+
 from __future__ import annotations
 
 import hashlib
