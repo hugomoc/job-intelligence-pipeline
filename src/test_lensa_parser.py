@@ -85,10 +85,64 @@ def test_wrapped_text_link_does_not_swallow_next_card() -> None:
     assert "logo.webp" not in jobs[0]["apply_url"]
 
 
+def test_email_greeting_separator_is_not_a_job_card() -> None:
+    jobs = parse_lensa_email(
+        text="""
+        August 15, 2026
+        ---|---
+        Hi there,
+        Here are jobs we thought you might like.
+        ](https://sg3email.lensa.com/ls/click?upn=bad-header-link)
+
+        logo.webp) | Paradigm Corp.
+        ---|---
+        Remote Data Engineer III
+        $75K-$91K / yr. (est.)
+        Full-Time• Remote
+        ](https://sg3email.lensa.com/ls/click?upn=real-job-link)
+        """,
+        html=None,
+        links=[],
+    )
+
+    assert len(jobs) == 1
+    assert jobs[0]["title"] == "Remote Data Engineer III"
+    assert jobs[0]["company_name"] == "Paradigm Corp."
+    assert jobs[0]["apply_url"].endswith("real-job-link")
+
+
+def test_malformed_markdown_link_card_is_ignored() -> None:
+    jobs = parse_lensa_email(
+        text="""
+        ›
+        ---|---
+        [Senior BI Analyst - Remote Dashboards &
+        Here is some wrapped link text.
+        ](https://sg3email.lensa.com/ls/click?upn=bad-link-card)
+
+        logo.webp) | Clean Company
+        ---|---
+        Senior Data Engineer
+        $120K-$140K / yr. (est.)
+        Full-Time• Remote
+        ](https://sg3email.lensa.com/ls/click?upn=real-clean-card)
+        """,
+        html=None,
+        links=[],
+    )
+
+    assert len(jobs) == 1
+    assert jobs[0]["title"] == "Senior Data Engineer"
+    assert jobs[0]["company_name"] == "Clean Company"
+    assert jobs[0]["apply_url"].endswith("real-clean-card")
+
+
 def main() -> None:
     test_multiple_lensa_cards_extraction()
     test_marketing_email_is_ignored()
     test_wrapped_text_link_does_not_swallow_next_card()
+    test_email_greeting_separator_is_not_a_job_card()
+    test_malformed_markdown_link_card_is_ignored()
     print("Lensa parser tests passed.")
 
 

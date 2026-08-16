@@ -6,11 +6,16 @@ from src.repositories.recommendation_repository import (
     count_unscored_candidate_jobs,
     load_candidate_jobs,
 )
+from src.job_title_filter import (
+    excluded_job_title_reason,
+    is_excluded_job_title,
+)
 
 
 def seed_job(
     record_key: str,
     description: str | None,
+    title: str | None = None,
 ) -> None:
     with database.get_connection() as connection:
         connection.execute(
@@ -31,7 +36,7 @@ def seed_job(
             [
                 record_key,
                 record_key,
-                f"Data Engineer {record_key}",
+                title or f"Data Engineer {record_key}",
                 description,
                 f"https://example.com/{record_key}",
             ],
@@ -123,6 +128,26 @@ def test_candidate_jobs_require_description() -> None:
                     * 12
                 ),
             )
+            seed_job(
+                "java-developer",
+                " ".join(
+                    [
+                        "Builds reliable software systems and data integrations"
+                    ]
+                    * 12
+                ),
+                title="Java Developer",
+            )
+            seed_job(
+                "power-bi-data-engineer",
+                " ".join(
+                    [
+                        "Builds data pipelines and Power BI semantic models"
+                    ]
+                    * 12
+                ),
+                title="Remote Data Engineer III Power BI Expert",
+            )
 
             candidates = load_candidate_jobs(
                 resume_hash="resume-1",
@@ -148,8 +173,24 @@ def test_candidate_jobs_require_description() -> None:
             database.DATABASE_PATH = old_database_path
 
 
+def test_title_exclusion_reasons_are_detected() -> None:
+    assert is_excluded_job_title("Oracle Developer 2884 OJO")
+    assert is_excluded_job_title("Java Developer")
+    assert is_excluded_job_title(
+        "Remote Data Engineer III Power BI & Data Pipelines Expert"
+    )
+    assert is_excluded_job_title("AEP RTCDP Developer")
+    assert is_excluded_job_title("Hi there,")
+    assert is_excluded_job_title("[Senior BI Analyst - Remote Dashboards &")
+    assert not is_excluded_job_title("Senior Data Engineer")
+    assert excluded_job_title_reason("Java Developer") == (
+        "title focuses on Java"
+    )
+
+
 def main() -> None:
     test_candidate_jobs_require_description()
+    test_title_exclusion_reasons_are_detected()
     print("Recommendation repository tests passed.")
 
 

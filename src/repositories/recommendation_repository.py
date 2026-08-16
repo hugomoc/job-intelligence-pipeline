@@ -7,6 +7,7 @@ from typing import Any
 
 from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
 from src.database import get_connection, initialize_database
+from src.job_title_filter import EXCLUDED_TITLE_SQL_REGEX
 
 
 def parse_json_list(value: str | None) -> list[str]:
@@ -138,6 +139,10 @@ def load_all_jobs(
                    recommendations.canonical_job_key
                AND recommendations.resume_hash = ?
                AND recommendations.ai_prompt_version = ?
+            WHERE NOT regexp_matches(
+                lower(coalesce(jobs.title, '')),
+                ?
+            )
             ORDER BY
                 jobs.discovered_at desc nulls last,
                 jobs.title,
@@ -146,6 +151,7 @@ def load_all_jobs(
             [
                 resume_hash or "",
                 MATCHER_PROMPT_VERSION,
+                EXCLUDED_TITLE_SQL_REGEX,
             ],
         )
 
@@ -372,6 +378,10 @@ def load_candidate_jobs(
                    AND latest_application_status.status_rank = 1
                 WHERE existing_scores.canonical_job_key IS NULL
                   AND matches.match_score >= ?
+                  AND NOT regexp_matches(
+                      lower(coalesce(jobs.title, '')),
+                      ?
+                  )
                   AND jobs.description IS NOT NULL
                   AND TRIM(jobs.description) <> ''
                   AND array_length(
@@ -413,6 +423,7 @@ def load_candidate_jobs(
                 model_name,
                 prompt_version,
                 minimum_rule_score,
+                EXCLUDED_TITLE_SQL_REGEX,
                 limit,
             ],
         )
@@ -547,6 +558,10 @@ def count_unscored_candidate_jobs(
                    AND latest_application_status.status_rank = 1
                 WHERE existing_scores.canonical_job_key IS NULL
                   AND matches.match_score >= ?
+                  AND NOT regexp_matches(
+                      lower(coalesce(jobs.title, '')),
+                      ?
+                  )
                   AND jobs.description IS NOT NULL
                   AND TRIM(jobs.description) <> ''
                   AND array_length(
@@ -571,6 +586,7 @@ def count_unscored_candidate_jobs(
                 model_name,
                 prompt_version,
                 minimum_rule_score,
+                EXCLUDED_TITLE_SQL_REGEX,
             ],
         ).fetchone()
 

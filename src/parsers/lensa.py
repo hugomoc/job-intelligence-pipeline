@@ -24,6 +24,11 @@ SALARY_PATTERN = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+DATE_LINE_PATTERN = re.compile(
+    r"^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2},\s+\d{4}$",
+    re.IGNORECASE,
+)
+
 IGNORED_LINES = {
     "---|---",
     "apply",
@@ -32,6 +37,19 @@ IGNORED_LINES = {
     "manage alerts",
     "unsubscribe",
     "view job",
+}
+
+IGNORED_TITLES = {
+    "hi there,",
+    "hi there",
+    "hello,",
+    "hello",
+}
+
+INVALID_COMPANY_NAMES = {
+    "›",
+    ">",
+    "|",
 }
 
 
@@ -121,6 +139,12 @@ def extract_company_before_separator(lines: list[str], index: int) -> str | None
         if not company or company.casefold() in IGNORED_LINES:
             continue
 
+        if company in INVALID_COMPANY_NAMES:
+            continue
+
+        if DATE_LINE_PATTERN.fullmatch(company):
+            continue
+
         if company.endswith((".webp)", ".png)", ".jpg)")):
             continue
 
@@ -130,6 +154,39 @@ def extract_company_before_separator(lines: list[str], index: int) -> str | None
         return company
 
     return None
+
+
+def is_valid_title(value: str) -> bool:
+    title = clean_text(value)
+
+    if not title:
+        return False
+
+    if title.casefold() in IGNORED_LINES | IGNORED_TITLES:
+        return False
+
+    if DATE_LINE_PATTERN.fullmatch(title):
+        return False
+
+    if title.startswith(("http://", "https://", "[", "](", "›")):
+        return False
+
+    return True
+
+
+def has_job_details(
+    salary_text: str | None,
+    details: str | None,
+) -> bool:
+    if salary_text:
+        return True
+
+    details_text = clean_text(details).casefold()
+
+    return any(
+        marker in details_text
+        for marker in ("remote", "full-time", "part-time", "contract")
+    )
 
 
 def extract_salary(value: str | None) -> str | None:
@@ -189,6 +246,12 @@ def parse_lensa_email(
         company_name = extract_company_before_separator(lines, index)
 
         if not company_name:
+            _unused_url, link_index = find_following_link(
+                lines=lines,
+                start_index=index + 1,
+                job_links=job_links,
+                link_index=link_index,
+            )
             continue
 
         title_index = index + 1
@@ -198,7 +261,7 @@ def parse_lensa_email(
 
         title = clean_text(lines[title_index])
 
-        if not title or title.casefold() in IGNORED_LINES:
+        if not is_valid_title(title):
             continue
 
         salary_text = None
@@ -209,6 +272,18 @@ def parse_lensa_email(
 
         if title_index + 2 < len(lines):
             details = lines[title_index + 2]
+
+        if not has_job_details(
+            salary_text=salary_text,
+            details=details,
+        ):
+            _unused_url, link_index = find_following_link(
+                lines=lines,
+                start_index=title_index + 1,
+                job_links=job_links,
+                link_index=link_index,
+            )
+            continue
 
         apply_url, link_index = find_following_link(
             lines=lines,

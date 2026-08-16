@@ -65,6 +65,26 @@ sources:
     mailbox_folder: jobs/Welcometothejungle
     enabled: true
 
+  - source_id: joblookup
+    source_name: Joblookup
+    mailbox_folder: jobs/Joblookup
+    enabled: true
+
+  - source_id: jobleads
+    source_name: JobLeads
+    mailbox_folder: jobs/Jobleads
+    enabled: true
+
+  - source_id: bebee
+    source_name: Bebee
+    mailbox_folder: jobs/Bebee
+    enabled: true
+
+  - source_id: wellfound
+    source_name: Wellfound
+    mailbox_folder: jobs/Wellfound
+    enabled: true
+
   - source_id: linkedin
     source_name: LinkedIn (hugobatista20)
     mailbox_folder: jobs/Linkedin

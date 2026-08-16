@@ -11,8 +11,11 @@ from src.database import (
     mark_email_processed,
 )
 from src.parsers.builtin import parse_builtin_email
+from src.parsers.bebee import parse_bebee_email
 from src.parsers.glassdoor import parse_glassdoor_email
 from src.parsers.indeed import parse_indeed_email
+from src.parsers.jobleads import parse_jobleads_email
+from src.parsers.joblookup import parse_joblookup_email
 from src.parsers.jobright import parse_jobright_email
 from src.parsers.jobot import parse_jobot_email
 from src.parsers.ladders import parse_ladders_email
@@ -21,6 +24,7 @@ from src.parsers.levels import parse_levels_email
 from src.parsers.linkedin import parse_linkedin_email
 from src.parsers.remotehunter import parse_remotehunter_email
 from src.parsers.welcometothejungle import parse_welcometothejungle_email
+from src.parsers.wellfound import parse_wellfound_email
 from src.parsers.ziprecruiter import parse_ziprecruiter_email
 
 
@@ -52,6 +56,46 @@ def parse_jobot_message(
     message: dict[str, Any],
 ) -> list[dict[str, Any]]:
     return parse_jobot_email(
+        text=message.get("text", ""),
+        html=message.get("html"),
+        links=message.get("links", []),
+    )
+
+
+def parse_joblookup_message(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return parse_joblookup_email(
+        text=message.get("text", ""),
+        html=message.get("html"),
+        links=message.get("links", []),
+    )
+
+
+def parse_jobleads_message(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return parse_jobleads_email(
+        text=message.get("text", ""),
+        html=message.get("html"),
+        links=message.get("links", []),
+    )
+
+
+def parse_bebee_message(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return parse_bebee_email(
+        text=message.get("text", ""),
+        html=message.get("html"),
+        links=message.get("links", []),
+    )
+
+
+def parse_wellfound_message(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return parse_wellfound_email(
         text=message.get("text", ""),
         html=message.get("html"),
         links=message.get("links", []),
@@ -151,6 +195,9 @@ PARSERS: dict[str, ParserFunction] = {
     "builtin": parse_builtin_message,
     "indeed": parse_indeed_message,
     "glassdoor": parse_glassdoor_message,
+    "bebee": parse_bebee_message,
+    "jobleads": parse_jobleads_message,
+    "joblookup": parse_joblookup_message,
     "jobright": parse_jobright_message,
     "jobot": parse_jobot_message,
     "ladders": parse_ladders_message,
@@ -159,6 +206,7 @@ PARSERS: dict[str, ParserFunction] = {
     "linkedin": parse_linkedin_message,
     "remotehunter": parse_remotehunter_message,
     "welcometothejungle": parse_welcometothejungle_message,
+    "wellfound": parse_wellfound_message,
     "ziprecruiter": parse_ziprecruiter_message,
 }
 
