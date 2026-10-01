@@ -36,6 +36,14 @@ class JobEligibilityAnalysis(BaseModel):
     )
     confidence: Literal["high", "medium", "low"]
     reason: str
+    role_family_match: Literal["strong", "possible", "weak", "none"] = "none"
+    specialization_match: Literal["strong", "partial", "weak", "none"] = "none"
+    required_skill_match: Literal["strong", "partial", "weak", "unknown"] = "unknown"
+    responsibility_match: Literal["strong", "partial", "weak", "unknown"] = "unknown"
+    seniority_match: Literal["strong", "partial", "weak", "unknown"] = "unknown"
+    admission_decision: Literal["include", "exclude"] = "exclude"
+    admission_reason: str = ""
+    critical_skill_gaps: list[str] = Field(default_factory=list)
     matched_resume_signals: list[str] = Field(default_factory=list)
     missing_or_mismatched_signals: list[str] = Field(default_factory=list)
 
@@ -82,6 +90,20 @@ Rules:
 5. If the title is plausible but the description is missing or too thin, return
    needs_description instead of eligible.
 6. Be conservative. The UI should save the candidate time.
+7. Treat the base title family as candidate generation only. Data Engineer,
+   Analytics Engineer, or BI Analyst alone is not enough evidence to include.
+8. Parse title specializations separately from the base family. If the title
+   names a central platform, work mode, or role type such as Databricks, SAP,
+   ML, Forward Deployed, customer implementation, management, or required
+   domain expertise, that specialization is high-importance evidence.
+9. If a high-importance title specialization is absent from the resume and is
+   central to the role, set admission_decision to exclude and list it in
+   critical_skill_gaps.
+10. Return admission_decision include only when there is meaningful evidence
+    across multiple dimensions: role family, core skills, responsibilities,
+    specialization, seniority, required experience, domain, and location.
+11. Do not exclude merely because one ordinary JD keyword is missing. Exclude
+    only for central/core requirements or substantially mismatched role type.
 
 CANDIDATE PROFILE:
 
@@ -112,13 +134,23 @@ def parse_job_eligibility_payload(
         )
 
     for field_name in (
+        "critical_skill_gaps",
         "matched_resume_signals",
         "missing_or_mismatched_signals",
     ):
         if payload.get(field_name) is None:
             payload[field_name] = []
 
-    for field_name in ("decision", "confidence"):
+    for field_name in (
+        "decision",
+        "confidence",
+        "role_family_match",
+        "specialization_match",
+        "required_skill_match",
+        "responsibility_match",
+        "seniority_match",
+        "admission_decision",
+    ):
         if isinstance(payload.get(field_name), str):
             payload[field_name] = payload[field_name].strip().casefold()
 
@@ -176,8 +208,14 @@ def evaluate_job_eligibility(
     selected_model = model_name or get_model_name()
     prompt = build_job_eligibility_prompt(resume_profile, job)
 
+    # Bind the client to a local name. Chaining off get_gemini_client()
+    # lets the temporary Client be garbage collected mid-request, which
+    # closes the underlying httpx client and raises
+    # "Cannot send a request, as the client has been closed."
+    client = get_gemini_client()
+
     try:
-        response = get_gemini_client().models.generate_content(
+        response = client.models.generate_content(
             model=selected_model,
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -235,8 +273,11 @@ def evaluate_job_eligibility_openai(
                     "role": "system",
                     "content": (
                         "Return only valid JSON with keys decision, confidence, "
-                        "reason, matched_resume_signals, and "
-                        "missing_or_mismatched_signals."
+                        "reason, role_family_match, specialization_match, "
+                        "required_skill_match, responsibility_match, "
+                        "seniority_match, critical_skill_gaps, "
+                        "admission_decision, admission_reason, "
+                        "matched_resume_signals, and missing_or_mismatched_signals."
                     ),
                 },
                 {"role": "user", "content": prompt},

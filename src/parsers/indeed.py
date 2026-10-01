@@ -20,6 +20,73 @@ SALARY_PATTERN = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+# Indeed frequently reports a location as a bare country or an unabbreviated
+# state instead of "City, ST". These are listed explicitly rather than matched
+# with a generic word pattern so that title fragments such as
+# "Senior Data Engineer - Analytics" are still rejected.
+NAMED_REGIONS: tuple[str, ...] = (
+    "United States",
+    "Alabama",
+    "Alaska",
+    "Arizona",
+    "Arkansas",
+    "California",
+    "Colorado",
+    "Connecticut",
+    "Delaware",
+    "Florida",
+    "Georgia",
+    "Hawaii",
+    "Idaho",
+    "Illinois",
+    "Indiana",
+    "Iowa",
+    "Kansas",
+    "Kentucky",
+    "Louisiana",
+    "Maine",
+    "Maryland",
+    "Massachusetts",
+    "Michigan",
+    "Minnesota",
+    "Mississippi",
+    "Missouri",
+    "Montana",
+    "Nebraska",
+    "Nevada",
+    "New Hampshire",
+    "New Jersey",
+    "New Mexico",
+    "New York",
+    "North Carolina",
+    "North Dakota",
+    "Ohio",
+    "Oklahoma",
+    "Oregon",
+    "Pennsylvania",
+    "Rhode Island",
+    "South Carolina",
+    "South Dakota",
+    "Tennessee",
+    "Texas",
+    "Utah",
+    "Vermont",
+    "Virginia",
+    "Washington",
+    "West Virginia",
+    "Wisconsin",
+    "Wyoming",
+    "District of Columbia",
+    "Puerto Rico",
+)
+
+# Words are joined with \s+ because LOCATION_PATTERN is compiled with
+# re.VERBOSE, which would otherwise discard literal spaces.
+NAMED_REGION_REGEX = "|".join(
+    r"\s+".join(re.escape(word) for word in region.split())
+    for region in NAMED_REGIONS
+)
+
 LOCATION_PATTERN = re.compile(
     r"""
     ^
@@ -34,6 +101,10 @@ LOCATION_PATTERN = re.compile(
         |
         [A-Za-z .'-]+,\s*[A-Z]{2}
         (?:\s+\d{5})?
+        |
+    """
+    + NAMED_REGION_REGEX
+    + r"""
     )
     $
     """,

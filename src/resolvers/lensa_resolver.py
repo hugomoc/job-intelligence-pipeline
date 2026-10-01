@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from playwright.async_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
 from src.browser.playwright_client import PlaywrightClient
+from src.enrichment.job_identity import (
+    JobIdentityValidation,
+    validate_job_identity,
+)
 from src.resolvers.job_matching import (
     CandidateMatch,
     score_candidate,
@@ -57,6 +61,21 @@ class LensaResolverError(Exception):
 
 def log(message: str) -> None:
     print(message)
+
+
+def validate_resolved_jobleads_job(
+    expected_title: str,
+    expected_company: str,
+    job: JobLeadsJob,
+) -> JobIdentityValidation:
+    """Reject downstream JobLeads jobs that do not match the Lensa card."""
+    return validate_job_identity(
+        original_title=expected_title,
+        original_company=expected_company,
+        resolved_title=job.title,
+        resolved_company=job.company,
+        resolved_location=job.location,
+    )
 
 
 async def accept_cookie_modal(page: Page) -> None:
@@ -316,6 +335,20 @@ async def resolve_lensa_job_with_client(
     log(f"Resolved destination: {resolved_url}")
 
     job: JobLeadsJob = await extract_jobleads_job(destination_page)
+    identity_validation = validate_resolved_jobleads_job(
+        expected_title=title,
+        expected_company=company,
+        job=job,
+    )
+
+    if not identity_validation.accepted:
+        log(
+            "Rejected JobLeads destination: "
+            f"{job.title or '<missing title>'} / "
+            f"{job.company or '<missing company>'}. "
+            f"Reason: {identity_validation.reason}"
+        )
+        return None
 
     if not job.description:
         log("JobLeads page loaded, but no description was extracted.")

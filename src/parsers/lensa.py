@@ -220,14 +220,30 @@ def find_following_link(
     job_links: list[str],
     link_index: int,
 ) -> tuple[str | None, int]:
-    if link_index < len(job_links):
-        return job_links[link_index], link_index + 1
-
+    # Prefer the tracking link that appears next to the parsed card text. Lensa
+    # emails can include image/header links before the actual job links, so a
+    # global link list alone can pair a job card with the wrong destination.
     for line in lines[start_index : start_index + 6]:
         match = LINK_PATTERN.search(line)
 
         if match:
-            return match.group(0), link_index
+            url = match.group(0)
+
+            if "](" in line and ")" not in line[match.end() :]:
+                continue
+
+            if url in job_links:
+                found_index = job_links.index(url)
+                return (
+                    url,
+                    max(link_index, found_index + 1),
+                )
+
+            if not job_links:
+                return url, link_index
+
+    if link_index < len(job_links):
+        return job_links[link_index], link_index + 1
 
     return None, link_index
 

@@ -41,6 +41,12 @@ APPLICATION_STATUS_LABELS = {
     "removed": "Removed",
 }
 
+TITLE_FIT_LABELS = {
+    "STRONG_MATCH": "Strong",
+    "POSSIBLE_MATCH": "Possible",
+    "FILTERED_OUT": "Filtered out",
+}
+
 
 def format_seen_date(value: object) -> str | None:
     if value is None:
@@ -245,6 +251,22 @@ def render_job_listing(job: dict) -> None:
                 f"({job.get('rule_score') or 0})"
             )
 
+        title_fit = TITLE_FIT_LABELS.get(
+            job.get("title_classification"),
+            "Possible",
+        )
+        title_reason = job.get("title_filter_reason")
+        title_score = job.get("title_match_score")
+        title_caption = f"Title Fit: {title_fit}"
+
+        if title_score is not None:
+            title_caption += f" ({title_score})"
+
+        if title_reason:
+            title_caption += f" - {title_reason}"
+
+        st.caption(title_caption)
+
         if job.get("has_incomplete_description"):
             description_word_count = job.get(
                 "description_word_count"
@@ -256,6 +278,45 @@ def render_job_listing(job: dict) -> None:
                 )
             else:
                 st.warning("Incomplete job description.")
+
+        if job.get("enrichment_status"):
+            status_text = job.get("enrichment_status")
+
+            if status_text == "resolution_rejected":
+                st.warning("Enrichment: identity mismatch rejected.")
+
+            with st.expander("Enrichment details"):
+                st.caption(f"Status: {status_text}")
+
+                if job.get("identity_validation_reason"):
+                    st.caption(
+                        "Validation: "
+                        f"{job['identity_validation_reason']}"
+                    )
+
+                if job.get("identity_confidence") is not None:
+                    st.caption(
+                        "Identity confidence: "
+                        f"{job['identity_confidence']}"
+                    )
+
+                if job.get("resolved_candidate_title"):
+                    st.caption(
+                        "Candidate title: "
+                        f"{job['resolved_candidate_title']}"
+                    )
+
+                if job.get("resolved_candidate_company"):
+                    st.caption(
+                        "Candidate company: "
+                        f"{job['resolved_candidate_company']}"
+                    )
+
+                if job.get("resolved_candidate_url"):
+                    st.caption(
+                        "Resolved URL: "
+                        f"{job['resolved_candidate_url']}"
+                    )
 
         if job.get("ai_score") is not None:
             score_cols = st.columns(6)
@@ -544,24 +605,30 @@ with jobs_tab:
             resume_hash=st.session_state.get("resume_hash")
         )
 
-    visible_jobs = [
-        job
-        for job in all_jobs
-        if job.get("application_status", "new") != "removed"
-    ]
-
     job_dates = [
         job_date
         for job_date in (
             to_date(job.get("sent_at"))
-            for job in visible_jobs
+            for job in all_jobs
         )
         if job_date is not None
     ]
 
-    filter_cols = st.columns([2, 2, 2, 1])
+    filter_cols = st.columns([1.5, 2, 2, 2, 1])
 
     with filter_cols[0]:
+        status_filter = st.selectbox(
+            "Status",
+            options=[
+                "All",
+                "New",
+                "Applied",
+                "Removed",
+            ],
+            index=1,
+        )
+
+    with filter_cols[1]:
         source_filter = st.selectbox(
             "Source",
             options=[
@@ -569,13 +636,13 @@ with jobs_tab:
                 *sorted(
                     {
                         job["source"]
-                        for job in visible_jobs
+                        for job in all_jobs
                     }
                 ),
             ],
         )
 
-    with filter_cols[1]:
+    with filter_cols[2]:
         city_filter = st.selectbox(
             "City",
             options=[
@@ -583,7 +650,7 @@ with jobs_tab:
                 *sorted(
                     {
                         get_city(job.get("location"))
-                        for job in visible_jobs
+                        for job in all_jobs
                     }
                 ),
             ],
@@ -597,7 +664,7 @@ with jobs_tab:
         min_job_date = date.today()
         max_job_date = date.today()
 
-    with filter_cols[2]:
+    with filter_cols[3]:
         selected_dates = st.date_input(
             "Email date",
             value=(min_job_date, max_job_date),
@@ -605,7 +672,7 @@ with jobs_tab:
             max_value=max_job_date,
         )
 
-    with filter_cols[3]:
+    with filter_cols[4]:
         scored_filter = st.selectbox(
             "AI score",
             options=[
@@ -627,13 +694,35 @@ with jobs_tab:
             ],
         )
 
+    selected_title_fits = st.multiselect(
+        "Title fit",
+        options=[
+            "Strong",
+            "Possible",
+            "Filtered out",
+        ],
+        default=[
+            "Strong",
+            "Possible",
+            "Filtered out",
+        ],
+    )
+
     if isinstance(selected_dates, tuple):
         start_date, end_date = selected_dates
     else:
         start_date = selected_dates
         end_date = selected_dates
 
-    filtered_jobs = visible_jobs
+    filtered_jobs = all_jobs
+
+    if status_filter != "All":
+        selected_status = status_filter.casefold()
+        filtered_jobs = [
+            job
+            for job in filtered_jobs
+            if job.get("application_status", "new") == selected_status
+        ]
 
     if source_filter != "All":
         filtered_jobs = [
@@ -690,59 +779,58 @@ with jobs_tab:
             == recommendation_filter
         ]
 
+    selected_title_categories = {
+        category
+        for category, label in TITLE_FIT_LABELS.items()
+        if label in selected_title_fits
+    }
+
+    filtered_jobs = [
+        job
+        for job in filtered_jobs
+        if job.get("title_classification", "POSSIBLE_MATCH")
+        in selected_title_categories
+    ]
+
     visible_applied_count = sum(
         1
-        for job in visible_jobs
+        for job in all_jobs
         if job.get("application_status") == "applied"
     )
     visible_new_count = sum(
         1
-        for job in visible_jobs
+        for job in all_jobs
         if job.get("application_status", "new") == "new"
+    )
+    visible_removed_count = sum(
+        1
+        for job in all_jobs
+        if job.get("application_status") == "removed"
     )
     ai_scored_count = sum(
         1
-        for job in visible_jobs
+        for job in all_jobs
         if job.get("ai_score") is not None
+    )
+    title_filtered_count = sum(
+        1
+        for job in all_jobs
+        if job.get("title_classification") == "FILTERED_OUT"
     )
 
     st.caption(
-        f"Showing {len(filtered_jobs)} of {len(visible_jobs)} "
+        f"Showing {len(filtered_jobs)} of {len(all_jobs)} "
         f"ingested jobs. AI-scored: {ai_scored_count}. "
-        f"New: {visible_new_count}. Applied: {visible_applied_count}"
+        f"New: {visible_new_count}. Applied: {visible_applied_count}. "
+        f"Removed: {visible_removed_count}. "
+        f"Filtered by title: {title_filtered_count}"
     )
 
-    new_jobs = [
-        job
-        for job in filtered_jobs
-        if job.get("application_status", "new") == "new"
-    ]
-    applied_jobs_list = [
-        job
-        for job in filtered_jobs
-        if job.get("application_status") == "applied"
-    ]
+    if not filtered_jobs:
+        st.info("No jobs match the selected filters.")
 
-    new_jobs_tab, applied_jobs_tab = st.tabs(
-        [
-            f"New Jobs ({len(new_jobs)})",
-            f"Applied Jobs ({len(applied_jobs_list)})",
-        ]
-    )
-
-    with new_jobs_tab:
-        if not new_jobs:
-            st.info("No new jobs match the selected filters.")
-
-        for job in new_jobs:
-            render_job_listing(job)
-
-    with applied_jobs_tab:
-        if not applied_jobs_list:
-            st.info("No applied jobs match the selected filters.")
-
-        for job in applied_jobs_list:
-            render_job_listing(job)
+    for job in filtered_jobs:
+        render_job_listing(job)
 
 with operations_tab:
     current_jobs = (

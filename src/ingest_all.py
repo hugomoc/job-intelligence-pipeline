@@ -6,10 +6,13 @@ records, and refresh rule-match inputs after ingestion.
 """
 
 from collections.abc import Callable
+import os
 from typing import Any
 
+from dotenv import load_dotenv
+
 from src.config_loader import load_sources
-from src.connectors.yahoo_imap import read_messages
+from src.connectors.yahoo_imap import ENV_PATH, read_messages
 from src.database import (
     get_processed_email_count,
     get_raw_jobs,
@@ -39,6 +42,7 @@ ParserFunction = Callable[
     [dict[str, Any]],
     list[dict[str, Any]],
 ]
+DEFAULT_EMAIL_READ_LIMIT = 50
 
 
 def parse_indeed_message(
@@ -237,11 +241,21 @@ def ingest_source(
 
     print(f"\nProcessing {source_name}")
     print(f"Folder: {folder_name}")
+    load_dotenv(ENV_PATH)
+    email_limit = int(
+        source.get(
+            "email_limit",
+            os.getenv(
+                "YAHOO_EMAIL_READ_LIMIT",
+                str(DEFAULT_EMAIL_READ_LIMIT),
+            ),
+        )
+    )
 
     try:
         messages = read_messages(
             folder_name=folder_name,
-            limit=100,
+            limit=email_limit,
             unread_only=False,
             username_env=source.get(
                 "username_env",
@@ -253,6 +267,9 @@ def ingest_source(
             ),
         )
     except ValueError as error:
+        print(f"Skipping {source_name}: {error}")
+        return 0, 0, 0
+    except RuntimeError as error:
         print(f"Skipping {source_name}: {error}")
         return 0, 0, 0
 

@@ -85,6 +85,38 @@ def test_wrapped_text_link_does_not_swallow_next_card() -> None:
     assert "logo.webp" not in jobs[0]["apply_url"]
 
 
+def test_nearby_card_link_wins_over_unrelated_link_list() -> None:
+    jobs = parse_lensa_email(
+        text="""
+        logo.webp) | Defense Unicorns
+        ---|---
+        Data Engineer
+        $149K / yr.
+        Full-Time• Remote
+        ](https://sg3email.lensa.com/ls/click?upn=defense-unicorns-link)
+
+        logo.webp) | Other Company
+        ---|---
+        Remote Databricks Data AI Engineer
+        $120K-$140K / yr. (est.)
+        Full-Time• Remote
+        ](https://sg3email.lensa.com/ls/click?upn=other-company-link)
+        """,
+        html=None,
+        links=[
+            "https://sg3email.lensa.com/ls/click?upn=other-company-link",
+            "https://sg3email.lensa.com/ls/click?upn=defense-unicorns-link",
+        ],
+    )
+
+    assert len(jobs) == 2
+    assert jobs[0]["company_name"] == "Defense Unicorns"
+    assert jobs[0]["title"] == "Data Engineer"
+    assert jobs[0]["apply_url"].endswith("defense-unicorns-link")
+    assert jobs[1]["company_name"] == "Other Company"
+    assert jobs[1]["apply_url"].endswith("other-company-link")
+
+
 def test_email_greeting_separator_is_not_a_job_card() -> None:
     jobs = parse_lensa_email(
         text="""
@@ -141,6 +173,7 @@ def main() -> None:
     test_multiple_lensa_cards_extraction()
     test_marketing_email_is_ignored()
     test_wrapped_text_link_does_not_swallow_next_card()
+    test_nearby_card_link_wins_over_unrelated_link_list()
     test_email_greeting_separator_is_not_a_job_card()
     test_malformed_markdown_link_card_is_ignored()
     print("Lensa parser tests passed.")

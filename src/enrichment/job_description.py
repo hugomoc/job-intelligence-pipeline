@@ -87,6 +87,9 @@ class JobDescriptionResult:
     word_count: int
 
     error_message: str | None
+    resolved_title: str | None = None
+    resolved_company: str | None = None
+    resolved_location: str | None = None
 
 
 def create_http_client(
@@ -338,6 +341,84 @@ def build_structured_description(
     )
 
 
+def organization_name(value: Any) -> str | None:
+    if isinstance(value, dict):
+        return html_fragment_to_text(value.get("name")) or None
+
+    return html_fragment_to_text(value) or None
+
+
+def location_text(value: Any) -> str | None:
+    if isinstance(value, list):
+        pieces = [
+            location_text(item)
+            for item in value
+        ]
+
+        return ", ".join(piece for piece in pieces if piece) or None
+
+    if not isinstance(value, dict):
+        return html_fragment_to_text(value) or None
+
+    address = value.get("address")
+
+    if isinstance(address, dict):
+        pieces = [
+            address.get("addressLocality"),
+            address.get("addressRegion"),
+            address.get("addressCountry"),
+        ]
+
+        return ", ".join(str(piece) for piece in pieces if piece) or None
+
+    return html_fragment_to_text(value.get("name") or address) or None
+
+
+def extract_json_ld_job_metadata(
+    soup: BeautifulSoup,
+) -> dict[str, str | None]:
+    scripts = soup.find_all(
+        "script",
+        attrs={
+            "type": (
+                "application/ld+json"
+            )
+        },
+    )
+
+    for script in scripts:
+        raw_json = script.string
+
+        if not raw_json:
+            raw_json = script.get_text(strip=True)
+
+        if not raw_json:
+            continue
+
+        try:
+            payload = json.loads(raw_json)
+        except json.JSONDecodeError:
+            continue
+
+        for node in walk_json(payload):
+            if not is_job_posting_type(node.get("@type")):
+                continue
+
+            return {
+                "title": html_fragment_to_text(node.get("title")) or None,
+                "company": organization_name(
+                    node.get("hiringOrganization")
+                ),
+                "location": location_text(node.get("jobLocation")),
+            }
+
+    return {
+        "title": None,
+        "company": None,
+        "location": None,
+    }
+
+
 def extract_json_ld_description(
     soup: BeautifulSoup,
 ) -> str:
@@ -582,6 +663,7 @@ def fetch_job_description(
         response.text,
         "html.parser",
     )
+    metadata = extract_json_ld_job_metadata(soup)
 
     if appears_to_be_block_page(soup):
         return JobDescriptionResult(
@@ -596,6 +678,9 @@ def fetch_job_description(
                 "The response appears to be "
                 "an access-control or CAPTCHA page."
             ),
+            resolved_title=metadata.get("title"),
+            resolved_company=metadata.get("company"),
+            resolved_location=metadata.get("location"),
         )
 
     description = (
@@ -648,6 +733,9 @@ def fetch_job_description(
                 "No sufficiently complete job "
                 "description was found."
             ),
+            resolved_title=metadata.get("title"),
+            resolved_company=metadata.get("company"),
+            resolved_location=metadata.get("location"),
         )
 
     return JobDescriptionResult(
@@ -661,4 +749,7 @@ def fetch_job_description(
         description=description,
         word_count=word_count,
         error_message=None,
+        resolved_title=metadata.get("title"),
+        resolved_company=metadata.get("company"),
+        resolved_location=metadata.get("location"),
     )

@@ -61,6 +61,17 @@ def is_openai_quota_exhausted(error: ResumeMatcherError) -> bool:
     )
 
 
+def should_switch_to_openai(error: ResumeMatcherError) -> bool:
+    """Use OpenAI when Gemini cannot screen a job."""
+    error_message = str(error)
+
+    return (
+        is_gemini_quota_exhausted(error)
+        or "PERMISSION_DENIED" in error_message
+        or "denied access" in error_message.casefold()
+    )
+
+
 def screen_unscreened_jobs(
     resume_hash: str,
     resume_profile: ResumeProfile,
@@ -113,13 +124,20 @@ def screen_unscreened_jobs(
                 gemini_screened += 1
 
         except ResumeMatcherError as error:
-            if is_gemini_quota_exhausted(error):
-                quota_exhausted = True
+            if should_switch_to_openai(error):
+                if is_gemini_quota_exhausted(error):
+                    quota_exhausted = True
+                    print(
+                        "Gemini quota is exhausted during screening. "
+                        "Switching to OpenAI fallback."
+                    )
+                else:
+                    print(
+                        "Gemini is unavailable during screening. "
+                        "Switching to OpenAI fallback."
+                    )
+
                 use_openai_fallback = True
-                print(
-                    "Gemini quota is exhausted during screening. "
-                    "Switching to OpenAI fallback."
-                )
 
                 try:
                     decision = evaluate_job_eligibility_openai(

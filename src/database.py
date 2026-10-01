@@ -11,6 +11,8 @@ from typing import Any
 
 import duckdb
 
+from src.job_title_filter import classify_job_title
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -57,6 +59,41 @@ def initialize_database() -> None:
             """
             ALTER TABLE raw_jobs
             ADD COLUMN IF NOT EXISTS posted_age_text VARCHAR
+            """
+        )
+
+        connection.execute(
+            """
+            ALTER TABLE raw_jobs
+            ADD COLUMN IF NOT EXISTS normalized_title VARCHAR
+            """
+        )
+
+        connection.execute(
+            """
+            ALTER TABLE raw_jobs
+            ADD COLUMN IF NOT EXISTS title_classification VARCHAR
+            """
+        )
+
+        connection.execute(
+            """
+            ALTER TABLE raw_jobs
+            ADD COLUMN IF NOT EXISTS title_match_score INTEGER
+            """
+        )
+
+        connection.execute(
+            """
+            ALTER TABLE raw_jobs
+            ADD COLUMN IF NOT EXISTS title_filter_reason VARCHAR
+            """
+        )
+
+        connection.execute(
+            """
+            ALTER TABLE raw_jobs
+            ADD COLUMN IF NOT EXISTS title_matched_pattern VARCHAR
             """
         )
 
@@ -269,6 +306,15 @@ def insert_jobs(
                 continue
 
             job_fingerprint = create_job_fingerprint(job)
+            title_classification = classify_job_title(
+                job.get("title")
+            )
+
+            if title_classification.category == "FILTERED_OUT":
+                print(
+                    f"Filtered: \"{job.get('title') or '<missing title>'}\"\n"
+                    f"Reason: {title_classification.reason}"
+                )
 
             connection.execute(
                 """
@@ -287,9 +333,14 @@ def insert_jobs(
                     email_message_id,
                     email_subject,
                     email_date,
-                    source_folder
+                    source_folder,
+                    normalized_title,
+                    title_classification,
+                    title_match_score,
+                    title_filter_reason,
+                    title_matched_pattern
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     record_key,
@@ -307,6 +358,11 @@ def insert_jobs(
                     email_metadata.get("subject"),
                     email_metadata.get("date"),
                     email_metadata.get("folder"),
+                    title_classification.normalized_title,
+                    title_classification.category,
+                    title_classification.score,
+                    title_classification.reason,
+                    title_classification.matched_pattern,
                 ],
             )
 

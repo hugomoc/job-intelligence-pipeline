@@ -71,6 +71,22 @@ def is_openai_quota_exhausted(error: ResumeMatcherError) -> bool:
     )
 
 
+def should_switch_to_openai(error: ResumeMatcherError) -> bool:
+    """Use OpenAI when Gemini cannot handle the request.
+
+    Quota exhaustion is the common case, but Gemini can also reject the
+    project with permission errors. In either case, keeping the backlog moving
+    is better than failing every selected job.
+    """
+    error_message = str(error)
+
+    return (
+        is_quota_exhausted(error)
+        or "PERMISSION_DENIED" in error_message
+        or "denied access" in error_message.casefold()
+    )
+
+
 def load_latest_resume_hash(model_name: str) -> str | None:
     initialize_ai_tables()
 
@@ -205,12 +221,18 @@ def score_backlog(
         except ResumeMatcherError as error:
             print("Score failed for this job.")
 
-            if is_quota_exhausted(error):
-                quota_exhausted = True
-                print(
-                    "Gemini quota is exhausted. "
-                    "Switching to OpenAI fallback."
-                )
+            if should_switch_to_openai(error):
+                if is_quota_exhausted(error):
+                    quota_exhausted = True
+                    print(
+                        "Gemini quota is exhausted. "
+                        "Switching to OpenAI fallback."
+                    )
+                else:
+                    print(
+                        "Gemini is unavailable for scoring. "
+                        "Switching to OpenAI fallback."
+                    )
 
                 use_openai_fallback = True
 

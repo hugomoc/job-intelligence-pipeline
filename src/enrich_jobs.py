@@ -21,6 +21,11 @@ from src.enrichment.job_description import (
     create_http_client,
     fetch_job_description,
 )
+from src.enrichment.job_identity import (
+    JobIdentityValidation,
+    validate_job_identity,
+)
+from src.job_title_filter import EXCLUDED_TITLE_SQL_REGEX
 
 
 FAILED_STATUSES = {
@@ -29,6 +34,12 @@ FAILED_STATUSES = {
     "invalid_url",
     "no_description",
     "not_improved",
+    "resolution_rejected",
+}
+
+AGGREGATOR_SOURCES_REQUIRING_IDENTITY = {
+    "lensa",
+    "jobleads",
 }
 
 
@@ -71,6 +82,86 @@ def initialize_enrichment_tables() -> None:
                 )
             """
         )
+
+        for statement in (
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS resolved_candidate_title VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS resolved_candidate_company VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS resolved_candidate_location VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS identity_confidence DOUBLE
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS title_similarity DOUBLE
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS company_similarity DOUBLE
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS identity_validation_reason VARCHAR
+            """,
+        ):
+            connection.execute(statement)
+
+
+def requires_identity_validation(
+    job: dict[str, Any],
+    result: JobDescriptionResult,
+) -> bool:
+    source = str(job.get("source") or "").casefold()
+    final_url = str(result.final_url or "").casefold()
+
+    return (
+        source in AGGREGATOR_SOURCES_REQUIRING_IDENTITY
+        or "jobleads.com" in final_url
+        or "lensa.com" in final_url
+    )
+
+
+def validate_enrichment_identity(
+    job: dict[str, Any],
+    result: JobDescriptionResult,
+) -> JobIdentityValidation:
+    if not requires_identity_validation(job, result):
+        return JobIdentityValidation(
+            accepted=True,
+            confidence=1.0,
+            title_similarity=None,
+            company_similarity=None,
+            occupation_match=None,
+            reason="identity validation not required for this source",
+        )
+
+    if not result.resolved_title and not result.resolved_company:
+        return JobIdentityValidation(
+            accepted=False,
+            confidence=0.0,
+            title_similarity=None,
+            company_similarity=None,
+            occupation_match=None,
+            reason="resolved identity metadata unavailable",
+        )
+
+    return validate_job_identity(
+        original_title=job.get("title"),
+        original_company=job.get("company_name"),
+        resolved_title=result.resolved_title,
+        resolved_company=result.resolved_company,
+        original_location=job.get("location"),
+        resolved_location=result.resolved_location,
+    )
 
 
 def table_exists(
@@ -164,6 +255,17 @@ def load_jobs_to_enrich(
        AND matches.match_rank = 1
 
     WHERE jobs.apply_url IS NOT NULL
+      AND COALESCE(
+          jobs.title_classification,
+          CASE
+              WHEN regexp_matches(
+                  lower(coalesce(jobs.title, '')),
+                  ?
+              )
+              THEN 'FILTERED_OUT'
+              ELSE 'POSSIBLE_MATCH'
+          END
+      ) <> 'FILTERED_OUT'
 
     ORDER BY
         matches.is_recommended DESC,
@@ -172,7 +274,8 @@ def load_jobs_to_enrich(
         jobs.discovered_at DESC,
         jobs.title,
         jobs.company_name
-    """
+    """,
+            [EXCLUDED_TITLE_SQL_REGEX],
     )
 
         columns = [
@@ -237,6 +340,7 @@ def save_enrichment_attempt(
     result: JobDescriptionResult,
     status: str | None = None,
     error_message: str | None = None,
+    identity_validation: JobIdentityValidation | None = None,
 ) -> None:
     previous_attempt_count = int(
         job.get("attempt_count") or 0
@@ -271,12 +375,20 @@ def save_enrichment_attempt(
                 extraction_method,
                 description_word_count,
                 error_message,
+                resolved_candidate_title,
+                resolved_candidate_company,
+                resolved_candidate_location,
+                identity_confidence,
+                title_similarity,
+                company_similarity,
+                identity_validation_reason,
                 attempt_count,
                 last_attempted_at
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?,
                 CURRENT_TIMESTAMP
             )
             """,
@@ -290,6 +402,29 @@ def save_enrichment_attempt(
                 result.extraction_method,
                 result.word_count,
                 final_error,
+                result.resolved_title,
+                result.resolved_company,
+                result.resolved_location,
+                (
+                    identity_validation.confidence
+                    if identity_validation
+                    else None
+                ),
+                (
+                    identity_validation.title_similarity
+                    if identity_validation
+                    else None
+                ),
+                (
+                    identity_validation.company_similarity
+                    if identity_validation
+                    else None
+                ),
+                (
+                    identity_validation.reason
+                    if identity_validation
+                    else None
+                ),
                 previous_attempt_count + 1,
             ],
         )
@@ -517,6 +652,7 @@ def main() -> None:
         "fetch_error": 0,
         "invalid_url": 0,
         "not_improved": 0,
+        "resolution_rejected": 0,
     }
 
     updated_count = 0
@@ -539,32 +675,56 @@ def main() -> None:
             updated = False
             stored_status = result.status
             stored_error = result.error_message
+            identity_validation = None
 
             if result.status == "enriched":
-                updated = update_job_description(
+                identity_validation = validate_enrichment_identity(
                     job=job,
                     result=result,
                 )
 
-                if updated:
-                    updated_count += 1
+                if not identity_validation.accepted:
+                    stored_status = "resolution_rejected"
+                    stored_error = (
+                        "Resolved candidate rejected: "
+                        f"{identity_validation.reason}"
+                    )
+
+                    print(
+                        "Rejected enrichment candidate\n"
+                        f"original=\"{job.get('title')} | "
+                        f"{job.get('company_name')}\"\n"
+                        f"candidate=\"{result.resolved_title} | "
+                        f"{result.resolved_company}\"\n"
+                        f"reason=\"{identity_validation.reason}\""
+                    )
 
                 else:
-                    stored_status = (
-                        "not_improved"
+                    updated = update_job_description(
+                        job=job,
+                        result=result,
                     )
 
-                    stored_error = (
-                        "The extracted description "
-                        "was not longer than the "
-                        "existing description."
-                    )
+                    if updated:
+                        updated_count += 1
+
+                    else:
+                        stored_status = (
+                            "not_improved"
+                        )
+
+                        stored_error = (
+                            "The extracted description "
+                            "was not longer than the "
+                            "existing description."
+                        )
 
             save_enrichment_attempt(
                 job=job,
                 result=result,
                 status=stored_status,
                 error_message=stored_error,
+                identity_validation=identity_validation,
             )
 
             totals[stored_status] = (

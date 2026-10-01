@@ -8,6 +8,7 @@ already been processed and whether parsed jobs should be stored.
 import imaplib
 import os
 import re
+import socket
 from email import message_from_bytes
 from email.header import decode_header
 from email.message import Message
@@ -24,6 +25,7 @@ ENV_PATH = PROJECT_ROOT / ".env"
 
 YAHOO_IMAP_SERVER = "imap.mail.yahoo.com"
 YAHOO_IMAP_PORT = 993
+DEFAULT_IMAP_TIMEOUT_SECONDS = 15
 
 
 def load_credentials(
@@ -161,88 +163,109 @@ def read_messages(
         username_env=username_env,
         password_env=password_env,
     )
+    timeout_seconds = float(
+        os.getenv(
+            "YAHOO_IMAP_TIMEOUT_SECONDS",
+            str(DEFAULT_IMAP_TIMEOUT_SECONDS),
+        )
+    )
 
     messages: list[dict[str, Any]] = []
 
-    with imaplib.IMAP4_SSL(
-        YAHOO_IMAP_SERVER,
-        YAHOO_IMAP_PORT,
-    ) as mailbox:
-        mailbox.login(email_address, app_password)
+    previous_socket_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(timeout_seconds)
+    try:
+        with imaplib.IMAP4_SSL(
+            YAHOO_IMAP_SERVER,
+            YAHOO_IMAP_PORT,
+            timeout=timeout_seconds,
+        ) as mailbox:
+            mailbox.login(email_address, app_password)
 
-        status, _ = mailbox.select(
-            folder_name,
-            readonly=True,
-        )
-
-        if status != "OK":
-            raise RuntimeError(
-                f"Unable to open Yahoo folder: {folder_name}"
+            status, _ = mailbox.select(
+                folder_name,
+                readonly=True,
             )
 
-        search_filter = "UNSEEN" if unread_only else "ALL"
+            if status != "OK":
+                raise RuntimeError(
+                    f"Unable to open Yahoo folder: {folder_name}"
+                )
 
-        status, search_data = mailbox.search(
-            None,
-            search_filter,
-        )
+            search_filter = "UNSEEN" if unread_only else "ALL"
 
-        if status != "OK":
-            raise RuntimeError(
-                f"Unable to search Yahoo folder: {folder_name}"
+            status, search_data = mailbox.search(
+                None,
+                search_filter,
             )
 
-        message_ids = search_data[0].split()
+            if status != "OK":
+                raise RuntimeError(
+                    f"Unable to search Yahoo folder: {folder_name}"
+                )
 
-        # Read the newest messages first.
-        selected_ids = list(reversed(message_ids[-limit:]))
+            message_ids = search_data[0].split()
 
-        for message_id in selected_ids:
-            status, message_data = mailbox.fetch(
-                message_id,
-                "(RFC822)",
-            )
+            # Read the newest messages first.
+            selected_ids = list(reversed(message_ids[-limit:]))
 
-            if status != "OK" or not message_data:
-                continue
+            for message_id in selected_ids:
+                status, message_data = mailbox.fetch(
+                    message_id,
+                    "(RFC822)",
+                )
 
-            raw_email = None
+                if status != "OK" or not message_data:
+                    continue
 
-            for response_part in message_data:
-                if isinstance(response_part, tuple):
-                    raw_email = response_part[1]
-                    break
+                raw_email = None
 
-            if not raw_email:
-                continue
+                for response_part in message_data:
+                    if isinstance(response_part, tuple):
+                        raw_email = response_part[1]
+                        break
 
-            message = message_from_bytes(raw_email)
+                if not raw_email:
+                    continue
 
-            text, html = extract_email_content(message)
-            links = extract_links(html, text)
+                message = message_from_bytes(raw_email)
 
-            messages.append(
-                {
-                    "message_id": message_id.decode(),
-                    "email_message_id": decode_header_value(
-                        message.get("Message-ID")
-                    ),
-                    "folder": folder_name,
-                    "subject": decode_header_value(
-                        message.get("Subject")
-                    ),
-                    "sender": decode_header_value(
-                        message.get("From")
-                    ),
-                    "recipient": decode_header_value(
-                        message.get("To")
-                    ),
-                    "mailbox_account": email_address,
-                    "date": message.get("Date", ""),
-                    "text": text,
-                    "html": html,
-                    "links": links,
-                }
-            )
+                text, html = extract_email_content(message)
+                links = extract_links(html, text)
+
+                messages.append(
+                    {
+                        "message_id": message_id.decode(),
+                        "email_message_id": decode_header_value(
+                            message.get("Message-ID")
+                        ),
+                        "folder": folder_name,
+                        "subject": decode_header_value(
+                            message.get("Subject")
+                        ),
+                        "sender": decode_header_value(
+                            message.get("From")
+                        ),
+                        "recipient": decode_header_value(
+                            message.get("To")
+                        ),
+                        "mailbox_account": email_address,
+                        "date": message.get("Date", ""),
+                        "text": text,
+                        "html": html,
+                        "links": links,
+                    }
+                )
+    except (
+        imaplib.IMAP4.error,
+        OSError,
+        TimeoutError,
+        socket.timeout,
+    ) as error:
+        raise RuntimeError(
+            f"Yahoo IMAP could not read folder: {folder_name}"
+        ) from error
+    finally:
+        socket.setdefaulttimeout(previous_socket_timeout)
 
     return messages

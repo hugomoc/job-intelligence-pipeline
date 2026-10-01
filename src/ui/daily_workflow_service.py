@@ -22,6 +22,7 @@ from src.enrich_jobs import (
     load_jobs_to_enrich,
     save_enrichment_attempt,
     update_job_description,
+    validate_enrichment_identity,
 )
 from src.ingest_all import ingest_source
 from src.matching.job_matcher import score_all_jobs
@@ -138,13 +139,17 @@ def run_email_ingestion() -> IngestionSummary:
         jobs_for_matching = load_raw_jobs()
         match_results = []
 
-        if searches and jobs_for_matching:
+        if inserted_jobs > 0 and searches and jobs_for_matching:
             match_results = score_all_jobs(
                 jobs=jobs_for_matching,
                 searches=searches,
                 defaults=defaults,
             )
             refresh_job_matches(match_results)
+        elif inserted_jobs == 0:
+            log_lines.append(
+                "No new jobs inserted; skipped rule-match refresh."
+            )
 
         stored_jobs = get_raw_jobs()
 
@@ -208,6 +213,7 @@ def run_description_enrichment(
             "fetch_error": 0,
             "invalid_url": 0,
             "not_improved": 0,
+            "resolution_rejected": 0,
         }
         descriptions_updated = 0
         log_lines: list[str] = [
@@ -231,28 +237,49 @@ def run_description_enrichment(
                 updated = False
                 stored_status = result.status
                 stored_error = result.error_message
+                identity_validation = None
 
                 if result.status == "enriched":
-                    updated = update_job_description(
+                    identity_validation = validate_enrichment_identity(
                         job=job,
                         result=result,
                     )
 
-                    if updated:
-                        descriptions_updated += 1
+                    if not identity_validation.accepted:
+                        stored_status = "resolution_rejected"
+                        stored_error = (
+                            "Resolved candidate rejected: "
+                            f"{identity_validation.reason}"
+                        )
+                        log_lines.append(
+                            "Rejected enrichment candidate: "
+                            f"{result.resolved_title or '<missing title>'} | "
+                            f"{result.resolved_company or '<missing company>'}. "
+                            f"Reason: {identity_validation.reason}"
+                        )
 
                     else:
-                        stored_status = "not_improved"
-                        stored_error = (
-                            "The extracted description was not longer "
-                            "than the existing description."
+                        updated = update_job_description(
+                            job=job,
+                            result=result,
                         )
+
+                        if updated:
+                            descriptions_updated += 1
+
+                        else:
+                            stored_status = "not_improved"
+                            stored_error = (
+                                "The extracted description was not longer "
+                                "than the existing description."
+                            )
 
                 save_enrichment_attempt(
                     job=job,
                     result=result,
                     status=stored_status,
                     error_message=stored_error,
+                    identity_validation=identity_validation,
                 )
 
                 totals[stored_status] = (
@@ -299,11 +326,30 @@ def run_unscored_job_backlog(
     minimum_rule_score: int,
 ) -> UiBacklogSummary:
     try:
+        enrichment_summary = run_description_enrichment(
+            limit=max(limit, 1),
+            minimum_words=80,
+        )
         summary, log_lines = capture_stdout_lines(
             score_backlog,
             resume_hash=resume_hash,
             limit=limit,
             minimum_rule_score=minimum_rule_score,
+        )
+        combined_log_lines = (
+            (
+                "Automatic description enrichment",
+                f"Jobs selected: {enrichment_summary.jobs_selected}",
+                f"Descriptions updated: {enrichment_summary.descriptions_updated}",
+                f"Pages blocked: {enrichment_summary.blocked}",
+                f"No description found: {enrichment_summary.no_description}",
+                f"Fetch errors: {enrichment_summary.fetch_error}",
+                f"Not improved: {enrichment_summary.not_improved}",
+                "",
+            )
+            + enrichment_summary.log_lines
+            + ("", "AI scoring")
+            + log_lines
         )
 
         return UiBacklogSummary(
@@ -317,7 +363,7 @@ def run_unscored_job_backlog(
             openai_scores_saved=summary.openai_scores_saved,
             quota_exhausted=summary.quota_exhausted,
             dbt_was_run=summary.dbt_was_run,
-            log_lines=log_lines,
+            log_lines=combined_log_lines,
         )
 
     except Exception as error:

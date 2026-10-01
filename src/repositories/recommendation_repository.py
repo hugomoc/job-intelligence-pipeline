@@ -8,9 +8,14 @@ and it persists user-facing state such as applied/removed and AI eligibility.
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
+from urllib.request import Request, build_opener
 
 from src.ai.job_eligibility import (
     ELIGIBILITY_PROMPT_VERSION,
@@ -18,7 +23,398 @@ from src.ai.job_eligibility import (
 )
 from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
 from src.database import get_connection, initialize_database
-from src.job_title_filter import EXCLUDED_TITLE_SQL_REGEX
+from src.job_admission import evaluate_job_admission
+from src.job_title_filter import (
+    EXCLUDED_TITLE_SQL_REGEX,
+    classify_job_title,
+)
+
+
+EXCLUDED_JOB_SOURCES: tuple[str, ...] = (
+    "lensa",
+)
+EXCLUDED_JOB_SOURCES_SQL = ", ".join(
+    f"'{source}'"
+    for source in EXCLUDED_JOB_SOURCES
+)
+
+TRACKING_QUERY_PARAMETERS = {
+    "ao",
+    "campaign",
+    "cb",
+    "clickid",
+    "cs",
+    "fbclid",
+    "gclid",
+    "guid",
+    "igshid",
+    "imp_id",
+    "mc_cid",
+    "mc_eid",
+    "mkt_tok",
+    "ref",
+    "ref_src",
+    "referrer",
+    "s",
+    "src",
+    "t",
+    "tr",
+    "uid",
+    "uido",
+    "utm_campaign",
+    "utm_content",
+    "utm_id",
+    "utm_medium",
+    "utm_source",
+    "utm_term",
+    "vt",
+}
+
+EMBEDDED_DESTINATION_PARAMETERS = {
+    "dest",
+    "destination",
+    "href",
+    "link",
+    "redirect",
+    "redirect_uri",
+    "redirect_url",
+    "target",
+    "u",
+    "url",
+}
+
+REDIRECT_HOST_MARKERS = (
+    "sendgrid.net",
+    "sg3email.lensa.com",
+)
+
+REDIRECT_PATH_MARKERS = (
+    "/ls/click",
+    "/click",
+    "/redirect",
+)
+
+JOB_ID_QUERY_PARAMETERS = {
+    "gh_jid",
+    "jid",
+    "job_id",
+    "jobid",
+    "postingid",
+    "requisitionid",
+}
+
+
+@dataclass(frozen=True)
+class PostingIdentity:
+    identity: str
+    confidence: str
+    identity_type: str
+    resolved_url: str
+    is_redirect: bool
+
+
+def normalize_source_name(source: Any) -> str:
+    """Normalize source names before building cross-run posting identity."""
+    return normalize_duplicate_text(source)
+
+
+def normalize_apply_url_for_identity(apply_url: Any) -> str:
+    """Normalize a URL while preserving non-tracking query parameters."""
+    if not apply_url:
+        return ""
+
+    raw_url = str(apply_url).strip()
+
+    if not raw_url:
+        return ""
+
+    parsed = urlsplit(raw_url)
+    scheme = parsed.scheme.casefold() or "https"
+    hostname = (parsed.hostname or "").casefold()
+
+    if parsed.port:
+        netloc = f"{hostname}:{parsed.port}"
+    else:
+        netloc = hostname
+
+    path = re.sub(r"/+", "/", parsed.path or "/")
+    if path != "/":
+        path = path.rstrip("/")
+
+    kept_query_parameters = [
+        (key, value)
+        for key, value in parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+        )
+        if key.casefold() not in TRACKING_QUERY_PARAMETERS
+        and not key.casefold().startswith("utm_")
+    ]
+    kept_query_parameters.sort(
+        key=lambda item: (
+            item[0].casefold(),
+            item[1],
+        )
+    )
+
+    query = urlencode(
+        kept_query_parameters,
+        doseq=True,
+    )
+
+    return urlunsplit(
+        (
+            scheme,
+            netloc,
+            path,
+            query,
+            "",
+        )
+    )
+
+
+def is_redirect_or_tracking_url(apply_url: Any) -> bool:
+    """Return true for click-tracking URLs that need a resolved destination."""
+    if not apply_url:
+        return False
+
+    parsed = urlsplit(str(apply_url).strip())
+    hostname = (parsed.hostname or "").casefold()
+    path = (parsed.path or "").casefold()
+
+    if any(hostname.endswith(marker) for marker in REDIRECT_HOST_MARKERS):
+        return True
+
+    if any(marker in path for marker in REDIRECT_PATH_MARKERS):
+        return True
+
+    query_keys = {
+        key.casefold()
+        for key, _ in parse_qsl(parsed.query, keep_blank_values=True)
+    }
+    return bool(query_keys & EMBEDDED_DESTINATION_PARAMETERS)
+
+
+def _decode_possible_url(value: str) -> str:
+    decoded = value.strip()
+    for _ in range(3):
+        next_decoded = unquote(decoded).strip()
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    return decoded
+
+
+def extract_embedded_destination_url(apply_url: Any) -> str:
+    """Extract a real posting URL carried inside a redirect query parameter."""
+    if not apply_url:
+        return ""
+
+    parsed = urlsplit(str(apply_url).strip())
+    query_parameters = parse_qsl(parsed.query, keep_blank_values=True)
+
+    for key, value in query_parameters:
+        decoded_value = _decode_possible_url(value)
+        if (
+            key.casefold() in EMBEDDED_DESTINATION_PARAMETERS
+            and decoded_value.startswith(("http://", "https://"))
+        ):
+            nested_destination = extract_embedded_destination_url(decoded_value)
+            return nested_destination or decoded_value
+
+    for _, value in query_parameters:
+        decoded_value = _decode_possible_url(value)
+        if decoded_value.startswith(("http://", "https://")):
+            nested_destination = extract_embedded_destination_url(decoded_value)
+            return nested_destination or decoded_value
+
+    return ""
+
+
+def resolve_redirect_final_url(
+    apply_url: Any,
+    opener: Any = None,
+    timeout_seconds: float = 5.0,
+) -> str:
+    """Resolve a click-tracking URL to its final destination when possible."""
+    raw_url = str(apply_url or "").strip()
+
+    if not raw_url or not is_redirect_or_tracking_url(raw_url):
+        return ""
+
+    embedded_destination = extract_embedded_destination_url(raw_url)
+    if embedded_destination:
+        return embedded_destination
+
+    request = Request(
+        raw_url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 job-intelligence-pipeline link resolver"
+            ),
+        },
+    )
+
+    try:
+        response = (opener or build_opener()).open(
+            request,
+            timeout=timeout_seconds,
+        )
+        with response:
+            return str(response.geturl() or "").strip()
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError):
+        return ""
+
+
+def _extract_job_id_from_path(pattern: str, normalized_url: str) -> str:
+    match = re.search(pattern, normalized_url, flags=re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def extract_posting_platform_identity(normalized_url: str) -> str:
+    """Return a stable platform job id from known ATS/job-board URL shapes."""
+    if not normalized_url:
+        return ""
+
+    parsed = urlsplit(normalized_url)
+    hostname = (parsed.hostname or "").casefold()
+    query = {
+        key.casefold(): value
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if value
+    }
+
+    for key in JOB_ID_QUERY_PARAMETERS:
+        if query.get(key):
+            return f"{hostname}:{key}:{query[key]}"
+
+    linkedin_job_id = _extract_job_id_from_path(
+        r"/jobs/view/([0-9]+)",
+        normalized_url,
+    )
+    if linkedin_job_id:
+        return f"linkedin:{linkedin_job_id}"
+
+    greenhouse_job_id = _extract_job_id_from_path(
+        r"/jobs/([0-9]+)",
+        normalized_url,
+    )
+    if "greenhouse.io" in hostname and greenhouse_job_id:
+        return f"greenhouse:{greenhouse_job_id}"
+
+    lever_job_id = _extract_job_id_from_path(
+        r"/([^/?#]+)$",
+        normalized_url,
+    )
+    if "lever.co" in hostname and lever_job_id:
+        return f"lever:{lever_job_id}"
+
+    ashby_job_id = _extract_job_id_from_path(
+        r"/job/([^/?#]+)",
+        normalized_url,
+    )
+    if "ashbyhq.com" in hostname and ashby_job_id:
+        return f"ashby:{ashby_job_id}"
+
+    return ""
+
+
+def build_posting_identity(
+    source: Any,
+    source_job_id: Any,
+    apply_url: Any,
+    record_key: Any,
+    resolved_apply_url: Any = None,
+) -> PostingIdentity:
+    """Build the safest available identity for propagating user job status."""
+    normalized_source = normalize_source_name(source)
+    normalized_source_job_id = normalize_duplicate_text(source_job_id)
+
+    if normalized_source_job_id:
+        return PostingIdentity(
+            identity=f"{normalized_source}|{normalized_source_job_id}",
+            confidence="high",
+            identity_type="source_job_id",
+            resolved_url="",
+            is_redirect=False,
+        )
+
+    raw_apply_url = str(apply_url or "").strip()
+    record_identity = f"{normalized_source}|record:{record_key or ''}"
+    redirect_url = is_redirect_or_tracking_url(raw_apply_url)
+    destination_url = (
+        str(resolved_apply_url or "").strip()
+        or extract_embedded_destination_url(raw_apply_url)
+    )
+
+    if redirect_url and not destination_url:
+        return PostingIdentity(
+            identity=record_identity,
+            confidence="low",
+            identity_type="record_key",
+            resolved_url="",
+            is_redirect=True,
+        )
+
+    identity_url = destination_url or raw_apply_url
+    normalized_url = normalize_apply_url_for_identity(identity_url)
+    platform_identity = extract_posting_platform_identity(normalized_url)
+
+    if platform_identity:
+        return PostingIdentity(
+            identity=f"{normalized_source}|{platform_identity}",
+            confidence="high",
+            identity_type="platform_job_id",
+            resolved_url=normalized_url,
+            is_redirect=redirect_url,
+        )
+
+    if normalized_url:
+        return PostingIdentity(
+            identity=f"{normalized_source}|{normalized_url}",
+            confidence="medium" if not redirect_url else "high",
+            identity_type="direct_url" if not redirect_url else "resolved_url",
+            resolved_url=normalized_url,
+            is_redirect=redirect_url,
+        )
+
+    return PostingIdentity(
+        identity=record_identity,
+        confidence="low",
+        identity_type="record_key",
+        resolved_url="",
+        is_redirect=redirect_url,
+    )
+
+
+def exact_posting_identity(
+    source: Any,
+    source_job_id: Any,
+    apply_url: Any,
+    record_key: Any,
+) -> str:
+    """Return the status identity for one exact external posting."""
+    return build_posting_identity(
+        source=source,
+        source_job_id=source_job_id,
+        apply_url=apply_url,
+        record_key=record_key,
+    ).identity
+
+
+def register_exact_posting_identity_function(connection) -> None:
+    """Expose exact_posting_identity to DuckDB queries on this connection."""
+    try:
+        connection.create_function(
+            "exact_posting_identity",
+            exact_posting_identity,
+            [str, str, str, str],
+            str,
+            null_handling="special",
+        )
+    except Exception:
+        # DuckDB raises if the function is already registered on a connection.
+        pass
 
 
 def parse_json_list(value: str | None) -> list[str]:
@@ -51,6 +447,35 @@ def parse_email_datetime(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def normalize_duplicate_text(value: Any) -> str:
+    """Normalize display fields for conservative UI duplicate collapsing."""
+    if value is None:
+        return ""
+
+    normalized = str(value).casefold()
+    normalized = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        normalized,
+    )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        normalized,
+    ).strip()
+
+
+def ui_duplicate_key(job: dict[str, Any]) -> tuple[str, str, str, str]:
+    """Return a human-visible identity key for duplicate alert rows."""
+    return (
+        normalize_duplicate_text(job.get("title")),
+        normalize_duplicate_text(job.get("company_name")),
+        normalize_duplicate_text(job.get("source")),
+        normalize_duplicate_text(job.get("location")),
+    )
+
+
 def initialize_job_eligibility_table() -> None:
     initialize_database()
 
@@ -77,6 +502,178 @@ def initialize_job_eligibility_table() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_enrichment_attempts (
+                record_key VARCHAR PRIMARY KEY,
+                source VARCHAR NOT NULL,
+                requested_url VARCHAR NOT NULL,
+                final_url VARCHAR,
+                status VARCHAR NOT NULL,
+                http_status INTEGER,
+                extraction_method VARCHAR,
+                description_word_count INTEGER NOT NULL,
+                error_message VARCHAR,
+                attempt_count INTEGER NOT NULL DEFAULT 1,
+                last_attempted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        for statement in (
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS resolved_candidate_title VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS resolved_candidate_company VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS resolved_candidate_location VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS identity_confidence DOUBLE
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS title_similarity DOUBLE
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS company_similarity DOUBLE
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS identity_validation_reason VARCHAR
+            """,
+        ):
+            connection.execute(statement)
+
+
+def load_latest_cached_resume_hash() -> str | None:
+    """Return the newest cached resume profile for display-only fallbacks."""
+    initialize_database()
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS resume_profiles (
+                resume_hash VARCHAR PRIMARY KEY,
+                filename VARCHAR NOT NULL,
+                model_name VARCHAR NOT NULL,
+                profile_json VARCHAR NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        result = connection.execute(
+            """
+            SELECT resume_hash
+            FROM resume_profiles
+            ORDER BY created_at DESC NULLS LAST
+            LIMIT 1
+            """
+        ).fetchone()
+
+    if not result:
+        return None
+
+    return str(result[0])
+
+
+def resolve_display_resume_hash(
+    resume_hash: str | None,
+) -> str:
+    """Use the active resume when present, otherwise the latest cached one."""
+    if resume_hash:
+        return resume_hash
+
+    return load_latest_cached_resume_hash() or ""
+
+
+def load_resume_profile_payload(
+    resume_hash: str | None,
+) -> dict[str, Any] | None:
+    """Load the cached profile JSON used by the deterministic admission gate."""
+    if not resume_hash:
+        return None
+
+    initialize_database()
+
+    with get_connection() as connection:
+        profile_table = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_name = 'resume_profiles'
+            """
+        ).fetchone()
+
+        if not profile_table or not profile_table[0]:
+            return None
+
+        result = connection.execute(
+            """
+            SELECT profile_json
+            FROM resume_profiles
+            WHERE resume_hash = ?
+            ORDER BY created_at DESC NULLS LAST
+            LIMIT 1
+            """,
+            [resume_hash],
+        ).fetchone()
+
+    if not result:
+        return None
+
+    try:
+        profile = json.loads(result[0])
+    except json.JSONDecodeError:
+        return None
+
+    return profile if isinstance(profile, dict) else None
+
+
+def apply_admission_gate(
+    jobs: list[dict[str, Any]],
+    resume_hash: str | None,
+    preserve_statuses: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    """Keep only jobs with enough resume-aware evidence to show or score."""
+    resume_profile = load_resume_profile_payload(resume_hash)
+
+    if resume_profile is None:
+        return jobs
+
+    admitted_jobs: list[dict[str, Any]] = []
+    preserved_statuses = set(preserve_statuses)
+
+    for job in jobs:
+        evaluation = evaluate_job_admission(
+            job=job,
+            resume_profile=resume_profile,
+        )
+
+        job["admission_decision"] = evaluation.admission_decision
+        job["admission_reason"] = evaluation.admission_reason
+        job["role_family_match"] = evaluation.role_family_match
+        job["specialization_match"] = evaluation.specialization_match
+        job["required_skill_match"] = evaluation.required_skill_match
+        job["responsibility_match"] = evaluation.responsibility_match
+        job["seniority_match"] = evaluation.seniority_match
+        job["critical_skill_gaps"] = evaluation.critical_skill_gaps
+        job["matched_resume_signals"] = evaluation.matched_resume_signals
+
+        if (
+            evaluation.admission_decision == "include"
+            or job.get("application_status") in preserved_statuses
+        ):
+            admitted_jobs.append(job)
+
+    return admitted_jobs
 
 
 def save_job_eligibility_decision(
@@ -145,27 +742,53 @@ def load_all_jobs(
 ) -> list[dict[str, Any]]:
     """Load UI jobs for one resume, excluding removed and AI-rejected rows."""
     initialize_job_eligibility_table()
+    selected_resume_hash = resolve_display_resume_hash(resume_hash)
 
     with get_connection() as connection:
+        register_exact_posting_identity_function(connection)
         cursor = connection.execute(
             """
-            WITH jobs AS (
+            WITH raw_jobs_with_identity AS (
                 SELECT
                     *,
                     COALESCE(
                         NULLIF(job_fingerprint, ''),
                         record_key
-                    ) AS canonical_job_key
+                    ) AS canonical_job_key,
+                    exact_posting_identity(
+                        source,
+                        source_job_id,
+                        apply_url,
+                        record_key
+                    ) AS posting_status_key
                 FROM raw_jobs
+            ),
+
+            jobs AS (
+                SELECT *
+                FROM raw_jobs_with_identity
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY canonical_job_key
+                    ORDER BY
+                        CASE
+                            WHEN description IS NOT NULL
+                             AND TRIM(description) <> ''
+                            THEN 1
+                            ELSE 0
+                        END DESC,
+                        description_updated_at DESC NULLS LAST,
+                        discovered_at DESC NULLS LAST,
+                        record_key
+                ) = 1
             ),
 
             best_matches AS (
                 SELECT
-                    record_key,
+                    matched_jobs.canonical_job_key,
                     search_title,
                     match_score,
                     row_number() over (
-                        partition by record_key
+                        partition by matched_jobs.canonical_job_key
                         order by
                             is_recommended desc,
                             needs_review desc,
@@ -174,20 +797,23 @@ def load_all_jobs(
                             search_id
                     ) as match_rank
                 FROM job_matches
+                INNER JOIN raw_jobs_with_identity AS matched_jobs
+                    ON job_matches.record_key =
+                       matched_jobs.record_key
             ),
 
             latest_application_status AS (
                 SELECT
-                    status_jobs.canonical_job_key,
+                    status_jobs.posting_status_key,
                     status.status,
                     row_number() over (
-                        partition by status_jobs.canonical_job_key
+                        partition by status_jobs.posting_status_key
                         order by
                             status.updated_at desc nulls last,
                             status.record_key
                     ) as status_rank
                 FROM application_status as status
-                INNER JOIN jobs as status_jobs
+                INNER JOIN raw_jobs_with_identity as status_jobs
                     ON status.record_key = status_jobs.record_key
             ),
 
@@ -202,6 +828,35 @@ def load_all_jobs(
                 FROM resume_job_eligibility
                 WHERE resume_hash = ?
                   AND prompt_version = ?
+            ),
+
+            enrichment_attempts AS (
+                SELECT
+                    enriched_jobs.canonical_job_key,
+                    status AS enrichment_status,
+                    final_url AS resolved_candidate_url,
+                    resolved_candidate_title,
+                    resolved_candidate_company,
+                    resolved_candidate_location,
+                    identity_confidence,
+                    identity_validation_reason,
+                    last_attempted_at AS enrichment_attempted_at,
+                    row_number() over (
+                        partition by enriched_jobs.canonical_job_key
+                        order by
+                            case
+                                when status = 'enriched' then 1
+                                else 0
+                            end desc,
+                            last_attempted_at desc nulls last,
+                            attempts.record_key
+                    ) as enrichment_rank
+                FROM job_enrichment_attempts
+                    AS attempts
+                INNER JOIN raw_jobs_with_identity
+                    AS enriched_jobs
+                    ON attempts.record_key =
+                       enriched_jobs.record_key
             )
 
             SELECT
@@ -216,6 +871,30 @@ def load_all_jobs(
                 jobs.posted_age_text,
                 jobs.email_date,
                 jobs.discovered_at,
+                CASE
+                    WHEN jobs.description IS NOT NULL
+                     AND TRIM(jobs.description) <> ''
+                    THEN array_length(
+                        regexp_split_to_array(
+                            TRIM(jobs.description),
+                            '\\s+'
+                        )
+                    )
+                    ELSE 0
+                END AS raw_description_word_count,
+                jobs.normalized_title,
+                jobs.title_classification,
+                jobs.title_match_score,
+                jobs.title_filter_reason,
+                jobs.title_matched_pattern,
+                enrichment_attempts.enrichment_status,
+                enrichment_attempts.resolved_candidate_url,
+                enrichment_attempts.resolved_candidate_title,
+                enrichment_attempts.resolved_candidate_company,
+                enrichment_attempts.resolved_candidate_location,
+                enrichment_attempts.identity_confidence,
+                enrichment_attempts.identity_validation_reason,
+                enrichment_attempts.enrichment_attempted_at,
                 matches.search_title as best_search_title,
                 matches.match_score as rule_score,
                 coalesce(
@@ -241,37 +920,47 @@ def load_all_jobs(
                 recommendations.ai_scored_at
             FROM jobs
             LEFT JOIN best_matches as matches
-                ON jobs.record_key = matches.record_key
+                ON jobs.canonical_job_key =
+                   matches.canonical_job_key
                AND matches.match_rank = 1
             LEFT JOIN latest_application_status
                 as canonical_status
-                ON jobs.canonical_job_key =
-                    canonical_status.canonical_job_key
+                ON jobs.posting_status_key =
+                    canonical_status.posting_status_key
                AND canonical_status.status_rank = 1
             LEFT JOIN analytics.mart_job_recommendations as recommendations
                 ON jobs.canonical_job_key =
                    recommendations.canonical_job_key
                AND recommendations.resume_hash = ?
                AND recommendations.ai_prompt_version = ?
+               AND recommendations.description_word_count >= 80
+               AND coalesce(
+                   recommendations.has_incomplete_description,
+                   false
+               ) = false
             LEFT JOIN latest_eligibility as eligibility
                 ON jobs.canonical_job_key = eligibility.canonical_job_key
                AND eligibility.eligibility_rank = 1
-            WHERE NOT regexp_matches(
-                lower(coalesce(jobs.title, '')),
-                ?
-            )
+            LEFT JOIN enrichment_attempts
+                ON jobs.canonical_job_key =
+                   enrichment_attempts.canonical_job_key
+               AND enrichment_attempts.enrichment_rank = 1
+            WHERE lower(coalesce(jobs.source, '')) NOT IN (
+                  {excluded_job_sources}
+              )
               AND coalesce(eligibility.decision, 'eligible') <> 'exclude'
             ORDER BY
                 jobs.discovered_at desc nulls last,
                 jobs.title,
                 jobs.company_name
-            """,
+            """.format(
+                excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
+            ),
             [
-                resume_hash or "",
+                selected_resume_hash,
                 ELIGIBILITY_PROMPT_VERSION,
-                resume_hash or "",
+                selected_resume_hash,
                 MATCHER_PROMPT_VERSION,
-                EXCLUDED_TITLE_SQL_REGEX,
             ],
         )
 
@@ -281,6 +970,16 @@ def load_all_jobs(
     jobs = [dict(zip(columns, row)) for row in rows]
 
     for job in jobs:
+        if not job.get("title_classification"):
+            classification = classify_job_title(
+                job.get("title")
+            )
+            job["normalized_title"] = classification.normalized_title
+            job["title_classification"] = classification.category
+            job["title_match_score"] = classification.score
+            job["title_filter_reason"] = classification.reason
+            job["title_matched_pattern"] = classification.matched_pattern
+
         email_datetime = parse_email_datetime(
             job.get("email_date")
         )
@@ -314,7 +1013,48 @@ def load_all_jobs(
             job.get("risk_factors")
         )
 
-    return sorted(
+    jobs = apply_admission_gate(
+        jobs=jobs,
+        resume_hash=selected_resume_hash,
+        preserve_statuses=("applied",),
+    )
+
+    def review_priority(
+        job: dict[str, Any],
+    ) -> int:
+        title_classification = job.get(
+            "title_classification"
+        )
+        has_ai_score = job.get("ai_score") is not None
+        raw_description_words = int(
+            job.get("raw_description_word_count") or 0
+        )
+        has_verified_description = (
+            has_ai_score
+            or raw_description_words >= 80
+        )
+
+        if title_classification == "STRONG_MATCH" and has_ai_score:
+            return 6
+
+        if title_classification == "POSSIBLE_MATCH" and has_ai_score:
+            return 5
+
+        if title_classification == "STRONG_MATCH" and has_verified_description:
+            return 4
+
+        if title_classification == "POSSIBLE_MATCH" and has_verified_description:
+            return 3
+
+        if title_classification == "STRONG_MATCH":
+            return 2
+
+        if title_classification == "POSSIBLE_MATCH":
+            return 1
+
+        return 0
+
+    sorted_jobs = sorted(
         jobs,
         key=lambda job: (
             {
@@ -325,8 +1065,9 @@ def load_all_jobs(
                 job.get("application_status", "new"),
                 2,
             ),
-            job.get("ai_score") is not None,
+            review_priority(job),
             job.get("ai_score") or -1,
+            job.get("title_match_score") or 0,
             job.get("sent_at") or datetime.min.replace(
                 tzinfo=timezone.utc
             ),
@@ -336,12 +1077,26 @@ def load_all_jobs(
         reverse=True,
     )
 
+    deduplicated_jobs: list[dict[str, Any]] = []
+    seen_display_keys: set[tuple[str, str, str, str]] = set()
+
+    for job in sorted_jobs:
+        duplicate_key = ui_duplicate_key(job)
+
+        if duplicate_key in seen_display_keys:
+            continue
+
+        seen_display_keys.add(duplicate_key)
+        deduplicated_jobs.append(job)
+
+    return deduplicated_jobs
+
 
 def update_application_status(
     record_key: str,
     status: str,
 ) -> None:
-    """Apply a status to every raw occurrence of the same canonical job."""
+    """Apply a status to duplicate alerts for the same exact posting."""
     if status not in {"new", "applied", "removed"}:
         raise ValueError(
             "Application status must be new, applied or removed."
@@ -352,12 +1107,16 @@ def update_application_status(
     updated_at = datetime.now(timezone.utc)
 
     with get_connection() as connection:
+        register_exact_posting_identity_function(connection)
         canonical_row = connection.execute(
             """
-            SELECT COALESCE(
-                NULLIF(job_fingerprint, ''),
-                record_key
-            ) AS canonical_job_key
+            SELECT
+                exact_posting_identity(
+                    source,
+                    source_job_id,
+                    apply_url,
+                    record_key
+                ) AS posting_status_key
             FROM raw_jobs
             WHERE record_key = ?
             """,
@@ -371,8 +1130,10 @@ def update_application_status(
             """
             SELECT record_key
             FROM raw_jobs
-            WHERE COALESCE(
-                NULLIF(job_fingerprint, ''),
+            WHERE exact_posting_identity(
+                source,
+                source_job_id,
+                apply_url,
                 record_key
             ) = ?
             """,
@@ -410,10 +1171,11 @@ def load_candidate_jobs(
     prompt_version: str = MATCHER_PROMPT_VERSION,
     reuse_any_model: bool = False,
 ) -> list[dict[str, Any]]:
-    """Load jobs eligible for full AI scoring for a resume."""
+    """Load jobs eligible for AI scoring for a resume."""
     initialize_job_eligibility_table()
 
     with get_connection() as connection:
+        register_exact_posting_identity_function(connection)
         cursor = connection.execute(
             """
             WITH jobs AS (
@@ -422,7 +1184,13 @@ def load_candidate_jobs(
                     COALESCE(
                         NULLIF(job_fingerprint, ''),
                         record_key
-                    ) AS canonical_job_key
+                    ) AS canonical_job_key,
+                    exact_posting_identity(
+                        source,
+                        source_job_id,
+                        apply_url,
+                        record_key
+                    ) AS posting_status_key
                 FROM raw_jobs
             ),
 
@@ -443,10 +1211,10 @@ def load_candidate_jobs(
 
             latest_application_status AS (
                 SELECT
-                    status_jobs.canonical_job_key,
+                    status_jobs.posting_status_key,
                     status.status,
                     ROW_NUMBER() OVER (
-                        PARTITION BY status_jobs.canonical_job_key
+                        PARTITION BY status_jobs.posting_status_key
                         ORDER BY
                             status.updated_at DESC NULLS LAST,
                             status.record_key
@@ -457,6 +1225,13 @@ def load_candidate_jobs(
                        status_jobs.record_key
             ),
 
+            enrichment_attempts AS (
+                SELECT
+                    record_key,
+                    status AS enrichment_status
+                FROM job_enrichment_attempts
+            ),
+
             ranked_candidates AS (
                 SELECT
                     jobs.canonical_job_key,
@@ -465,7 +1240,12 @@ def load_candidate_jobs(
                     jobs.company_name,
                     jobs.location,
                     jobs.salary_text,
-                    jobs.description,
+                    CASE
+                        WHEN enrichment_attempts.enrichment_status =
+                             'resolution_rejected'
+                        THEN NULL
+                        ELSE jobs.description
+                    END AS description,
                     jobs.source,
                     jobs.apply_url,
                     matches.match_score AS rule_score,
@@ -497,27 +1277,43 @@ def load_candidate_jobs(
                     ON jobs.canonical_job_key =
                        existing_scores.canonical_job_key
                 LEFT JOIN latest_application_status
-                    ON jobs.canonical_job_key =
-                       latest_application_status.canonical_job_key
+                    ON jobs.posting_status_key =
+                       latest_application_status.posting_status_key
                    AND latest_application_status.status_rank = 1
                 LEFT JOIN resume_job_eligibility AS eligibility
                     ON jobs.canonical_job_key = eligibility.canonical_job_key
                    AND eligibility.resume_hash = ?
                    AND eligibility.prompt_version = ?
+                LEFT JOIN enrichment_attempts
+                    ON jobs.record_key = enrichment_attempts.record_key
                 WHERE existing_scores.canonical_job_key IS NULL
                   AND matches.match_score >= ?
-                  AND NOT regexp_matches(
-                      lower(coalesce(jobs.title, '')),
-                      ?
+                  AND lower(coalesce(jobs.source, '')) NOT IN (
+                      {excluded_job_sources}
                   )
+                  AND COALESCE(
+                      enrichment_attempts.enrichment_status,
+                      ''
+                  ) <> 'resolution_rejected'
                   AND jobs.description IS NOT NULL
                   AND TRIM(jobs.description) <> ''
                   AND array_length(
                       regexp_split_to_array(
-                          trim(jobs.description),
+                          TRIM(jobs.description),
                           '\\s+'
                       )
                   ) >= 80
+                  AND coalesce(
+                      jobs.title_classification,
+                      CASE
+                          WHEN regexp_matches(
+                              lower(coalesce(jobs.title, '')),
+                              ?
+                          )
+                          THEN 'FILTERED_OUT'
+                          ELSE 'POSSIBLE_MATCH'
+                      END
+                  ) <> 'FILTERED_OUT'
                   AND COALESCE(
                       latest_application_status.status,
                       'new'
@@ -548,7 +1344,9 @@ def load_candidate_jobs(
                 title,
                 company_name
             LIMIT ?
-            """,
+            """.format(
+                excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
+            ),
             [
                 resume_hash,
                 reuse_any_model,
@@ -565,7 +1363,10 @@ def load_candidate_jobs(
         columns = [description[0] for description in cursor.description]
         rows = cursor.fetchall()
 
-    return [dict(zip(columns, row)) for row in rows]
+    return apply_admission_gate(
+        jobs=[dict(zip(columns, row)) for row in rows],
+        resume_hash=resume_hash,
+    )
 
 
 def count_cached_canonical_scores(
@@ -575,6 +1376,7 @@ def count_cached_canonical_scores(
     reuse_any_model: bool = False,
 ) -> int:
     with get_connection() as connection:
+        register_exact_posting_identity_function(connection)
         result = connection.execute(
             """
             WITH jobs AS (
@@ -616,10 +1418,11 @@ def count_unscored_candidate_jobs(
     prompt_version: str = MATCHER_PROMPT_VERSION,
     reuse_any_model: bool = False,
 ) -> int:
-    """Count full-score candidates after cache, status and eligibility filters."""
+    """Count AI-score candidates after cache, status and eligibility filters."""
     initialize_job_eligibility_table()
 
     with get_connection() as connection:
+        register_exact_posting_identity_function(connection)
         result = connection.execute(
             """
             WITH jobs AS (
@@ -628,7 +1431,13 @@ def count_unscored_candidate_jobs(
                     COALESCE(
                         NULLIF(job_fingerprint, ''),
                         record_key
-                    ) AS canonical_job_key
+                    ) AS canonical_job_key,
+                    exact_posting_identity(
+                        source,
+                        source_job_id,
+                        apply_url,
+                        record_key
+                    ) AS posting_status_key
                 FROM raw_jobs
             ),
 
@@ -649,10 +1458,10 @@ def count_unscored_candidate_jobs(
 
             latest_application_status AS (
                 SELECT
-                    status_jobs.canonical_job_key,
+                    status_jobs.posting_status_key,
                     status.status,
                     ROW_NUMBER() OVER (
-                        PARTITION BY status_jobs.canonical_job_key
+                        PARTITION BY status_jobs.posting_status_key
                         ORDER BY
                             status.updated_at DESC NULLS LAST,
                             status.record_key
@@ -661,6 +1470,13 @@ def count_unscored_candidate_jobs(
                 INNER JOIN jobs AS status_jobs
                     ON status.record_key =
                        status_jobs.record_key
+            ),
+
+            enrichment_attempts AS (
+                SELECT
+                    record_key,
+                    status AS enrichment_status
+                FROM job_enrichment_attempts
             ),
 
             ranked_candidates AS (
@@ -674,7 +1490,11 @@ def count_unscored_candidate_jobs(
                             matches.match_score DESC,
                             matches.title_score DESC,
                             CASE
-                                WHEN jobs.description IS NOT NULL
+                                WHEN COALESCE(
+                                     enrichment_attempts.enrichment_status,
+                                     ''
+                                ) <> 'resolution_rejected'
+                                 AND jobs.description IS NOT NULL
                                  AND TRIM(jobs.description) <> ''
                                 THEN 1
                                 ELSE 0
@@ -690,27 +1510,43 @@ def count_unscored_candidate_jobs(
                     ON jobs.canonical_job_key =
                        existing_scores.canonical_job_key
                 LEFT JOIN latest_application_status
-                    ON jobs.canonical_job_key =
-                       latest_application_status.canonical_job_key
+                    ON jobs.posting_status_key =
+                       latest_application_status.posting_status_key
                    AND latest_application_status.status_rank = 1
+                LEFT JOIN enrichment_attempts
+                    ON jobs.record_key = enrichment_attempts.record_key
                 LEFT JOIN resume_job_eligibility AS eligibility
                     ON jobs.canonical_job_key = eligibility.canonical_job_key
                    AND eligibility.resume_hash = ?
                    AND eligibility.prompt_version = ?
                 WHERE existing_scores.canonical_job_key IS NULL
                   AND matches.match_score >= ?
-                  AND NOT regexp_matches(
-                      lower(coalesce(jobs.title, '')),
-                      ?
+                  AND lower(coalesce(jobs.source, '')) NOT IN (
+                      {excluded_job_sources}
                   )
+                  AND COALESCE(
+                      enrichment_attempts.enrichment_status,
+                      ''
+                  ) <> 'resolution_rejected'
                   AND jobs.description IS NOT NULL
                   AND TRIM(jobs.description) <> ''
                   AND array_length(
                       regexp_split_to_array(
-                          trim(jobs.description),
+                          TRIM(jobs.description),
                           '\\s+'
                       )
                   ) >= 80
+                  AND coalesce(
+                      jobs.title_classification,
+                      CASE
+                          WHEN regexp_matches(
+                              lower(coalesce(jobs.title, '')),
+                              ?
+                          )
+                          THEN 'FILTERED_OUT'
+                          ELSE 'POSSIBLE_MATCH'
+                      END
+                  ) <> 'FILTERED_OUT'
                   AND COALESCE(
                       latest_application_status.status,
                       'new'
@@ -724,7 +1560,9 @@ def count_unscored_candidate_jobs(
             SELECT COUNT(*)
             FROM ranked_candidates
             WHERE candidate_rank = 1
-            """,
+            """.format(
+                excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
+            ),
             [
                 resume_hash,
                 reuse_any_model,
@@ -737,7 +1575,16 @@ def count_unscored_candidate_jobs(
             ],
         ).fetchone()
 
-    return int(result[0]) if result else 0
+    return len(
+        load_candidate_jobs(
+            resume_hash=resume_hash,
+            model_name=model_name,
+            limit=100000,
+            minimum_rule_score=minimum_rule_score,
+            prompt_version=prompt_version,
+            reuse_any_model=reuse_any_model,
+        )
+    )
 
 
 def load_unscreened_job_eligibility_candidates(
@@ -749,6 +1596,7 @@ def load_unscreened_job_eligibility_candidates(
     initialize_job_eligibility_table()
 
     with get_connection() as connection:
+        register_exact_posting_identity_function(connection)
         cursor = connection.execute(
             """
             WITH jobs AS (
@@ -757,16 +1605,22 @@ def load_unscreened_job_eligibility_candidates(
                     COALESCE(
                         NULLIF(job_fingerprint, ''),
                         record_key
-                    ) AS canonical_job_key
+                    ) AS canonical_job_key,
+                    exact_posting_identity(
+                        source,
+                        source_job_id,
+                        apply_url,
+                        record_key
+                    ) AS posting_status_key
                 FROM raw_jobs
             ),
 
             latest_application_status AS (
                 SELECT
-                    status_jobs.canonical_job_key,
+                    status_jobs.posting_status_key,
                     status.status,
                     ROW_NUMBER() OVER (
-                        PARTITION BY status_jobs.canonical_job_key
+                        PARTITION BY status_jobs.posting_status_key
                         ORDER BY
                             status.updated_at DESC NULLS LAST,
                             status.record_key
@@ -774,6 +1628,13 @@ def load_unscreened_job_eligibility_candidates(
                 FROM application_status AS status
                 INNER JOIN jobs AS status_jobs
                     ON status.record_key = status_jobs.record_key
+            ),
+
+            enrichment_attempts AS (
+                SELECT
+                    record_key,
+                    status AS enrichment_status
+                FROM job_enrichment_attempts
             ),
 
             ranked_jobs AS (
@@ -784,14 +1645,23 @@ def load_unscreened_job_eligibility_candidates(
                     jobs.company_name,
                     jobs.location,
                     jobs.salary_text,
-                    jobs.description,
+                    CASE
+                        WHEN enrichment_attempts.enrichment_status =
+                             'resolution_rejected'
+                        THEN NULL
+                        ELSE jobs.description
+                    END AS description,
                     jobs.source,
                     jobs.apply_url,
                     ROW_NUMBER() OVER (
                         PARTITION BY jobs.canonical_job_key
                         ORDER BY
                             CASE
-                                WHEN jobs.description IS NOT NULL
+                                WHEN COALESCE(
+                                     enrichment_attempts.enrichment_status,
+                                     ''
+                                ) <> 'resolution_rejected'
+                                 AND jobs.description IS NOT NULL
                                  AND TRIM(jobs.description) <> ''
                                 THEN 1
                                 ELSE 0
@@ -806,14 +1676,26 @@ def load_unscreened_job_eligibility_candidates(
                    AND eligibility.resume_hash = ?
                    AND eligibility.prompt_version = ?
                 LEFT JOIN latest_application_status
-                    ON jobs.canonical_job_key =
-                       latest_application_status.canonical_job_key
+                    ON jobs.posting_status_key =
+                       latest_application_status.posting_status_key
                    AND latest_application_status.status_rank = 1
+                LEFT JOIN enrichment_attempts
+                    ON jobs.record_key = enrichment_attempts.record_key
                 WHERE eligibility.canonical_job_key IS NULL
-                  AND NOT regexp_matches(
-                      lower(coalesce(jobs.title, '')),
-                      ?
+                  AND lower(coalesce(jobs.source, '')) NOT IN (
+                      {excluded_job_sources}
                   )
+                  AND coalesce(
+                      jobs.title_classification,
+                      CASE
+                          WHEN regexp_matches(
+                              lower(coalesce(jobs.title, '')),
+                              ?
+                          )
+                          THEN 'FILTERED_OUT'
+                          ELSE 'POSSIBLE_MATCH'
+                      END
+                  ) <> 'FILTERED_OUT'
                   AND COALESCE(
                       latest_application_status.status,
                       'new'
@@ -836,7 +1718,9 @@ def load_unscreened_job_eligibility_candidates(
                 title,
                 company_name
             LIMIT ?
-            """,
+            """.format(
+                excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
+            ),
             [
                 resume_hash,
                 prompt_version,
@@ -848,12 +1732,17 @@ def load_unscreened_job_eligibility_candidates(
         columns = [description[0] for description in cursor.description]
         rows = cursor.fetchall()
 
-    return [dict(zip(columns, row)) for row in rows]
+    return apply_admission_gate(
+        jobs=[dict(zip(columns, row)) for row in rows],
+        resume_hash=resume_hash,
+    )
 
 
 def load_recommendations(
-    resume_hash: str,
+    resume_hash: str | None,
 ) -> list[dict[str, Any]]:
+    selected_resume_hash = resolve_display_resume_hash(resume_hash)
+
     with get_connection() as connection:
         cursor = connection.execute(
             """
@@ -895,12 +1784,17 @@ def load_recommendations(
             FROM analytics.mart_job_recommendations
             WHERE resume_hash = ?
               AND ai_prompt_version = ?
+              AND lower(coalesce(source, '')) NOT IN (
+                  {excluded_job_sources}
+              )
             ORDER BY
                 ai_score DESC,
                 ai_score_rank
-            """,
+            """.format(
+                excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
+            ),
             [
-                resume_hash,
+                selected_resume_hash,
                 MATCHER_PROMPT_VERSION,
             ],
         )

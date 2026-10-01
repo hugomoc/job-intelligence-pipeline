@@ -56,6 +56,8 @@ IGNORED_LINK_TEXT = IGNORED_LINES | {
     "try ladders premium",
 }
 
+MINIMUM_TITLE_LETTERS = 3
+
 
 def clean_text(value: str | None) -> str:
     if not value:
@@ -109,6 +111,31 @@ def is_ignored_line(value: str) -> bool:
         or "premium" in normalized
         or "unsubscribe" in normalized
     )
+
+
+def is_valid_title(value: str) -> bool:
+    title = clean_text(value)
+    normalized = title.casefold()
+
+    if not title:
+        return False
+
+    if is_ignored_line(title):
+        return False
+
+    if is_location(title) or is_salary(title):
+        return False
+
+    if title.startswith(("http://", "https://")):
+        return False
+
+    if len(re.findall(r"[a-z]", normalized)) < MINIMUM_TITLE_LETTERS:
+        return False
+
+    if not re.search(r"[a-z0-9]", normalized):
+        return False
+
+    return True
 
 
 def extract_job_links(
@@ -184,12 +211,10 @@ def parse_listing_text(
         company_name = clean_text(lines[company_index])
 
         if (
-            not title
+            not is_valid_title(title)
             or not company_name
-            or is_ignored_line(title)
             or is_ignored_line(company_name)
             or is_location(company_name)
-            or is_salary(title)
             or is_salary(company_name)
         ):
             continue

@@ -77,10 +77,28 @@ def test_missing_link_fails_safely() -> None:
     assert jobs == []
 
 
+def test_punctuation_title_is_ignored() -> None:
+    jobs = parse_ladders_email(
+        text="""
+        Apple
+        |
+        Cupertino, CA
+        $115K - $135K*
+        """,
+        html=None,
+        links=[
+            "https://t.ladders.co/f/a/example",
+        ],
+    )
+
+    assert jobs == []
+
+
 def main() -> None:
     test_single_job_card_extraction()
     test_marketing_email_is_ignored()
     test_missing_link_fails_safely()
+    test_punctuation_title_is_ignored()
     print("Ladders parser tests passed.")
 
 
