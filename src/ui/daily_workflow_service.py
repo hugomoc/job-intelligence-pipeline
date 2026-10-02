@@ -195,6 +195,7 @@ def run_description_enrichment(
     minimum_words: int = 80,
     source: str | None = None,
     retry_failed: bool = False,
+    resume_hash: str | None = None,
 ) -> EnrichmentSummary:
     """Fetch richer descriptions for stored jobs without changing source rows."""
     try:
@@ -204,6 +205,7 @@ def run_description_enrichment(
             source=source,
             retry_failed=retry_failed,
             force=False,
+            resume_hash=resume_hash,
         )
 
         totals = {
@@ -329,6 +331,7 @@ def run_unscored_job_backlog(
         enrichment_summary = run_description_enrichment(
             limit=max(limit, 1),
             minimum_words=80,
+            resume_hash=resume_hash,
         )
         summary, log_lines = capture_stdout_lines(
             score_backlog,

@@ -2,7 +2,7 @@ with ranked_jobs as (
     select
         *,
         row_number() over (
-            partition by canonical_job_key
+            partition by exact_posting_key
             order by
                 case when description is not null and trim(description) <> '' then 1 else 0 end desc,
                 description_updated_at desc nulls last,
@@ -14,7 +14,8 @@ with ranked_jobs as (
 
 select
     record_key as canonical_record_key,
-    job_fingerprint,
+    duplicate_fingerprint,
+    exact_posting_key,
     canonical_job_key,
     source,
     source_job_id,

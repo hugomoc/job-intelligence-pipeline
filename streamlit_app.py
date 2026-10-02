@@ -7,12 +7,14 @@ and AI scoring live in src/ so they can be tested without Streamlit.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import streamlit as st
 
 from src.repositories.recommendation_repository import (
+    derive_fit_priority,
     load_all_jobs,
+    load_pipeline_operation_metrics,
     update_application_status,
 )
 from src.resume.extractor import ResumeExtractionError
@@ -27,6 +29,7 @@ from src.ui.job_recommendation_service import (
     JobRecommendationServiceError,
     process_resume_upload,
 )
+from src.ui.pagination import PAGE_SIZE_OPTIONS, paginate_items
 
 
 STATUS_LABELS = {
@@ -46,6 +49,26 @@ TITLE_FIT_LABELS = {
     "POSSIBLE_MATCH": "Possible",
     "FILTERED_OUT": "Filtered out",
 }
+
+DESCRIPTION_STATE_LABELS = {
+    "FULL_JD": "Full JD",
+    "PARTIAL_JD": "Partial JD",
+    "NEEDS_ENRICHMENT": "Needs enrichment",
+    "ENRICHMENT_REJECTED": "Rejected enrichment",
+}
+
+FIT_PRIORITY_OPTIONS = [
+    "All",
+    "High",
+    "Medium",
+    "Low",
+    "Mismatch",
+]
+
+JOBS_PAGE_KEY = "jobs_current_page"
+JOBS_FILTER_STATE_KEY = "jobs_filter_state"
+JOBS_PAGE_SIZE_KEY = "jobs_page_size"
+JOBS_PREVIOUS_PAGE_SIZE_KEY = "jobs_previous_page_size"
 
 
 def format_seen_date(value: object) -> str | None:
@@ -83,6 +106,24 @@ def to_date(value: object) -> date | None:
         return None
 
 
+def default_date_range(
+    job_dates: list[date],
+    days: int = 7,
+) -> tuple[date, date]:
+    """Default the date filter to the newest useful window in the data."""
+    if not job_dates:
+        today = date.today()
+        return today, today
+
+    min_job_date = min(job_dates)
+    max_job_date = max(job_dates)
+
+    return (
+        max(min_job_date, max_job_date - timedelta(days=days - 1)),
+        max_job_date,
+    )
+
+
 def get_city(location: str | None) -> str:
     """Extract a city-like value from a job location."""
 
@@ -99,6 +140,21 @@ def get_city(location: str | None) -> str:
 
     # Example: "San Diego, CA" becomes "San Diego"
     return location.split(",", maxsplit=1)[0].strip()
+
+
+def fit_priority_label(job: dict) -> str:
+    """Return the shared review-priority label for filtering/display."""
+    return str(
+        job.get("fit_priority_label")
+        or derive_fit_priority(job).label
+    )
+
+
+def fit_priority_source(job: dict) -> str:
+    return str(
+        job.get("fit_priority_source")
+        or derive_fit_priority(job).source
+    )
 
 
 def render_list(title: str, items: list[str]) -> None:
@@ -266,6 +322,18 @@ def render_job_listing(job: dict) -> None:
             title_caption += f" - {title_reason}"
 
         st.caption(title_caption)
+        st.caption(
+            "Fit priority: "
+            f"{fit_priority_label(job)}"
+        )
+        st.caption(
+            "Priority source: "
+            f"{fit_priority_source(job)}"
+        )
+        st.caption(
+            "Description: "
+            f"{DESCRIPTION_STATE_LABELS.get(job.get('description_state'), 'Unknown')}"
+        )
 
         if job.get("has_incomplete_description"):
             description_word_count = job.get(
@@ -522,6 +590,7 @@ if enrich_descriptions_clicked or (run_daily_clicked and ingestion_succeeded):
             enrichment_result = run_description_enrichment(
                 limit=int(enrichment_limit),
                 minimum_words=80,
+                resume_hash=st.session_state.get("resume_hash"),
             )
             st.write(f"Jobs selected: {enrichment_result.jobs_selected}")
             st.write(f"Descriptions updated: {enrichment_result.descriptions_updated}")
@@ -614,7 +683,7 @@ with jobs_tab:
         if job_date is not None
     ]
 
-    filter_cols = st.columns([1.5, 2, 2, 2, 1])
+    filter_cols = st.columns([1.4, 1.8, 1.8, 1.3, 1.3, 1])
 
     with filter_cols[0]:
         status_filter = st.selectbox(
@@ -657,22 +726,47 @@ with jobs_tab:
             key="all-jobs-city",
         )
 
-    if job_dates:
-        min_job_date = min(job_dates)
-        max_job_date = max(job_dates)
-    else:
-        min_job_date = date.today()
-        max_job_date = date.today()
+    available_dates = sorted(set(job_dates))
+    default_start_date, default_end_date = default_date_range(job_dates)
+
+    start_date_input = default_start_date
+    end_date_input = default_end_date
+
+    start_date_key = "email_start_date_dropdown_v1"
+    end_date_key = "email_end_date_dropdown_v1"
+
+    for date_key in (start_date_key, end_date_key):
+        if st.session_state.get(date_key) not in available_dates:
+            st.session_state.pop(date_key, None)
 
     with filter_cols[3]:
-        selected_dates = st.date_input(
-            "Email date",
-            value=(min_job_date, max_job_date),
-            min_value=min_job_date,
-            max_value=max_job_date,
-        )
+        if available_dates:
+            start_date_input = st.selectbox(
+                "Start date",
+                options=available_dates,
+                index=available_dates.index(default_start_date),
+                key=start_date_key,
+                format_func=lambda value: value.strftime("%Y-%m-%d"),
+            )
+        else:
+            st.caption("Load jobs first")
 
     with filter_cols[4]:
+        if available_dates:
+            end_date_input = st.selectbox(
+                "End date",
+                options=available_dates,
+                index=available_dates.index(default_end_date),
+                key=end_date_key,
+                format_func=lambda value: value.strftime("%Y-%m-%d"),
+            )
+
+    if start_date_input <= end_date_input:
+        selected_dates = (start_date_input, end_date_input)
+    else:
+        selected_dates = (end_date_input, start_date_input)
+
+    with filter_cols[5]:
         scored_filter = st.selectbox(
             "AI score",
             options=[
@@ -682,7 +776,9 @@ with jobs_tab:
             ],
         )
 
-    with st.container():
+    extra_filter_cols = st.columns([2, 2, 2])
+
+    with extra_filter_cols[0]:
         recommendation_filter = st.selectbox(
             "Recommendation",
             options=[
@@ -691,6 +787,21 @@ with jobs_tab:
                 "REVIEW",
                 "SKIP",
                 "Not scored",
+            ],
+        )
+
+    with extra_filter_cols[1]:
+        fit_priority_filter = st.selectbox(
+            "Fit / priority",
+            options=FIT_PRIORITY_OPTIONS,
+        )
+
+    with extra_filter_cols[2]:
+        description_state_filter = st.selectbox(
+            "Description",
+            options=[
+                "All",
+                *DESCRIPTION_STATE_LABELS.values(),
             ],
         )
 
@@ -779,6 +890,23 @@ with jobs_tab:
             == recommendation_filter
         ]
 
+    if fit_priority_filter != "All":
+        filtered_jobs = [
+            job
+            for job in filtered_jobs
+            if fit_priority_label(job) == fit_priority_filter
+        ]
+
+    if description_state_filter != "All":
+        filtered_jobs = [
+            job
+            for job in filtered_jobs
+            if DESCRIPTION_STATE_LABELS.get(
+                job.get("description_state")
+            )
+            == description_state_filter
+        ]
+
     selected_title_categories = {
         category
         for category, label in TITLE_FIT_LABELS.items()
@@ -817,49 +945,156 @@ with jobs_tab:
         for job in all_jobs
         if job.get("title_classification") == "FILTERED_OUT"
     )
+    needs_enrichment_count = sum(
+        1
+        for job in all_jobs
+        if job.get("description_state") == "NEEDS_ENRICHMENT"
+    )
+    full_jd_count = sum(
+        1
+        for job in all_jobs
+        if job.get("description_state") == "FULL_JD"
+    )
+    partial_jd_count = sum(
+        1
+        for job in all_jobs
+        if job.get("description_state") == "PARTIAL_JD"
+    )
+
+    pagination_filter_state = (
+        status_filter,
+        source_filter,
+        city_filter,
+        start_date.isoformat() if start_date else None,
+        end_date.isoformat() if end_date else None,
+        scored_filter,
+        recommendation_filter,
+        fit_priority_filter,
+        description_state_filter,
+        tuple(selected_title_fits),
+    )
+
+    if st.session_state.get(JOBS_FILTER_STATE_KEY) != pagination_filter_state:
+        st.session_state[JOBS_PAGE_KEY] = 1
+        st.session_state[JOBS_FILTER_STATE_KEY] = pagination_filter_state
+
+    pagination_cols = st.columns([1.1, 1, 1.1, 1.4, 4])
+
+    with pagination_cols[3]:
+        page_size = st.selectbox(
+            "Jobs per page",
+            options=list(PAGE_SIZE_OPTIONS),
+            key=JOBS_PAGE_SIZE_KEY,
+        )
+
+    if st.session_state.get(JOBS_PREVIOUS_PAGE_SIZE_KEY) != page_size:
+        st.session_state[JOBS_PAGE_KEY] = 1
+        st.session_state[JOBS_PREVIOUS_PAGE_SIZE_KEY] = page_size
+
+    preview_page = paginate_items(
+        filtered_jobs,
+        int(st.session_state.get(JOBS_PAGE_KEY, 1)),
+        int(page_size),
+    )
+    st.session_state[JOBS_PAGE_KEY] = preview_page.current_page
+
+    with pagination_cols[0]:
+        previous_clicked = st.button(
+            "Previous",
+            disabled=(
+                preview_page.total_pages == 0
+                or preview_page.current_page <= 1
+            ),
+            key="jobs-page-previous",
+        )
+
+    with pagination_cols[2]:
+        next_clicked = st.button(
+            "Next",
+            disabled=(
+                preview_page.total_pages == 0
+                or preview_page.current_page >= preview_page.total_pages
+            ),
+            key="jobs-page-next",
+        )
+
+    if previous_clicked:
+        st.session_state[JOBS_PAGE_KEY] = preview_page.current_page - 1
+    elif next_clicked:
+        st.session_state[JOBS_PAGE_KEY] = preview_page.current_page + 1
+
+    page = paginate_items(
+        filtered_jobs,
+        int(st.session_state.get(JOBS_PAGE_KEY, 1)),
+        int(page_size),
+    )
+    st.session_state[JOBS_PAGE_KEY] = page.current_page
+
+    page_label = (
+        f"Page {page.current_page} of {page.total_pages}"
+        if page.total_pages
+        else "Page 0 of 0"
+    )
+    page_range_label = (
+        f"Showing {page.start_number}-{page.end_number}"
+        if page.total_items
+        else "Showing 0"
+    )
+
+    with pagination_cols[1]:
+        st.caption(page_label)
 
     st.caption(
-        f"Showing {len(filtered_jobs)} of {len(all_jobs)} "
-        f"ingested jobs. AI-scored: {ai_scored_count}. "
+        f"{page.total_items} jobs match filters. "
+        f"{page_range_label}. {page_label}. "
+        f"{len(all_jobs)} total reviewable jobs. "
+        f"AI-scored: {ai_scored_count}. "
+        f"Needs enrichment: {needs_enrichment_count}. "
+        f"Full JD: {full_jd_count}. Partial JD: {partial_jd_count}. "
         f"New: {visible_new_count}. Applied: {visible_applied_count}. "
         f"Removed: {visible_removed_count}. "
-        f"Filtered by title: {title_filtered_count}"
+        f"Title-classified as filtered out: {title_filtered_count}"
     )
 
     if not filtered_jobs:
         st.info("No jobs match the selected filters.")
 
-    for job in filtered_jobs:
+    for job in page.items:
         render_job_listing(job)
 
 with operations_tab:
-    current_jobs = (
-        load_all_jobs(
-            resume_hash=st.session_state.get("resume_hash")
-        )
-        if st.session_state["show_saved_jobs"]
-        else []
-    )
-    total_jobs = len(current_jobs)
-    ai_scored_jobs = sum(
-        1
-        for job in current_jobs
-        if job.get("ai_score") is not None
-    )
-    unscored_jobs = total_jobs - ai_scored_jobs
-    applied_jobs = sum(
-        1
-        for job in current_jobs
-        if job.get("application_status") == "applied"
-    )
-
     st.subheader("Pipeline Status")
 
+    operation_metrics = load_pipeline_operation_metrics(
+        resume_hash=st.session_state.get("resume_hash"),
+        minimum_rule_score=int(daily_minimum_rule_score),
+    )
+
     metric_cols = st.columns(4)
-    metric_cols[0].metric("Stored jobs", total_jobs)
-    metric_cols[1].metric("AI-scored", ai_scored_jobs)
-    metric_cols[2].metric("Unscored", unscored_jobs)
-    metric_cols[3].metric("Applied", applied_jobs)
+    metric_cols[0].metric("Raw jobs", operation_metrics["raw_jobs"])
+    metric_cols[1].metric("Exact postings", operation_metrics["exact_postings"])
+    metric_cols[2].metric("Reviewable jobs", operation_metrics["reviewable_jobs"])
+    metric_cols[3].metric("AI-score eligible", operation_metrics["ai_score_eligible"])
+
+    status_cols = st.columns(4)
+    status_cols[0].metric("New", operation_metrics["new_jobs"])
+    status_cols[1].metric("Applied", operation_metrics["applied_jobs"])
+    status_cols[2].metric("Removed", operation_metrics["removed_jobs"])
+    status_cols[3].metric("AI-scored", operation_metrics["ai_scored"])
+
+    description_cols = st.columns(4)
+    description_cols[0].metric("Needs enrichment", operation_metrics["needs_enrichment"])
+    description_cols[1].metric("Full JD", operation_metrics["full_jd"])
+    description_cols[2].metric("Partial JD", operation_metrics["partial_jd"])
+    description_cols[3].metric("Rejected enrichment", operation_metrics["rejected_enrichment"])
+
+    attempts = operation_metrics["enrichment_attempts"]
+    attempt_cols = st.columns(5)
+    attempt_cols[0].metric("Attempts", sum(attempts.values()))
+    attempt_cols[1].metric("Successes", attempts.get("enriched", 0))
+    attempt_cols[2].metric("Blocked", attempts.get("blocked", 0))
+    attempt_cols[3].metric("No description", attempts.get("no_description", 0))
+    attempt_cols[4].metric("Fetch errors", attempts.get("fetch_error", 0))
 
     st.caption(
         "Use the sidebar daily run controls to ingest email folders "

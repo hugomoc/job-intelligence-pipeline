@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from src.database import (
@@ -26,6 +27,13 @@ from src.enrichment.job_identity import (
     validate_job_identity,
 )
 from src.job_title_filter import EXCLUDED_TITLE_SQL_REGEX
+from src.repositories.recommendation_repository import (
+    apply_admission_gate,
+    calculate_enrichment_priority,
+    description_has_quality_signals,
+    description_state,
+    register_exact_posting_identity_function,
+)
 
 
 FAILED_STATUSES = {
@@ -189,13 +197,37 @@ def load_jobs_to_enrich(
     source: str | None,
     retry_failed: bool,
     force: bool,
+    resume_hash: str | None = None,
 ) -> list[dict[str, Any]]:
     initialize_enrichment_tables()
 
     with get_connection() as connection:
+        register_exact_posting_identity_function(connection)
         cursor = connection.execute(
     """
-    WITH best_rule_match AS (
+    WITH jobs AS (
+        SELECT
+            raw_jobs.*,
+            COALESCE(
+                NULLIF(job_fingerprint, ''),
+                record_key
+            ) AS duplicate_fingerprint,
+            exact_posting_identity(
+                source,
+                source_job_id,
+                apply_url,
+                record_key
+            ) AS exact_posting_key,
+            exact_posting_identity(
+                source,
+                source_job_id,
+                apply_url,
+                record_key
+            ) AS posting_status_key
+        FROM raw_jobs
+    ),
+
+    best_rule_match AS (
         SELECT
             record_key,
             match_score,
@@ -211,17 +243,68 @@ def load_jobs_to_enrich(
             ) AS match_rank
 
         FROM job_matches
+    ),
+
+    latest_application_status AS (
+        SELECT
+            status_jobs.posting_status_key,
+            status.status,
+            ROW_NUMBER() OVER (
+                PARTITION BY status_jobs.posting_status_key
+                ORDER BY
+                    status.updated_at DESC NULLS LAST,
+                    status.record_key
+            ) AS status_rank
+        FROM application_status AS status
+        INNER JOIN jobs AS status_jobs
+            ON status.record_key = status_jobs.record_key
+    ),
+
+    scored_jobs AS (
+        SELECT DISTINCT
+            score_jobs.exact_posting_key,
+            max(scores.overall_score) AS ai_score
+        FROM resume_job_scores AS scores
+        INNER JOIN jobs AS score_jobs
+            ON scores.record_key = score_jobs.record_key
+        WHERE scores.description_complete = true
+          AND scores.scored_at >= coalesce(
+              score_jobs.description_updated_at,
+              TIMESTAMPTZ '1970-01-01 00:00:00+00'
+          )
+        GROUP BY score_jobs.exact_posting_key
     )
 
     SELECT
         jobs.record_key,
+        jobs.exact_posting_key,
+        jobs.duplicate_fingerprint,
         jobs.source,
         jobs.title,
         jobs.company_name,
         jobs.location,
         jobs.description,
         jobs.apply_url,
+        jobs.email_date,
         jobs.discovered_at,
+        jobs.description_updated_at,
+        COALESCE(
+            latest_application_status.status,
+            'new'
+        ) AS application_status,
+        COALESCE(
+            jobs.title_classification,
+            CASE
+                WHEN regexp_matches(
+                    lower(coalesce(jobs.title, '')),
+                    ?
+                )
+                THEN 'FILTERED_OUT'
+                ELSE 'POSSIBLE_MATCH'
+            END
+        ) AS title_classification,
+        jobs.title_match_score,
+        scored_jobs.ai_score,
 
         attempts.status
             AS previous_status,
@@ -242,7 +325,7 @@ def load_jobs_to_enrich(
             FALSE
         ) AS needs_review
 
-    FROM raw_jobs AS jobs
+    FROM jobs AS jobs
 
     LEFT JOIN job_enrichment_attempts
         AS attempts
@@ -254,23 +337,17 @@ def load_jobs_to_enrich(
            matches.record_key
        AND matches.match_rank = 1
 
+    LEFT JOIN latest_application_status
+        ON jobs.posting_status_key =
+           latest_application_status.posting_status_key
+       AND latest_application_status.status_rank = 1
+
+    LEFT JOIN scored_jobs
+        ON jobs.exact_posting_key = scored_jobs.exact_posting_key
+
     WHERE jobs.apply_url IS NOT NULL
-      AND COALESCE(
-          jobs.title_classification,
-          CASE
-              WHEN regexp_matches(
-                  lower(coalesce(jobs.title, '')),
-                  ?
-              )
-              THEN 'FILTERED_OUT'
-              ELSE 'POSSIBLE_MATCH'
-          END
-      ) <> 'FILTERED_OUT'
 
     ORDER BY
-        matches.is_recommended DESC,
-        matches.needs_review DESC,
-        matches.match_score DESC,
         jobs.discovered_at DESC,
         jobs.title,
         jobs.company_name
@@ -291,9 +368,65 @@ def load_jobs_to_enrich(
         for row in rows
     ]
 
-    selected: list[dict[str, Any]] = []
+    for job in jobs:
+        current_word_count = count_words(
+            job.get("description")
+        )
+        job["current_word_count"] = current_word_count
+        job["raw_description_word_count"] = current_word_count
+        job["description_quality_signals"] = (
+            description_has_quality_signals(job.get("description"))
+        )
+        job["description_state"] = description_state(job)
+
+    if resume_hash:
+        jobs = apply_admission_gate(
+            jobs=jobs,
+            resume_hash=resume_hash,
+            include_low_priority=True,
+            keep_filtered_out=True,
+        )
 
     for job in jobs:
+        priority = calculate_enrichment_priority(job)
+        job["enrichment_priority_score"] = priority.score
+        job["enrichment_priority_tier"] = priority.tier
+        job["enrichment_priority_reason"] = priority.reason
+
+    jobs.sort(
+        key=lambda job: (
+            job["enrichment_priority_score"],
+            job.get("discovered_at") or datetime.min.replace(
+                tzinfo=timezone.utc
+            ),
+            job.get("title") or "",
+            job.get("company_name") or "",
+        ),
+        reverse=True,
+    )
+
+    selected: list[dict[str, Any]] = []
+    selected_exact_keys: set[str] = set()
+    selected_duplicate_keys: set[str] = set()
+
+    for job in jobs:
+        exact_key = str(
+            job.get("exact_posting_key")
+            or job.get("record_key")
+            or ""
+        )
+
+        if exact_key in selected_exact_keys:
+            continue
+
+        duplicate_key = str(
+            job.get("duplicate_fingerprint")
+            or exact_key
+        )
+
+        if duplicate_key in selected_duplicate_keys:
+            continue
+
         if (
             source
             and job["source"].casefold()
@@ -301,20 +434,15 @@ def load_jobs_to_enrich(
         ):
             continue
 
-        current_word_count = count_words(
-            job.get("description")
-        )
-
-        job["current_word_count"] = (
-            current_word_count
-        )
-
         previous_status = job.get(
             "previous_status"
         )
 
         if not force:
-            if current_word_count >= minimum_words:
+            if (
+                job["current_word_count"] >= minimum_words
+                and job["description_state"] == "FULL_JD"
+            ):
                 continue
 
             if previous_status:
@@ -328,6 +456,8 @@ def load_jobs_to_enrich(
                     continue
 
         selected.append(job)
+        selected_exact_keys.add(exact_key)
+        selected_duplicate_keys.add(duplicate_key)
 
         if len(selected) >= limit:
             break
@@ -442,6 +572,7 @@ def update_job_description(
         return False
 
     with get_connection() as connection:
+        register_exact_posting_identity_function(connection)
         connection.execute(
             """
             UPDATE raw_jobs
@@ -457,33 +588,8 @@ def update_job_description(
             ],
         )
 
-        # Existing AI scores are stale after the
-        # description changes. Clear all scores for the
-        # canonical job identity so duplicate email
-        # occurrences cannot keep an old empty-description
-        # score alive.
-        if table_exists(
-            connection,
-            "resume_job_scores",
-        ):
-            connection.execute(
-                """
-                DELETE FROM resume_job_scores AS scores
-                USING raw_jobs AS scored_jobs,
-                    raw_jobs AS updated_job
-                WHERE scores.record_key =
-                    scored_jobs.record_key
-                  AND updated_job.record_key = ?
-                  AND COALESCE(
-                      NULLIF(scored_jobs.job_fingerprint, ''),
-                      scored_jobs.record_key
-                  ) = COALESCE(
-                      NULLIF(updated_job.job_fingerprint, ''),
-                      updated_job.record_key
-                  )
-                """,
-                [job["record_key"]],
-            )
+        # description_updated_at makes older AI scores stale without deleting
+        # historical scoring rows.
 
     return True
 

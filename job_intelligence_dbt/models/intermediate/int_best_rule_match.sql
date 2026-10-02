@@ -1,9 +1,10 @@
 with ranked_matches as (
     select
         matches.*,
+        jobs.exact_posting_key,
         jobs.canonical_job_key,
         row_number() over (
-            partition by jobs.canonical_job_key
+            partition by jobs.exact_posting_key
             order by
                 matches.is_recommended desc,
                 matches.needs_review desc,
@@ -18,6 +19,7 @@ with ranked_matches as (
 )
 
 select
+    exact_posting_key,
     canonical_job_key,
     record_key as rule_record_key,
     search_id as best_search_id,

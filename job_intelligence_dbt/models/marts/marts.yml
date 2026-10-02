@@ -7,10 +7,14 @@ models:
       - name: resume_hash
         tests:
           - not_null
-      - name: job_fingerprint
+      - name: duplicate_fingerprint
+        tests:
+          - not_null
+      - name: exact_posting_key
         tests:
           - not_null
       - name: canonical_job_key
+        description: Backward-compatible alias for exact_posting_key.
         tests:
           - not_null
       - name: canonical_record_key

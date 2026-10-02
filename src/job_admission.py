@@ -69,6 +69,27 @@ RESPONSIBILITY_PATTERNS: tuple[tuple[str, str], ...] = (
     ("orchestration", r"\borchestrat|\bairflow|\bdag\b"),
 )
 
+PRODUCTION_RESUME_FIELDS = (
+    "target_roles",
+    "current_or_recent_titles",
+    "seniority",
+    "years_of_relevant_experience",
+    "production_skills",
+    "data_engineering_capabilities",
+    "bi_analytics_skills",
+    "cloud_platforms",
+    "tools_platforms",
+    "programming_languages",
+    "databases_warehouses",
+    "certifications",
+)
+
+PROJECT_RESUME_FIELDS = (
+    "project_skills",
+    "projects",
+    "portfolio_projects",
+)
+
 
 def normalize_text(value: Any) -> str:
     if value is None:
@@ -101,6 +122,28 @@ def resume_profile_to_text(profile: Any) -> str:
         return normalize_text(profile.model_dump())
 
     return normalize_text(profile)
+
+
+def resume_profile_fields_to_text(
+    profile: Any,
+    field_names: tuple[str, ...],
+) -> str:
+    if profile is None:
+        return ""
+
+    if hasattr(profile, "model_dump"):
+        profile = profile.model_dump()
+
+    if not isinstance(profile, dict):
+        return normalize_text(profile)
+
+    selected_values = [
+        profile.get(field_name)
+        for field_name in field_names
+        if profile.get(field_name) is not None
+    ]
+
+    return normalize_text(selected_values)
 
 
 def role_family_strength(title: str | None) -> Literal["strong", "possible", "weak", "none"]:
@@ -149,6 +192,14 @@ def evaluate_job_admission(
         )
     )
     resume_text = resume_profile_to_text(resume_profile)
+    production_resume_text = resume_profile_fields_to_text(
+        resume_profile,
+        PRODUCTION_RESUME_FIELDS,
+    )
+    project_resume_text = resume_profile_fields_to_text(
+        resume_profile,
+        PROJECT_RESUME_FIELDS,
+    )
     classification = classify_job_title(title)
     family_match = role_family_strength(title)
 
@@ -160,25 +211,33 @@ def evaluate_job_admission(
     matched_specializations = [
         signal.label
         for signal in title_specializations
-        if signal_present_in_resume(signal, resume_text)
+        if signal_present_in_resume(signal, production_resume_text)
     ]
     critical_gaps = [
         signal.label
         for signal in title_specializations
-        if signal.critical and not signal_present_in_resume(signal, resume_text)
+        if signal.critical
+        and not signal_present_in_resume(signal, production_resume_text)
     ]
 
     title_core_matches = [
         signal.label
         for signal in CORE_SKILL_SIGNALS
         if signal_present_in_job(signal, title_text)
-        and signal_present_in_resume(signal, resume_text)
+        and signal_present_in_resume(signal, production_resume_text)
     ]
     job_core_matches = [
         signal.label
         for signal in CORE_SKILL_SIGNALS
         if signal_present_in_job(signal, job_text)
-        and signal_present_in_resume(signal, resume_text)
+        and signal_present_in_resume(signal, production_resume_text)
+    ]
+    project_only_matches = [
+        f"project-only {signal.label}"
+        for signal in CORE_SKILL_SIGNALS
+        if signal_present_in_job(signal, job_text)
+        and not signal_present_in_resume(signal, production_resume_text)
+        and signal_present_in_resume(signal, project_resume_text)
     ]
     responsibility_matches = [
         label
@@ -226,7 +285,7 @@ def evaluate_job_admission(
             seniority_match=seniority_match,
             critical_skill_gaps=list(dict.fromkeys(critical_gaps)),
             matched_specializations=matched_specializations,
-            matched_resume_signals=sorted(set(title_core_matches + job_core_matches + responsibility_matches)),
+            matched_resume_signals=sorted(set(title_core_matches + job_core_matches + project_only_matches + responsibility_matches)),
             admission_decision="exclude",
             admission_reason=classification.reason,
         )
@@ -240,7 +299,7 @@ def evaluate_job_admission(
             seniority_match=seniority_match,
             critical_skill_gaps=list(dict.fromkeys(critical_gaps)),
             matched_specializations=matched_specializations,
-            matched_resume_signals=sorted(set(title_core_matches + job_core_matches + responsibility_matches)),
+            matched_resume_signals=sorted(set(title_core_matches + job_core_matches + project_only_matches + responsibility_matches)),
             admission_decision="exclude",
             admission_reason=(
                 "The base role family may be relevant, but the title contains "
@@ -261,7 +320,7 @@ def evaluate_job_admission(
                 critical_skill_gaps=[],
                 matched_specializations=matched_specializations,
                 matched_resume_signals=sorted(
-                    set(title_core_matches + job_core_matches + responsibility_matches)
+                    set(title_core_matches + job_core_matches + project_only_matches + responsibility_matches)
                 ),
                 admission_decision="exclude",
                 admission_reason=(
@@ -303,7 +362,7 @@ def evaluate_job_admission(
             seniority_match=seniority_match,
             critical_skill_gaps=[],
             matched_specializations=matched_specializations,
-            matched_resume_signals=sorted(set(title_core_matches + job_core_matches + responsibility_matches)),
+            matched_resume_signals=sorted(set(title_core_matches + job_core_matches + project_only_matches + responsibility_matches)),
             admission_decision="include",
             admission_reason=(
                 "The job has multiple fit signals beyond title family."
@@ -318,7 +377,7 @@ def evaluate_job_admission(
         seniority_match=seniority_match,
         critical_skill_gaps=[],
         matched_specializations=matched_specializations,
-        matched_resume_signals=sorted(set(title_core_matches + job_core_matches + responsibility_matches)),
+        matched_resume_signals=sorted(set(title_core_matches + job_core_matches + project_only_matches + responsibility_matches)),
         admission_decision="exclude",
         admission_reason=(
             "The title family alone is not enough evidence to show this job."

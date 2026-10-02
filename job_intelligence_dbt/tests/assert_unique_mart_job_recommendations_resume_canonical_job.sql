@@ -1,6 +1,6 @@
 select
     resume_hash,
-    canonical_job_key,
+    exact_posting_key,
     count(*) as row_count
 from {{ ref('mart_job_recommendations') }}
 group by 1, 2

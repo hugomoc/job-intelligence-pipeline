@@ -1,9 +1,10 @@
 with ranked_scores as (
     select
         scores.*,
+        jobs.exact_posting_key,
         jobs.canonical_job_key,
         row_number() over (
-            partition by scores.resume_hash, jobs.canonical_job_key
+            partition by scores.resume_hash, jobs.exact_posting_key
             order by
                 scores.scored_at desc nulls last,
                 scores.overall_score desc,
@@ -19,6 +20,7 @@ with ranked_scores as (
 
 select
     resume_hash,
+    exact_posting_key,
     canonical_job_key,
     record_key as scored_record_key,
     overall_score as ai_score,

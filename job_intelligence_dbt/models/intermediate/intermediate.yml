@@ -2,24 +2,34 @@ version: 2
 
 models:
   - name: int_jobs_deduplicated
-    description: One representative job record per canonical job identity.
+    description: One representative alert row per exact posting identity.
     columns:
       - name: canonical_record_key
         tests:
           - not_null
           - unique
-      - name: canonical_job_key
+      - name: exact_posting_key
         tests:
           - not_null
           - unique
-      - name: job_fingerprint
+      - name: canonical_job_key
+        description: Backward-compatible alias for exact_posting_key.
+        tests:
+          - not_null
+          - unique
+      - name: duplicate_fingerprint
         tests:
           - not_null
 
   - name: int_best_rule_match
-    description: Best rule-based search match per canonical job identity.
+    description: Best rule-based search match per exact posting identity.
     columns:
+      - name: exact_posting_key
+        tests:
+          - not_null
+          - unique
       - name: canonical_job_key
+        description: Backward-compatible alias for exact_posting_key.
         tests:
           - not_null
           - unique
@@ -38,7 +48,7 @@ models:
           - not_null
 
   - name: int_latest_resume_score
-    description: Latest AI score per resume and canonical job identity.
+    description: Latest AI score per resume and exact posting identity.
     columns:
       - name: resume_hash
         tests:
@@ -47,7 +57,15 @@ models:
               arguments:
                 to: ref('stg_resume_profiles')
                 field: resume_hash
+      - name: exact_posting_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('int_jobs_deduplicated')
+                field: exact_posting_key
       - name: canonical_job_key
+        description: Backward-compatible alias for exact_posting_key.
         tests:
           - not_null
           - relationships:

@@ -1,10 +1,11 @@
 select
     scores.resume_hash,
+    jobs.exact_posting_key,
     jobs.canonical_job_key,
     jobs.canonical_record_key,
     scores.scored_record_key,
     rules.rule_record_key,
-    jobs.job_fingerprint,
+    jobs.duplicate_fingerprint,
 
     jobs.title as job_title,
     jobs.company_name,
@@ -75,6 +76,6 @@ select
     ) as ai_score_rank
 from {{ ref('int_latest_resume_score') }} as scores
 inner join {{ ref('int_jobs_deduplicated') }} as jobs
-    on scores.canonical_job_key = jobs.canonical_job_key
+    on scores.exact_posting_key = jobs.exact_posting_key
 left join {{ ref('int_best_rule_match') }} as rules
-    on scores.canonical_job_key = rules.canonical_job_key
+    on scores.exact_posting_key = rules.exact_posting_key

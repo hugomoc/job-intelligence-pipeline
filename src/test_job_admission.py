@@ -137,6 +137,35 @@ def test_excludes_possible_match_with_one_broad_title_signal() -> None:
     )
 
 
+def test_project_only_skill_is_not_production_match() -> None:
+    profile = {
+        **RESUME_PROFILE,
+        "production_skills": [
+            "Python",
+            "SQL",
+            "AWS",
+            "Snowflake",
+        ],
+        "project_skills": [
+            "dbt",
+        ],
+    }
+
+    result = evaluate_job_admission(
+        job={
+            "title": "Senior Analytics Engineer with dbt",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": "",
+        },
+        resume_profile=profile,
+    )
+
+    assert result.required_skill_match == "weak"
+    assert "project-only dbt" in result.matched_resume_signals
+    assert "dbt" not in result.matched_resume_signals
+
+
 def main() -> None:
     test_includes_supported_data_engineering_title()
     test_includes_supported_analytics_engineering_title()
@@ -147,6 +176,7 @@ def main() -> None:
     test_excludes_title_family_only()
     test_excludes_no_description_tableau_gap()
     test_excludes_possible_match_with_one_broad_title_signal()
+    test_project_only_skill_is_not_production_match()
     print("Job admission tests passed.")
 
 
