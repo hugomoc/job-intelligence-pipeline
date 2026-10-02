@@ -18,11 +18,9 @@ from src.database import (
 )
 from src.enrich_jobs import (
     create_http_client,
-    fetch_job_description,
     load_jobs_to_enrich,
+    process_enrichment_job,
     save_enrichment_attempt,
-    update_job_description,
-    validate_enrichment_identity,
 )
 from src.ingest_all import ingest_source
 from src.matching.job_matcher import score_all_jobs
@@ -231,50 +229,28 @@ def run_description_enrichment(
                     f"{job.get('company_name') or 'Unknown company'}"
                 )
 
-                result = fetch_job_description(
-                    url=job["apply_url"],
+                processed = process_enrichment_job(
+                    job=job,
                     client=client,
                 )
 
-                updated = False
-                stored_status = result.status
-                stored_error = result.error_message
-                identity_validation = None
+                result = processed.result
+                stored_status = processed.stored_status
+                stored_error = processed.stored_error
+                identity_validation = processed.identity_validation
+                updated = processed.updated
 
-                if result.status == "enriched":
-                    identity_validation = validate_enrichment_identity(
-                        job=job,
-                        result=result,
+                if processed.official_resolution:
+                    official = processed.official_resolution
+                    log_lines.append(
+                        "Official resolution: "
+                        f"{official.status}; "
+                        f"url={official.official_job_url or '<none>'}; "
+                        f"reason={official.official_url_validation_reason}"
                     )
 
-                    if not identity_validation.accepted:
-                        stored_status = "resolution_rejected"
-                        stored_error = (
-                            "Resolved candidate rejected: "
-                            f"{identity_validation.reason}"
-                        )
-                        log_lines.append(
-                            "Rejected enrichment candidate: "
-                            f"{result.resolved_title or '<missing title>'} | "
-                            f"{result.resolved_company or '<missing company>'}. "
-                            f"Reason: {identity_validation.reason}"
-                        )
-
-                    else:
-                        updated = update_job_description(
-                            job=job,
-                            result=result,
-                        )
-
-                        if updated:
-                            descriptions_updated += 1
-
-                        else:
-                            stored_status = "not_improved"
-                            stored_error = (
-                                "The extracted description was not longer "
-                                "than the existing description."
-                            )
+                if updated:
+                    descriptions_updated += 1
 
                 save_enrichment_attempt(
                     job=job,
@@ -282,6 +258,7 @@ def run_description_enrichment(
                     status=stored_status,
                     error_message=stored_error,
                     identity_validation=identity_validation,
+                    official_resolution=processed.official_resolution,
                 )
 
                 totals[stored_status] = (

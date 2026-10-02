@@ -795,18 +795,17 @@ def normalize_duplicate_text(value: Any) -> str:
 
 
 def ui_duplicate_key(job: dict[str, Any]) -> tuple[str, str, str, str]:
-    """Return the exact posting key used to collapse true duplicate alerts."""
-    exact_key = str(
-        job.get("exact_posting_key")
-        or job.get("canonical_job_key")
-        or ""
+    """Return a conservative display key used to collapse duplicate cards."""
+    duplicate_fingerprint = str(
+        job.get("duplicate_fingerprint") or ""
     ).strip()
+    source = normalize_duplicate_text(job.get("source"))
 
-    if exact_key:
+    if duplicate_fingerprint and source:
         return (
-            "exact",
-            exact_key,
-            "",
+            "fingerprint",
+            source,
+            duplicate_fingerprint,
             "",
         )
 
@@ -890,6 +889,42 @@ def initialize_job_eligibility_table() -> None:
             """
             ALTER TABLE job_enrichment_attempts
             ADD COLUMN IF NOT EXISTS identity_validation_reason VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS official_job_url VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS official_url_status VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS official_url_source VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS official_url_resolved_at TIMESTAMPTZ
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS official_url_confidence DOUBLE
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS official_url_validation_reason VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS official_resolved_title VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS official_resolved_company VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS official_resolved_location VARCHAR
             """,
         ):
             connection.execute(statement)
@@ -1227,6 +1262,15 @@ def load_all_jobs(
                     resolved_candidate_location,
                     identity_confidence,
                     identity_validation_reason,
+                    official_job_url,
+                    official_url_status,
+                    official_url_source,
+                    official_url_resolved_at,
+                    official_url_confidence,
+                    official_url_validation_reason,
+                    official_resolved_title,
+                    official_resolved_company,
+                    official_resolved_location,
                     last_attempted_at AS enrichment_attempted_at,
                     row_number() over (
                         partition by enriched_jobs.canonical_job_key
@@ -1292,6 +1336,15 @@ def load_all_jobs(
                 enrichment_attempts.resolved_candidate_location,
                 enrichment_attempts.identity_confidence,
                 enrichment_attempts.identity_validation_reason,
+                enrichment_attempts.official_job_url,
+                enrichment_attempts.official_url_status,
+                enrichment_attempts.official_url_source,
+                enrichment_attempts.official_url_resolved_at,
+                enrichment_attempts.official_url_confidence,
+                enrichment_attempts.official_url_validation_reason,
+                enrichment_attempts.official_resolved_title,
+                enrichment_attempts.official_resolved_company,
+                enrichment_attempts.official_resolved_location,
                 enrichment_attempts.enrichment_attempted_at,
                 matches.search_title as best_search_title,
                 matches.match_score as rule_score,

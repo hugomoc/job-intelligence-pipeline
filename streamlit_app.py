@@ -29,6 +29,7 @@ from src.ui.job_recommendation_service import (
     JobRecommendationServiceError,
     process_resume_upload,
 )
+from src.ui.job_links import select_job_open_target
 from src.ui.pagination import PAGE_SIZE_OPTIONS, paginate_items
 
 
@@ -268,7 +269,11 @@ def render_job_listing(job: dict) -> None:
                 )
             )
 
-            st.link_button("Open job", job["apply_url"])
+            open_target = select_job_open_target(job)
+            st.link_button(open_target.label, open_target.url)
+
+            if open_target.note:
+                st.caption(open_target.note)
 
             if application_status == "new":
                 if st.button(
@@ -384,6 +389,24 @@ def render_job_listing(job: dict) -> None:
                     st.caption(
                         "Resolved URL: "
                         f"{job['resolved_candidate_url']}"
+                    )
+
+                if job.get("official_url_status"):
+                    st.caption(
+                        "Official URL status: "
+                        f"{job['official_url_status']}"
+                    )
+
+                if job.get("official_job_url"):
+                    st.caption(
+                        "Official URL: "
+                        f"{job['official_job_url']}"
+                    )
+
+                if job.get("official_url_validation_reason"):
+                    st.caption(
+                        "Official validation: "
+                        f"{job['official_url_validation_reason']}"
                     )
 
         if job.get("ai_score") is not None:

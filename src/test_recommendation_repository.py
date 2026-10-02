@@ -19,6 +19,7 @@ from src.repositories.recommendation_repository import (
     resolve_redirect_final_url,
     resolve_display_resume_hash,
     save_job_eligibility_decision,
+    ui_duplicate_key,
     update_application_status,
 )
 from src.ai.job_eligibility import (
@@ -1180,6 +1181,53 @@ def test_different_source_job_ids_never_share_identity() -> None:
     assert first_identity != second_identity
 
 
+def test_ui_duplicate_key_collapses_same_source_fingerprint() -> None:
+    first_job = {
+        "source": "linkedin",
+        "source_job_id": "4472060729",
+        "exact_posting_key": "linkedin|4472060729",
+        "duplicate_fingerprint": "same-title-company-location",
+        "title": "Data Engineer",
+        "company_name": "Example Co",
+        "location": "United States (Remote)",
+    }
+    second_job = {
+        "source": "LinkedIn",
+        "source_job_id": "4472293631",
+        "exact_posting_key": "linkedin|4472293631",
+        "duplicate_fingerprint": "same-title-company-location",
+        "title": "Data Engineer",
+        "company_name": "Example Co",
+        "location": "United States (Remote)",
+    }
+
+    assert exact_posting_identity(
+        source=first_job["source"],
+        source_job_id=first_job["source_job_id"],
+        apply_url=None,
+        record_key="first-record",
+    ) != exact_posting_identity(
+        source=second_job["source"],
+        source_job_id=second_job["source_job_id"],
+        apply_url=None,
+        record_key="second-record",
+    )
+    assert ui_duplicate_key(first_job) == ui_duplicate_key(second_job)
+
+
+def test_ui_duplicate_key_keeps_different_sources_separate() -> None:
+    linkedin_job = {
+        "source": "linkedin",
+        "duplicate_fingerprint": "same-title-company-location",
+    }
+    glassdoor_job = {
+        "source": "glassdoor",
+        "duplicate_fingerprint": "same-title-company-location",
+    }
+
+    assert ui_duplicate_key(linkedin_job) != ui_duplicate_key(glassdoor_job)
+
+
 def test_reposted_same_company_title_different_posting_id_stays_new() -> None:
     old_data_dir = database.DATA_DIR
     old_database_path = database.DATABASE_PATH
@@ -1313,6 +1361,8 @@ def main() -> None:
     test_http_redirect_resolver_returns_final_url_safely()
     test_http_redirect_resolver_uses_embedded_destination_before_network()
     test_different_source_job_ids_never_share_identity()
+    test_ui_duplicate_key_collapses_same_source_fingerprint()
+    test_ui_duplicate_key_keeps_different_sources_separate()
     test_reposted_same_company_title_different_posting_id_stays_new()
     test_title_exclusion_reasons_are_detected()
     test_display_resume_hash_falls_back_to_latest_cached_profile()

@@ -548,6 +548,115 @@ def appears_to_be_block_page(
     )
 
 
+def extract_job_description_from_html(
+    requested_url: str,
+    final_url: str | None,
+    http_status: int | None,
+    html_text: str,
+    extraction_method_prefix: str | None = None,
+) -> JobDescriptionResult:
+    """Turn already-fetched HTML into a normalized description result."""
+    soup = BeautifulSoup(
+        html_text,
+        "html.parser",
+    )
+    metadata = extract_json_ld_job_metadata(soup)
+
+    if appears_to_be_block_page(soup):
+        return JobDescriptionResult(
+            requested_url=requested_url,
+            final_url=final_url,
+            status="blocked",
+            http_status=http_status,
+            extraction_method=None,
+            description="",
+            word_count=0,
+            error_message=(
+                "The response appears to be "
+                "an access-control or CAPTCHA page."
+            ),
+            resolved_title=metadata.get("title"),
+            resolved_company=metadata.get("company"),
+            resolved_location=metadata.get("location"),
+        )
+
+    description = (
+        extract_json_ld_description(soup)
+    )
+
+    extraction_method = "json_ld"
+
+    if (
+        count_words(description)
+        < MINIMUM_USEFUL_DESCRIPTION_WORDS
+    ):
+        selector_description = (
+            extract_selector_description(soup)
+        )
+
+        if (
+            count_words(selector_description)
+            > count_words(description)
+        ):
+            description = (
+                selector_description
+            )
+            extraction_method = (
+                "html_selector"
+            )
+
+    if extraction_method_prefix:
+        extraction_method = (
+            f"{extraction_method_prefix}_{extraction_method}"
+        )
+
+    word_count = count_words(description)
+
+    if (
+        word_count
+        < MINIMUM_USEFUL_DESCRIPTION_WORDS
+        or appears_to_be_non_description_text(
+            description
+        )
+    ):
+        return JobDescriptionResult(
+            requested_url=requested_url,
+            final_url=final_url,
+            status="no_description",
+            http_status=http_status,
+            extraction_method=(
+                extraction_method
+                if description
+                else None
+            ),
+            description=description,
+            word_count=word_count,
+            error_message=(
+                "No sufficiently complete job "
+                "description was found."
+            ),
+            resolved_title=metadata.get("title"),
+            resolved_company=metadata.get("company"),
+            resolved_location=metadata.get("location"),
+        )
+
+    return JobDescriptionResult(
+        requested_url=requested_url,
+        final_url=final_url,
+        status="enriched",
+        http_status=http_status,
+        extraction_method=(
+            extraction_method
+        ),
+        description=description,
+        word_count=word_count,
+        error_message=None,
+        resolved_title=metadata.get("title"),
+        resolved_company=metadata.get("company"),
+        resolved_location=metadata.get("location"),
+    )
+
+
 def fetch_job_description(
     url: str,
     client: httpx.Client,
@@ -659,97 +768,9 @@ def fetch_job_description(
             ),
         )
 
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser",
-    )
-    metadata = extract_json_ld_job_metadata(soup)
-
-    if appears_to_be_block_page(soup):
-        return JobDescriptionResult(
-            requested_url=url,
-            final_url=final_url,
-            status="blocked",
-            http_status=http_status,
-            extraction_method=None,
-            description="",
-            word_count=0,
-            error_message=(
-                "The response appears to be "
-                "an access-control or CAPTCHA page."
-            ),
-            resolved_title=metadata.get("title"),
-            resolved_company=metadata.get("company"),
-            resolved_location=metadata.get("location"),
-        )
-
-    description = (
-        extract_json_ld_description(soup)
-    )
-
-    extraction_method = "json_ld"
-
-    if (
-        count_words(description)
-        < MINIMUM_USEFUL_DESCRIPTION_WORDS
-    ):
-        selector_description = (
-            extract_selector_description(soup)
-        )
-
-        if (
-            count_words(selector_description)
-            > count_words(description)
-        ):
-            description = (
-                selector_description
-            )
-            extraction_method = (
-                "html_selector"
-            )
-
-    word_count = count_words(description)
-
-    if (
-        word_count
-        < MINIMUM_USEFUL_DESCRIPTION_WORDS
-        or appears_to_be_non_description_text(
-            description
-        )
-    ):
-        return JobDescriptionResult(
-            requested_url=url,
-            final_url=final_url,
-            status="no_description",
-            http_status=http_status,
-            extraction_method=(
-                extraction_method
-                if description
-                else None
-            ),
-            description=description,
-            word_count=word_count,
-            error_message=(
-                "No sufficiently complete job "
-                "description was found."
-            ),
-            resolved_title=metadata.get("title"),
-            resolved_company=metadata.get("company"),
-            resolved_location=metadata.get("location"),
-        )
-
-    return JobDescriptionResult(
+    return extract_job_description_from_html(
         requested_url=url,
         final_url=final_url,
-        status="enriched",
         http_status=http_status,
-        extraction_method=(
-            extraction_method
-        ),
-        description=description,
-        word_count=word_count,
-        error_message=None,
-        resolved_title=metadata.get("title"),
-        resolved_company=metadata.get("company"),
-        resolved_location=metadata.get("location"),
+        html_text=response.text,
     )
