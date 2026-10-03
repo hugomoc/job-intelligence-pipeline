@@ -270,7 +270,8 @@ def render_job_listing(job: dict) -> None:
             )
 
             open_target = select_job_open_target(job)
-            st.link_button(open_target.label, open_target.url)
+            if open_target.url:
+                st.link_button(open_target.label, open_target.url)
 
             if open_target.note:
                 st.caption(open_target.note)

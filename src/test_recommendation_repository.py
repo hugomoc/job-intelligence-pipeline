@@ -354,7 +354,7 @@ def test_candidate_jobs_require_complete_descriptions() -> None:
                 title="Forward Deployed Engineer",
             )
             seed_job(
-                "lensa-scoreable-job",
+                "direct-scoreable-job",
                 " ".join(
                     [
                         "Responsibilities include building reliable data "
@@ -363,7 +363,7 @@ def test_candidate_jobs_require_complete_descriptions() -> None:
                     ]
                     * 12
                 ),
-                source="lensa",
+                source="greenhouse",
             )
 
             save_job_eligibility_decision(
@@ -398,7 +398,7 @@ def test_candidate_jobs_require_complete_descriptions() -> None:
                 for candidate in candidates
             } == {
                 "has-description",
-                "lensa-scoreable-job",
+                "direct-scoreable-job",
             }
             assert count_unscored_candidate_jobs(
                 resume_hash="resume-1",
@@ -733,6 +733,7 @@ def test_ai_score_cache_uses_exact_posting_not_duplicate_fingerprint() -> None:
                 title="Senior Data Engineer",
                 company_name="Example Co",
                 apply_url="https://example.com/jobs?jobId=123",
+                source="company",
                 source_job_id="123",
             )
             seed_status_job(
@@ -741,6 +742,7 @@ def test_ai_score_cache_uses_exact_posting_not_duplicate_fingerprint() -> None:
                 title="Senior Data Engineer",
                 company_name="Example Co",
                 apply_url="https://example.com/jobs?jobId=456",
+                source="company",
                 source_job_id="456",
             )
 

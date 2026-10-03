@@ -277,7 +277,7 @@ def test_good_direct_url_does_not_trigger_official_discovery() -> None:
     )
 
 
-def test_valid_aggregator_job_does_not_trigger_official_discovery() -> None:
+def test_valid_aggregator_job_still_triggers_until_official_url_verified() -> None:
     validation = accepted_validation()
     lensa_result = JobDescriptionResult(
         requested_url="https://lensa.com/job/123",
@@ -293,8 +293,19 @@ def test_valid_aggregator_job_does_not_trigger_official_discovery() -> None:
         resolved_location="Remote",
     )
 
+    assert should_attempt_official_resolution(
+        job={
+            **lensa_job(),
+            "official_url_status": None,
+        },
+        enrichment_result=lensa_result,
+        identity_validation=validation,
+    )
     assert not should_attempt_official_resolution(
-        job=lensa_job(),
+        job={
+            **lensa_job(),
+            "official_url_status": OFFICIAL_FOUND_VERIFIED,
+        },
         enrichment_result=lensa_result,
         identity_validation=validation,
     )
@@ -428,7 +439,7 @@ def test_ui_open_link_prefers_verified_official_url() -> None:
     assert target.url == "https://boards.greenhouse.io/seismic/jobs/123"
 
 
-def test_ui_open_link_falls_back_to_source_page_safely() -> None:
+def test_ui_open_link_blocks_unverified_aggregator_source_page() -> None:
     target = select_job_open_target(
         {
             "apply_url": "https://lensa.com/generic-alert",
@@ -436,22 +447,22 @@ def test_ui_open_link_falls_back_to_source_page_safely() -> None:
         }
     )
 
-    assert target.label == "Open source page"
-    assert target.url == "https://lensa.com/generic-alert"
+    assert target.label == "Official job unavailable"
+    assert target.url is None
 
 
 def main() -> None:
     test_lensa_generic_page_falls_back_to_official_job()
     test_source_apply_url_is_preserved_when_official_url_is_stored()
     test_good_direct_url_does_not_trigger_official_discovery()
-    test_valid_aggregator_job_does_not_trigger_official_discovery()
+    test_valid_aggregator_job_still_triggers_until_official_url_verified()
     test_ambiguous_official_matches_are_not_guessed()
     test_no_official_match_marks_not_found()
     test_blocked_employer_site_marks_blocked()
     test_identity_mismatch_rejects_official_candidate()
     test_dynamic_candidate_fetch_can_verify_official_job()
     test_ui_open_link_prefers_verified_official_url()
-    test_ui_open_link_falls_back_to_source_page_safely()
+    test_ui_open_link_blocks_unverified_aggregator_source_page()
     print("Official job resolver tests passed.")
 
 

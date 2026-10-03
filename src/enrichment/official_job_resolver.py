@@ -18,6 +18,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 from src.browser.playwright_client import PlaywrightClient
+from src.enrichment.ats import (
+    OfficialJobCandidate,
+    discover_ats_candidates,
+)
 from src.enrichment.job_description import (
     JobDescriptionResult,
     extract_job_description_from_html,
@@ -92,13 +96,6 @@ DYNAMIC_RENDER_WAIT_MS = 1_500
 
 
 @dataclass(frozen=True)
-class OfficialJobCandidate:
-    url: str
-    label: str
-    source: str
-
-
-@dataclass(frozen=True)
 class VerifiedOfficialJob:
     candidate: OfficialJobCandidate
     result: JobDescriptionResult
@@ -164,8 +161,11 @@ def should_attempt_official_resolution(
     identity_validation: JobIdentityValidation | None,
 ) -> bool:
     """Decide whether an aggregator job needs official-site discovery."""
-    if not is_aggregator_job(job):
-        return False
+    if is_aggregator_job(job):
+        return (
+            str(job.get("official_url_status") or "").strip()
+            != OFFICIAL_FOUND_VERIFIED
+        )
 
     if (
         enrichment_result.status == "enriched"
@@ -281,6 +281,8 @@ def extract_search_result_candidates(
                 url=url,
                 label=label,
                 source=ats_type_for_url(url) or "search",
+                title=label,
+                company=company_name,
             )
         )
 
@@ -404,15 +406,25 @@ def candidate_order_key(
     match = score_candidate(
         expected_title=expected_title,
         expected_company=expected_company,
-        candidate_title=candidate.label or candidate.url,
-        candidate_company=expected_company,
+        candidate_title=candidate.title or candidate.label or candidate.url,
+        candidate_company=candidate.company or expected_company,
     )
 
     ats_bonus = 10 if ats_type_for_url(candidate.url) else 0
+    metadata_bonus = sum(
+        1
+        for value in (
+            candidate.title,
+            candidate.company,
+            candidate.location,
+            candidate.job_id,
+        )
+        if value
+    )
 
     return (
         match.title_score + ats_bonus,
-        len(candidate.label or ""),
+        metadata_bonus,
     )
 
 
@@ -439,9 +451,9 @@ def validate_candidate_result(
         original_title=job.get("title"),
         original_company=job.get("company_name"),
         original_location=job.get("location"),
-        resolved_title=result.resolved_title,
-        resolved_company=result.resolved_company,
-        resolved_location=result.resolved_location,
+        resolved_title=result.resolved_title or candidate.title,
+        resolved_company=result.resolved_company or candidate.company,
+        resolved_location=result.resolved_location or candidate.location,
     )
 
     if not validation.accepted:
@@ -476,7 +488,7 @@ def choose_verified_candidate(
             return OfficialJobResolutionResult(
                 status=OFFICIAL_AMBIGUOUS,
                 official_job_url=None,
-                official_url_source="search",
+                official_url_source=best.candidate.source,
                 official_url_resolved_at=now_utc(),
                 official_url_confidence=best.validation.confidence,
                 official_url_validation_reason=(
@@ -484,8 +496,8 @@ def choose_verified_candidate(
                     "to choose safely"
                 ),
                 resolved_title=best.result.resolved_title,
-                resolved_company=best.result.resolved_company,
-                resolved_location=best.result.resolved_location,
+                resolved_company=best.result.resolved_company or best.candidate.company,
+                resolved_location=best.result.resolved_location or best.candidate.location,
             )
 
     return OfficialJobResolutionResult(
@@ -495,11 +507,99 @@ def choose_verified_candidate(
         official_url_resolved_at=now_utc(),
         official_url_confidence=best.validation.confidence,
         official_url_validation_reason=best.validation.reason,
-        resolved_title=best.result.resolved_title,
-        resolved_company=best.result.resolved_company,
-        resolved_location=best.result.resolved_location,
+        resolved_title=best.result.resolved_title or best.candidate.title,
+        resolved_company=best.result.resolved_company or best.candidate.company,
+        resolved_location=best.result.resolved_location or best.candidate.location,
         description_result=best.result,
         identity_validation=best.validation,
+    )
+
+
+def resolve_from_candidates(
+    job: dict,
+    client: httpx.Client,
+    candidates: Iterable[OfficialJobCandidate],
+    source: str,
+) -> OfficialJobResolutionResult:
+    ranked = ranked_candidates(
+        job,
+        candidates,
+    )[:MAX_CANDIDATE_FETCHES]
+
+    if not ranked:
+        return OfficialJobResolutionResult(
+            status=OFFICIAL_NOT_FOUND,
+            official_job_url=None,
+            official_url_source=source,
+            official_url_resolved_at=now_utc(),
+            official_url_confidence=None,
+            official_url_validation_reason="no official or known ATS candidates found",
+            resolved_title=None,
+            resolved_company=None,
+            resolved_location=None,
+        )
+
+    verified_jobs: list[VerifiedOfficialJob] = []
+    blocked_count = 0
+    last_rejection_reason: str | None = None
+
+    for candidate in ranked:
+        result = fetch_candidate_description(candidate, client)
+
+        if result.status == "blocked":
+            blocked_count += 1
+            continue
+
+        verified = validate_candidate_result(
+            job=job,
+            candidate=candidate,
+            result=result,
+        )
+
+        if verified is None:
+            if result.resolved_title or result.resolved_company:
+                validation = validate_job_identity(
+                    original_title=job.get("title"),
+                    original_company=job.get("company_name"),
+                    original_location=job.get("location"),
+                    resolved_title=result.resolved_title or candidate.title,
+                    resolved_company=result.resolved_company or candidate.company,
+                    resolved_location=result.resolved_location or candidate.location,
+                )
+                last_rejection_reason = validation.reason
+            continue
+
+        verified_jobs.append(verified)
+
+    if verified_jobs:
+        return choose_verified_candidate(verified_jobs)
+
+    if blocked_count == len(ranked):
+        return OfficialJobResolutionResult(
+            status=OFFICIAL_BLOCKED,
+            official_job_url=None,
+            official_url_source=source,
+            official_url_resolved_at=now_utc(),
+            official_url_confidence=None,
+            official_url_validation_reason="all official candidates were blocked",
+            resolved_title=None,
+            resolved_company=None,
+            resolved_location=None,
+        )
+
+    return OfficialJobResolutionResult(
+        status=OFFICIAL_NOT_FOUND,
+        official_job_url=None,
+        official_url_source=source,
+        official_url_resolved_at=now_utc(),
+        official_url_confidence=None,
+        official_url_validation_reason=(
+            last_rejection_reason
+            or "official candidates did not validate as the same job"
+        ),
+        resolved_title=None,
+        resolved_company=None,
+        resolved_location=None,
     )
 
 
@@ -509,10 +609,29 @@ def resolve_official_job(
 ) -> OfficialJobResolutionResult:
     """Find and verify an official employer/ATS posting for an aggregator job."""
     try:
-        candidates = ranked_candidates(
-            job,
-            search_candidates(job, client),
-        )[:MAX_CANDIDATE_FETCHES]
+        ats_candidates = discover_ats_candidates(
+            job=job,
+            client=client,
+        )
+    except Exception:
+        ats_candidates = []
+
+    if ats_candidates:
+        ats_result = resolve_from_candidates(
+            job=job,
+            client=client,
+            candidates=ats_candidates,
+            source="ats",
+        )
+
+        if ats_result.status in {
+            OFFICIAL_FOUND_VERIFIED,
+            OFFICIAL_AMBIGUOUS,
+        }:
+            return ats_result
+
+    try:
+        candidates = search_candidates(job, client)
     except PermissionError as error:
         return OfficialJobResolutionResult(
             status=OFFICIAL_BLOCKED,
@@ -540,78 +659,9 @@ def resolve_official_job(
             error_message=f"{type(error).__name__}: {error}",
         )
 
-    if not candidates:
-        return OfficialJobResolutionResult(
-            status=OFFICIAL_NOT_FOUND,
-            official_job_url=None,
-            official_url_source="search",
-            official_url_resolved_at=now_utc(),
-            official_url_confidence=None,
-            official_url_validation_reason="no official or known ATS candidates found",
-            resolved_title=None,
-            resolved_company=None,
-            resolved_location=None,
-        )
-
-    verified_jobs: list[VerifiedOfficialJob] = []
-    blocked_count = 0
-    last_rejection_reason: str | None = None
-
-    for candidate in candidates:
-        result = fetch_candidate_description(candidate, client)
-
-        if result.status == "blocked":
-            blocked_count += 1
-            continue
-
-        verified = validate_candidate_result(
-            job=job,
-            candidate=candidate,
-            result=result,
-        )
-
-        if verified is None:
-            if result.resolved_title or result.resolved_company:
-                validation = validate_job_identity(
-                    original_title=job.get("title"),
-                    original_company=job.get("company_name"),
-                    original_location=job.get("location"),
-                    resolved_title=result.resolved_title,
-                    resolved_company=result.resolved_company,
-                    resolved_location=result.resolved_location,
-                )
-                last_rejection_reason = validation.reason
-            continue
-
-        verified_jobs.append(verified)
-
-    if verified_jobs:
-        return choose_verified_candidate(verified_jobs)
-
-    if blocked_count == len(candidates):
-        return OfficialJobResolutionResult(
-            status=OFFICIAL_BLOCKED,
-            official_job_url=None,
-            official_url_source="candidate_fetch",
-            official_url_resolved_at=now_utc(),
-            official_url_confidence=None,
-            official_url_validation_reason="all official candidates were blocked",
-            resolved_title=None,
-            resolved_company=None,
-            resolved_location=None,
-        )
-
-    return OfficialJobResolutionResult(
-        status=OFFICIAL_NOT_FOUND,
-        official_job_url=None,
-        official_url_source="search",
-        official_url_resolved_at=now_utc(),
-        official_url_confidence=None,
-        official_url_validation_reason=(
-            last_rejection_reason
-            or "official candidates did not validate as the same job"
-        ),
-        resolved_title=None,
-        resolved_company=None,
-        resolved_location=None,
+    return resolve_from_candidates(
+        job=job,
+        client=client,
+        candidates=candidates,
+        source="search",
     )

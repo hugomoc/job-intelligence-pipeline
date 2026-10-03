@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.database import (
@@ -28,8 +28,13 @@ from src.enrichment.job_identity import (
     validate_job_identity,
 )
 from src.enrichment.official_job_resolver import (
+    OFFICIAL_AMBIGUOUS,
+    OFFICIAL_BLOCKED,
+    OFFICIAL_ERROR,
     OFFICIAL_FOUND_VERIFIED,
+    OFFICIAL_NOT_FOUND,
     OfficialJobResolutionResult,
+    is_aggregator_job,
     resolve_official_job,
     should_attempt_official_resolution,
 )
@@ -55,6 +60,14 @@ FAILED_STATUSES = {
 AGGREGATOR_SOURCES_REQUIRING_IDENTITY = {
     "lensa",
     "jobleads",
+}
+
+OFFICIAL_RETRY_COOLDOWN_DAYS = 7
+OFFICIAL_RETRY_STATUSES = {
+    OFFICIAL_AMBIGUOUS,
+    OFFICIAL_BLOCKED,
+    OFFICIAL_ERROR,
+    OFFICIAL_NOT_FOUND,
 }
 
 
@@ -244,6 +257,94 @@ def table_exists(
     )
 
 
+def as_utc_datetime(
+    value: Any,
+) -> datetime | None:
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+
+        return value.astimezone(timezone.utc)
+
+    return None
+
+
+def official_retry_cutoff(
+    now: datetime | None = None,
+) -> datetime:
+    reference = now or datetime.now(timezone.utc)
+
+    return reference - timedelta(days=OFFICIAL_RETRY_COOLDOWN_DAYS)
+
+
+def official_status_value(
+    job: dict[str, Any],
+) -> str:
+    return str(job.get("official_url_status") or "").strip()
+
+
+def needs_official_resolution(
+    job: dict[str, Any],
+    force: bool = False,
+    now: datetime | None = None,
+) -> bool:
+    if not is_aggregator_job(job):
+        return False
+
+    status = official_status_value(job)
+
+    if status == OFFICIAL_FOUND_VERIFIED:
+        return False
+
+    if force:
+        return True
+
+    if not status:
+        return True
+
+    if status not in OFFICIAL_RETRY_STATUSES:
+        return True
+
+    last_official_attempt = (
+        as_utc_datetime(job.get("official_url_resolved_at"))
+        or as_utc_datetime(job.get("previous_attempted_at"))
+    )
+
+    if last_official_attempt is None:
+        return True
+
+    return last_official_attempt <= official_retry_cutoff(now)
+
+
+def needs_description_enrichment(
+    job: dict[str, Any],
+    minimum_words: int,
+    retry_failed: bool,
+    force: bool = False,
+) -> bool:
+    if force:
+        return True
+
+    if (
+        job["current_word_count"] >= minimum_words
+        and job["description_state"] == "FULL_JD"
+    ):
+        return False
+
+    previous_status = job.get("previous_status")
+
+    if previous_status:
+        return (
+            retry_failed
+            and previous_status in FAILED_STATUSES
+        )
+
+    return True
+
+
 def load_jobs_to_enrich(
     limit: int,
     minimum_words: int,
@@ -361,7 +462,15 @@ def load_jobs_to_enrich(
 
         attempts.status
             AS previous_status,
+        attempts.error_message
+            AS previous_error_message,
         attempts.attempt_count,
+        attempts.last_attempted_at
+            AS previous_attempted_at,
+        attempts.official_job_url,
+        attempts.official_url_status,
+        attempts.official_url_resolved_at,
+        attempts.official_url_source,
 
         COALESCE(
             matches.match_score,
@@ -490,23 +599,22 @@ def load_jobs_to_enrich(
         previous_status = job.get(
             "previous_status"
         )
+        needs_description = needs_description_enrichment(
+            job=job,
+            minimum_words=minimum_words,
+            retry_failed=retry_failed,
+            force=force,
+        )
+        needs_official = needs_official_resolution(
+            job=job,
+            force=force,
+        )
+        job["needs_description_enrichment"] = needs_description
+        job["needs_official_resolution"] = needs_official
 
         if not force:
-            if (
-                job["current_word_count"] >= minimum_words
-                and job["description_state"] == "FULL_JD"
-            ):
+            if not needs_description and not needs_official:
                 continue
-
-            if previous_status:
-                should_retry = (
-                    retry_failed
-                    and previous_status
-                    in FAILED_STATUSES
-                )
-
-                if not should_retry:
-                    continue
 
         selected.append(job)
         selected_exact_keys.add(exact_key)
@@ -703,15 +811,49 @@ def update_job_description(
     return True
 
 
+def existing_description_result(
+    job: dict[str, Any],
+) -> JobDescriptionResult:
+    return JobDescriptionResult(
+        requested_url=job["apply_url"],
+        final_url=None,
+        status=(
+            str(job.get("previous_status") or "").strip()
+            or "official_resolution_only"
+        ),
+        http_status=None,
+        extraction_method=None,
+        description=str(job.get("description") or ""),
+        word_count=int(job.get("current_word_count") or 0),
+        error_message=(
+            job.get("previous_error_message")
+            or "Reused existing description while resolving official URL."
+        ),
+    )
+
+
 def process_enrichment_job(
     job: dict[str, Any],
     client,
 ) -> EnrichmentProcessingResult:
     """Fetch/validate a description, falling back to official pages if needed."""
-    source_result = fetch_job_description(
-        url=job["apply_url"],
-        client=client,
+    needs_description = bool(
+        job.get(
+            "needs_description_enrichment",
+            True,
+        )
     )
+    needs_official = bool(
+        job.get("needs_official_resolution")
+    )
+
+    if needs_description:
+        source_result = fetch_job_description(
+            url=job["apply_url"],
+            client=client,
+        )
+    else:
+        source_result = existing_description_result(job)
 
     result = source_result
     updated = False
@@ -720,7 +862,7 @@ def process_enrichment_job(
     identity_validation: JobIdentityValidation | None = None
     official_resolution: OfficialJobResolutionResult | None = None
 
-    if result.status == "enriched":
+    if needs_description and result.status == "enriched":
         identity_validation = validate_enrichment_identity(
             job=job,
             result=result,
@@ -745,10 +887,13 @@ def process_enrichment_job(
                     "existing description."
                 )
 
-    if should_attempt_official_resolution(
-        job=job,
-        enrichment_result=source_result,
-        identity_validation=identity_validation,
+    if (
+        needs_official
+        or should_attempt_official_resolution(
+            job=job,
+            enrichment_result=source_result,
+            identity_validation=identity_validation,
+        )
     ):
         official_resolution = resolve_official_job(
             job=job,

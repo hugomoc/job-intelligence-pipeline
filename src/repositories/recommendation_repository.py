@@ -28,6 +28,7 @@ from src.job_title_filter import (
     EXCLUDED_TITLE_SQL_REGEX,
     classify_job_title,
 )
+from src.ui.job_visibility import filter_user_reviewable_jobs
 
 
 EXCLUDED_JOB_SOURCES: tuple[str, ...] = ()
@@ -1470,7 +1471,7 @@ def load_all_jobs(
         )
 
     jobs = apply_admission_gate(
-        jobs=jobs,
+        jobs=filter_user_reviewable_jobs(jobs),
         resume_hash=selected_resume_hash,
         preserve_statuses=("applied", "removed"),
     )
@@ -1720,7 +1721,9 @@ def load_candidate_jobs(
             enrichment_attempts AS (
                 SELECT
                     record_key,
-                    status AS enrichment_status
+                    status AS enrichment_status,
+                    official_job_url,
+                    official_url_status
                 FROM job_enrichment_attempts
             ),
 
@@ -1761,6 +1764,8 @@ def load_candidate_jobs(
                     END AS description_quality_signals,
                     jobs.source,
                     jobs.apply_url,
+                    enrichment_attempts.official_job_url,
+                    enrichment_attempts.official_url_status,
                     matches.match_score AS rule_score,
                     matches.search_id,
                     matches.search_title,
@@ -1855,6 +1860,8 @@ def load_candidate_jobs(
                 description_quality_signals,
                 source,
                 apply_url,
+                official_job_url,
+                official_url_status,
                 rule_score,
                 search_id,
                 search_title
@@ -1864,7 +1871,6 @@ def load_candidate_jobs(
                 rule_score DESC,
                 title,
                 company_name
-            LIMIT ?
             """.format(
                 excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
             ),
@@ -1877,18 +1883,24 @@ def load_candidate_jobs(
                 ELIGIBILITY_PROMPT_VERSION,
                 minimum_rule_score,
                 EXCLUDED_TITLE_SQL_REGEX,
-                limit,
             ],
         )
 
         columns = [description[0] for description in cursor.description]
         rows = cursor.fetchall()
 
+    jobs = filter_user_reviewable_jobs(
+        [
+            dict(zip(columns, row))
+            for row in rows
+        ]
+    )
+
     return apply_admission_gate(
-        jobs=[dict(zip(columns, row)) for row in rows],
+        jobs=jobs,
         resume_hash=resume_hash,
         include_low_priority=False,
-    )
+    )[:limit]
 
 
 def count_cached_canonical_scores(
