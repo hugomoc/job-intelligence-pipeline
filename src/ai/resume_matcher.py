@@ -24,7 +24,7 @@ from src.ai.resume_profiler import (
 
 
 MINIMUM_COMPLETE_DESCRIPTION_WORDS = 80
-MATCHER_PROMPT_VERSION = "v2"
+MATCHER_PROMPT_VERSION = "v3"
 
 SIGNIFICANT_TERM_PATTERN = re.compile(
     r"[a-z0-9+#.]+"
@@ -57,6 +57,19 @@ TECH_ALIASES: dict[str, set[str]] = {
     "snowflake": {"snowflake"},
     "redshift": {"redshift", "amazon redshift"},
     "bigquery": {"bigquery", "google bigquery"},
+    "databricks": {
+        "databricks",
+        "delta lake",
+        "lakehouse",
+    },
+    "looker": {"looker", "looker studio"},
+    "tableau": {"tableau"},
+    "power_bi": {
+        "power bi",
+        "power business intelligence",
+        "microsoft power bi",
+    },
+    "domo": {"domo"},
     "git": {"git", "github", "gitlab", "bitbucket"},
     "ci_cd": {
         "ci/cd",
@@ -84,6 +97,25 @@ WAREHOUSE_GROUPS = {
     "snowflake",
     "redshift",
     "bigquery",
+    "databricks",
+}
+
+BI_PLATFORM_GROUPS = {
+    "looker",
+    "tableau",
+    "power_bi",
+    "domo",
+}
+
+INTERCHANGEABLE_TECH_GROUPS = (
+    CLOUD_GROUPS,
+    WAREHOUSE_GROUPS,
+    BI_PLATFORM_GROUPS,
+)
+
+SIGNAL_ALIAS_GROUPS = {
+    "Databricks production experience": "databricks",
+    "Domo as a primary BI platform": "domo",
 }
 
 
@@ -99,6 +131,21 @@ class CriticalCapabilitySignal:
         "seniority",
         "industry",
     ] = "skills"
+
+
+@dataclass(frozen=True)
+class CriticalRequirementGap:
+    label: str
+    skill_component: Literal[
+        "skills",
+        "experience",
+        "seniority",
+        "industry",
+    ]
+    severity: Literal[
+        "mandatory",
+        "specialization",
+    ]
 
 
 CRITICAL_CAPABILITY_SIGNALS: tuple[
@@ -591,9 +638,21 @@ def regex_count(
     return count
 
 
-CRITICAL_REQUIREMENT_CONTEXT_PATTERNS = (
+HARD_MANDATORY_CONTEXT_PATTERNS = (
     r"\bmust have\b",
     r"\brequired\b",
+    r"\brequires?\b",
+    r"\bmandatory\b",
+)
+
+MANDATORY_REQUIREMENT_CONTEXT_PATTERNS = (
+    *HARD_MANDATORY_CONTEXT_PATTERNS,
+    r"\brequirements?\b.{0,30}\b(include|including)\b",
+    r"\bqualifications?\b.{0,30}\b(include|including)\b",
+)
+
+CRITICAL_REQUIREMENT_CONTEXT_PATTERNS = (
+    *MANDATORY_REQUIREMENT_CONTEXT_PATTERNS,
     r"\brequirements?\b",
     r"\bqualifications?\b",
     r"\bproduction experience\b",
@@ -615,9 +674,66 @@ OPTIONAL_REQUIREMENT_CONTEXT_PATTERNS = (
 )
 
 
+def interchangeable_family_for_group(
+    group_name: str,
+) -> set[str]:
+    for family in INTERCHANGEABLE_TECH_GROUPS:
+        if group_name in family:
+            return family
+
+    return {group_name}
+
+
+def requirement_has_satisfied_alternative(
+    requirement: str,
+    signal: CriticalCapabilitySignal,
+    resume_profile: ResumeProfile,
+) -> bool:
+    signal_group = SIGNAL_ALIAS_GROUPS.get(
+        signal.label
+    )
+
+    if not signal_group:
+        return False
+
+    if (
+        not requirement_uses_alternatives(
+            requirement
+        )
+        or requirement_requires_all(requirement)
+    ):
+        return False
+
+    mentioned_groups = mentioned_alias_groups(
+        requirement
+    )
+    interchangeable_groups = (
+        interchangeable_family_for_group(signal_group)
+    )
+
+    if (
+        signal_group not in mentioned_groups
+        or not (
+            mentioned_groups
+            & interchangeable_groups
+        )
+    ):
+        return False
+
+    return any(
+        profile_has_alias_group(
+            resume_profile,
+            group_name,
+            include_certifications=False,
+        )
+        for group_name in interchangeable_groups
+    )
+
+
 def capability_mentions_with_context(
     job_text: str,
     signal: CriticalCapabilitySignal,
+    resume_profile: ResumeProfile | None = None,
 ) -> int:
     normalized = normalize_match_text(job_text)
     mention_count = 0
@@ -631,13 +747,31 @@ def capability_mentions_with_context(
                 window,
                 CRITICAL_REQUIREMENT_CONTEXT_PATTERNS,
             )
+            has_mandatory_context = regex_present(
+                window,
+                MANDATORY_REQUIREMENT_CONTEXT_PATTERNS,
+            )
+            has_hard_mandatory_context = regex_present(
+                window,
+                HARD_MANDATORY_CONTEXT_PATTERNS,
+            )
 
             if (
                 regex_present(
                     window,
                     OPTIONAL_REQUIREMENT_CONTEXT_PATTERNS,
                 )
-                and not has_critical_context
+                and not has_hard_mandatory_context
+            ):
+                continue
+
+            if (
+                resume_profile is not None
+                and requirement_has_satisfied_alternative(
+                    window,
+                    signal,
+                    resume_profile,
+                )
             ):
                 continue
 
@@ -649,10 +783,58 @@ def capability_mentions_with_context(
     return mention_count
 
 
+def capability_mandatory_mentions(
+    job_text: str,
+    signal: CriticalCapabilitySignal,
+    resume_profile: ResumeProfile,
+) -> int:
+    normalized = normalize_match_text(job_text)
+    mention_count = 0
+
+    for pattern in signal.job_patterns:
+        for match in re.finditer(pattern, normalized):
+            start = max(match.start() - 90, 0)
+            end = min(match.end() + 90, len(normalized))
+            window = normalized[start:end]
+
+            has_mandatory_context = regex_present(
+                window,
+                MANDATORY_REQUIREMENT_CONTEXT_PATTERNS,
+            )
+            has_hard_mandatory_context = regex_present(
+                window,
+                HARD_MANDATORY_CONTEXT_PATTERNS,
+            )
+
+            if not has_mandatory_context:
+                continue
+
+            if (
+                regex_present(
+                    window,
+                    OPTIONAL_REQUIREMENT_CONTEXT_PATTERNS,
+                )
+                and not has_hard_mandatory_context
+            ):
+                continue
+
+            if requirement_has_satisfied_alternative(
+                window,
+                signal,
+                resume_profile,
+            ):
+                continue
+
+            mention_count += 1
+
+    return mention_count
+
+
 def capability_is_central_to_job(
     job: dict[str, Any],
     description: str,
     signal: CriticalCapabilitySignal,
+    resume_profile: ResumeProfile,
 ) -> bool:
     title = str(job.get("title") or "")
     title_has_signal = regex_present(
@@ -662,9 +844,17 @@ def capability_is_central_to_job(
     description_mentions = capability_mentions_with_context(
         description,
         signal,
+        resume_profile,
     )
 
-    if title_has_signal:
+    if (
+        title_has_signal
+        and not requirement_has_satisfied_alternative(
+            title,
+            signal,
+            resume_profile,
+        )
+    ):
         return True
 
     if description_mentions >= 3:
@@ -722,7 +912,7 @@ def detect_critical_requirement_gaps(
     resume_profile: ResumeProfile,
     job: dict[str, Any],
     description: str,
-) -> tuple[list[str], list[str], list[str]]:
+) -> tuple[list[CriticalRequirementGap], list[str]]:
     """Find central job requirements absent from production resume evidence."""
     production_text = production_resume_text(
         resume_profile
@@ -730,15 +920,16 @@ def detect_critical_requirement_gaps(
     project_text = project_resume_text(
         resume_profile
     )
-    gaps: list[str] = []
+    gaps: list[CriticalRequirementGap] = []
     risks: list[str] = []
-    components: list[str] = []
+    seen_gaps: set[tuple[str, str]] = set()
 
     for signal in CRITICAL_CAPABILITY_SIGNALS:
         if not capability_is_central_to_job(
             job=job,
             description=description,
             signal=signal,
+            resume_profile=resume_profile,
         ):
             continue
 
@@ -748,8 +939,32 @@ def detect_critical_requirement_gaps(
         ):
             continue
 
-        gaps.append(signal.label)
-        components.append(signal.skill_component)
+        severity: Literal[
+            "mandatory",
+            "specialization",
+        ] = (
+            "mandatory"
+            if capability_mandatory_mentions(
+                description,
+                signal,
+                resume_profile,
+            )
+            else "specialization"
+        )
+        gap_key = (
+            signal.label,
+            severity,
+        )
+
+        if gap_key not in seen_gaps:
+            gaps.append(
+                CriticalRequirementGap(
+                    label=signal.label,
+                    skill_component=signal.skill_component,
+                    severity=severity,
+                )
+            )
+            seen_gaps.add(gap_key)
 
         if signal.project_patterns and regex_present(
             project_text,
@@ -761,9 +976,8 @@ def detect_critical_requirement_gaps(
             )
 
     return (
-        list(dict.fromkeys(gaps)),
+        gaps,
         list(dict.fromkeys(risks)),
-        list(dict.fromkeys(components)),
     )
 
 
@@ -1268,37 +1482,74 @@ def build_resume_job_match(
         resume_profile=resume_profile,
     )
 
+    specialization_gap_labels: list[str] = []
+
     if description_complete:
-        critical_gaps, critical_risks, critical_components = (
+        critical_gaps, critical_risks = (
             detect_critical_requirement_gaps(
                 resume_profile=resume_profile,
                 job=job,
                 description=str(job.get("description") or ""),
             )
         )
+        mandatory_gap_labels = [
+            gap.label
+            for gap in critical_gaps
+            if gap.severity == "mandatory"
+        ]
+        specialization_gap_labels = [
+            gap.label
+            for gap in critical_gaps
+            if gap.severity == "specialization"
+        ]
+        critical_components = [
+            gap.skill_component
+            for gap in critical_gaps
+        ]
 
         if critical_gaps:
-            hard_requirements_missing = list(
-                dict.fromkeys(
-                    analysis.hard_requirements_missing
-                    + [
-                        f"Major gap: {gap}"
-                        for gap in critical_gaps
-                    ]
+            hard_requirements_missing = (
+                list(
+                    dict.fromkeys(
+                        analysis.hard_requirements_missing
+                        + [
+                            f"Major gap: {gap}"
+                            for gap in mandatory_gap_labels
+                        ]
+                    )
                 )
+                if mandatory_gap_labels
+                else analysis.hard_requirements_missing
             )
             risk_factors = list(
                 dict.fromkeys(
                     analysis.risk_factors
                     + critical_risks
+                    + [
+                        f"Major specialization gap: {gap}"
+                        for gap in specialization_gap_labels
+                    ]
                 )
             )
+            gap_summary = (
+                mandatory_gap_labels
+                + specialization_gap_labels
+            )
+            if mandatory_gap_labels:
+                gap_summary_text = (
+                    "Major gap: the role requires "
+                    f"{'; '.join(gap_summary)}. "
+                )
+            else:
+                gap_summary_text = (
+                    "Major specialization gap: the role is centered on "
+                    f"{'; '.join(gap_summary)}. "
+                )
             update: dict[str, Any] = {
                 "hard_requirements_missing": hard_requirements_missing,
                 "risk_factors": risk_factors,
                 "summary": (
-                    "Major gap: the role requires "
-                    f"{'; '.join(critical_gaps)}. "
+                    gap_summary_text +
                     "The resume does not show equivalent production "
                     "ownership for that specialization. "
                     f"{analysis.summary}"
@@ -1375,6 +1626,16 @@ def build_resume_job_match(
         overall_score = min(
             overall_score,
             49,
+        )
+
+    if (
+        description_complete
+        and specialization_gap_labels
+        and not analysis.hard_requirements_missing
+    ):
+        overall_score = min(
+            overall_score,
+            74,
         )
 
     # A title-only or partial posting must never appear

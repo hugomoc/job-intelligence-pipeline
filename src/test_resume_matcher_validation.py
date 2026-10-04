@@ -313,6 +313,192 @@ def test_equivalent_warehouse_requirement_does_not_trigger_critical_penalty() ->
     assert match.analysis.hard_requirements_missing == []
 
 
+def test_databricks_in_alternative_warehouse_list_is_not_a_gap() -> None:
+    profile = make_profile(
+        databases_warehouses=[
+            "Snowflake",
+        ],
+        production_skills=[
+            "Snowflake",
+            "SQL",
+        ],
+    )
+    description = " ".join(
+        [
+            "Requirements include Snowflake, Databricks, BigQuery, or similar warehouse experience.",
+            "Responsibilities include dimensional modeling and ELT pipelines.",
+        ]
+        * 10
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Analytics Engineer",
+        description,
+    )
+
+    assert match.overall_score == 95
+    assert not any(
+        "Databricks" in item
+        for item in match.analysis.hard_requirements_missing
+    )
+
+
+def test_databricks_or_snowflake_required_accepts_snowflake() -> None:
+    profile = make_profile(
+        databases_warehouses=[
+            "Snowflake",
+        ],
+        production_skills=[
+            "Snowflake",
+            "SQL",
+        ],
+    )
+    description = " ".join(
+        [
+            "Requirements include Databricks or Snowflake required for production data modeling.",
+            "Responsibilities include data warehouse optimization and ELT pipelines.",
+        ]
+        * 10
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Data Engineer",
+        description,
+    )
+
+    assert match.overall_score == 95
+    assert match.analysis.hard_requirements_missing == []
+
+
+def test_databricks_preferred_only_is_not_a_major_gap() -> None:
+    profile = make_profile(
+        databases_warehouses=[
+            "Snowflake",
+        ],
+        production_skills=[
+            "Snowflake",
+            "SQL",
+        ],
+    )
+    description = " ".join(
+        [
+            "Responsibilities include Snowflake pipelines and SQL modeling.",
+            "Databricks preferred for future lakehouse projects.",
+        ]
+        * 10
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Data Engineer",
+        description,
+    )
+
+    assert match.overall_score == 95
+    assert match.analysis.hard_requirements_missing == []
+    assert not any(
+        "Databricks" in risk
+        for risk in match.analysis.risk_factors
+    )
+
+
+def test_mandatory_core_databricks_requirement_remains_hard_gap() -> None:
+    profile = make_profile(
+        databases_warehouses=[
+            "Snowflake",
+        ],
+        production_skills=[
+            "Snowflake",
+            "SQL",
+        ],
+    )
+    description = " ".join(
+        [
+            "Production Databricks experience is required.",
+            "Databricks is the core data platform for this role.",
+            "Responsibilities include lakehouse operations and production pipelines.",
+        ]
+        * 8
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Data Engineer",
+        description,
+    )
+
+    assert match.overall_score <= 49
+    assert any(
+        "Databricks" in item
+        for item in match.analysis.hard_requirements_missing
+    )
+
+
+def test_cloud_warehouse_alternatives_accept_redshift() -> None:
+    profile = make_profile(
+        databases_warehouses=[
+            "Amazon Redshift",
+        ],
+        production_skills=[
+            "Redshift",
+            "SQL",
+        ],
+    )
+    description = " ".join(
+        [
+            "Experience with a cloud warehouse such as Snowflake, BigQuery, Redshift, Databricks, or similar.",
+            "Responsibilities include ELT, data modeling, and warehouse performance tuning.",
+        ]
+        * 10
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Data Engineer",
+        description,
+    )
+
+    assert match.overall_score == 95
+    assert match.analysis.hard_requirements_missing == []
+
+
+def test_nonmandatory_central_specialization_caps_to_review_not_skip() -> None:
+    profile = make_profile(
+        production_skills=[
+            "Python",
+            "SQL",
+            "Snowflake",
+        ],
+        industries=[
+            "financial services",
+        ],
+    )
+    description = " ".join(
+        [
+            "The team builds analytics for healthcare claims teams.",
+            "Responsibilities include claims analytics, data modeling, and claims reporting.",
+            "You will partner with operations teams on healthcare claims data products.",
+        ]
+        * 8
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Data Engineer, Claims Analytics",
+        description,
+    )
+
+    assert match.recommendation == "review"
+    assert match.overall_score == 74
+    assert match.analysis.hard_requirements_missing == []
+    assert any(
+        "healthcare claims" in risk
+        for risk in match.analysis.risk_factors
+    )
+
+
 def test_project_ai_does_not_satisfy_production_ai_requirement() -> None:
     profile = make_profile(
         production_skills=[
@@ -404,6 +590,8 @@ def test_repeated_specialization_is_treated_as_critical() -> None:
 
 
 def test_prompt_version_controls_cache_reuse() -> None:
+    assert MATCHER_PROMPT_VERSION == "v3"
+
     old_data_dir = database.DATA_DIR
     old_database_path = database.DATABASE_PATH
 
@@ -461,7 +649,7 @@ def test_prompt_version_controls_cache_reuse() -> None:
                         100,
                         true,
                         'gemini-test',
-                        'v1'
+                        'v2'
                     )
                     """
                 )
@@ -470,7 +658,7 @@ def test_prompt_version_controls_cache_reuse() -> None:
                 resume_hash="resume-1",
                 record_key="job-1",
                 model_name="gemini-test",
-                prompt_version="v1",
+                prompt_version="v2",
             )
             assert load_cached_job_score(
                 resume_hash="resume-1",
@@ -521,6 +709,12 @@ def main() -> None:
     test_missing_critical_ai_specialization_caps_score_and_explains_major_gap()
     test_missing_preferred_skill_does_not_trigger_critical_penalty()
     test_equivalent_warehouse_requirement_does_not_trigger_critical_penalty()
+    test_databricks_in_alternative_warehouse_list_is_not_a_gap()
+    test_databricks_or_snowflake_required_accepts_snowflake()
+    test_databricks_preferred_only_is_not_a_major_gap()
+    test_mandatory_core_databricks_requirement_remains_hard_gap()
+    test_cloud_warehouse_alternatives_accept_redshift()
+    test_nonmandatory_central_specialization_caps_to_review_not_skip()
     test_project_ai_does_not_satisfy_production_ai_requirement()
     test_production_ai_experience_satisfies_critical_requirement()
     test_repeated_specialization_is_treated_as_critical()

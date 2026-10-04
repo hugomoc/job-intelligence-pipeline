@@ -226,6 +226,115 @@ def test_senior_staff_role_without_org_scope_is_critical_gap() -> None:
     )
 
 
+def test_senior_staff_years_and_generic_senior_experience_has_scope_gap() -> None:
+    profile = {
+        **RESUME_PROFILE,
+        "years_of_relevant_experience": 20,
+        "leadership_evidence": [
+            "Senior engineer with strong SQL, Python, Snowflake, and Airflow experience.",
+        ],
+    }
+    result = evaluate_job_admission(
+        job={
+            "title": "Senior Staff Data Engineer",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": (
+                "Own multi-year technical strategy and influence "
+                "directors on cross-organization data architecture."
+            ),
+        },
+        resume_profile=profile,
+    )
+
+    assert result.seniority_match == "weak"
+    assert any(
+        "Senior Staff" in gap
+        for gap in result.critical_skill_gaps
+    )
+
+
+def test_senior_staff_standards_only_has_scope_gap() -> None:
+    profile = {
+        **RESUME_PROFILE,
+        "leadership_evidence": [
+            "Created standards for data modeling and code quality.",
+        ],
+    }
+    result = evaluate_job_admission(
+        job={
+            "title": "Senior Staff Data Engineer",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": (
+                "Set technical direction for senior engineers and "
+                "drive adoption across organizations."
+            ),
+        },
+        resume_profile=profile,
+    )
+
+    assert result.seniority_match == "weak"
+    assert any(
+        "Senior Staff" in gap
+        for gap in result.critical_skill_gaps
+    )
+
+
+def test_senior_staff_cross_functional_only_has_scope_gap() -> None:
+    profile = {
+        **RESUME_PROFILE,
+        "leadership_evidence": [
+            "Collaborated cross-functionally with stakeholders.",
+        ],
+    }
+    result = evaluate_job_admission(
+        job={
+            "title": "Senior Staff Data Engineer",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": (
+                "Own organization-wide architecture and influence "
+                "director-level technical decisions."
+            ),
+        },
+        resume_profile=profile,
+    )
+
+    assert result.seniority_match == "weak"
+    assert any(
+        "Senior Staff" in gap
+        for gap in result.critical_skill_gaps
+    )
+
+
+def test_senior_staff_reusable_framework_only_has_scope_gap() -> None:
+    profile = {
+        **RESUME_PROFILE,
+        "leadership_evidence": [
+            "Built a reusable framework for pipeline development.",
+        ],
+    }
+    result = evaluate_job_admission(
+        job={
+            "title": "Senior Staff Data Engineer",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": (
+                "Own multi-year technical strategy and broad data "
+                "platform adoption across teams."
+            ),
+        },
+        resume_profile=profile,
+    )
+
+    assert result.seniority_match == "weak"
+    assert any(
+        "Senior Staff" in gap
+        for gap in result.critical_skill_gaps
+    )
+
+
 def test_senior_staff_role_with_org_scope_is_allowed() -> None:
     profile = {
         **RESUME_PROFILE,
@@ -252,6 +361,33 @@ def test_senior_staff_role_with_org_scope_is_allowed() -> None:
     assert not result.critical_skill_gaps
 
 
+def test_principal_broad_experience_without_org_influence_has_gap() -> None:
+    profile = {
+        **RESUME_PROFILE,
+        "leadership_evidence": [
+            "Designed architecture, led projects, mentored teammates, and presented to leadership.",
+        ],
+    }
+    result = evaluate_job_admission(
+        job={
+            "title": "Principal Data Engineer",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": (
+                "Influence executives, drive multi-year technical "
+                "strategy, and align organizations around data architecture."
+            ),
+        },
+        resume_profile=profile,
+    )
+
+    assert result.seniority_match == "weak"
+    assert any(
+        "Principal" in gap
+        for gap in result.critical_skill_gaps
+    )
+
+
 def test_principal_role_scope_gap_affects_admission() -> None:
     result = decision(
         "Principal Data Engineer",
@@ -265,6 +401,48 @@ def test_principal_role_scope_gap_affects_admission() -> None:
     assert result.seniority_match == "weak"
     assert any(
         "Principal" in gap
+        for gap in result.critical_skill_gaps
+    )
+
+
+def test_staff_cross_team_architecture_can_pass_without_staff_title() -> None:
+    profile = {
+        **RESUME_PROFILE,
+        "leadership_evidence": [
+            "Owned architecture across teams for shared data platforms.",
+        ],
+    }
+    result = evaluate_job_admission(
+        job={
+            "title": "Staff Data Engineer",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": (
+                "Own architecture across teams and guide shared "
+                "Snowflake SQL data pipeline decisions."
+            ),
+        },
+        resume_profile=profile,
+    )
+
+    assert result.job_seniority_level == "staff"
+    assert result.seniority_match == "strong"
+    assert result.admission_decision == "include"
+
+
+def test_senior_project_leadership_does_not_require_staff_scope() -> None:
+    result = decision(
+        "Senior Data Engineer with Snowflake SQL Python",
+        description=(
+            "Lead project delivery for SQL and Snowflake pipelines. "
+            "Responsibilities include ELT, data modeling, and orchestration."
+        ),
+    )
+
+    assert result.job_seniority_level == "senior"
+    assert result.seniority_match == "strong"
+    assert not any(
+        "organizational IC scope" in gap
         for gap in result.critical_skill_gaps
     )
 
@@ -338,8 +516,15 @@ def main() -> None:
     test_staff_role_with_cross_team_scope_is_not_rejected_by_title()
     test_staff_role_without_scope_is_not_strong_seniority()
     test_senior_staff_role_without_org_scope_is_critical_gap()
+    test_senior_staff_years_and_generic_senior_experience_has_scope_gap()
+    test_senior_staff_standards_only_has_scope_gap()
+    test_senior_staff_cross_functional_only_has_scope_gap()
+    test_senior_staff_reusable_framework_only_has_scope_gap()
     test_senior_staff_role_with_org_scope_is_allowed()
+    test_principal_broad_experience_without_org_influence_has_gap()
     test_principal_role_scope_gap_affects_admission()
+    test_staff_cross_team_architecture_can_pass_without_staff_title()
+    test_senior_project_leadership_does_not_require_staff_scope()
     test_excludes_title_family_only()
     test_excludes_no_description_tableau_gap()
     test_excludes_possible_match_with_one_broad_title_signal()

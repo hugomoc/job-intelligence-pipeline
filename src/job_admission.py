@@ -71,13 +71,17 @@ RESPONSIBILITY_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 
 STAFF_SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
-    ("technical direction", r"\btechnical direction\b|\btechnical strategy\b"),
-    ("cross-team architecture", r"\barchitecture\b.{0,80}\b(cross team|across teams|organization|org|company wide|platform)\b"),
-    ("multi-year strategy", r"\bmulti year\b|\blong term\b.{0,40}\b(strategy|architecture|roadmap)\b"),
-    ("influence without authority", r"\binfluence\b.{0,80}\b(without authority|senior engineers|directors|vps?|executives?)\b"),
-    ("standards and frameworks", r"\bstandards?\b|\bframeworks?\b|\bpatterns?\b"),
-    ("cross-organizational adoption", r"\bcross organizational\b|\bcross functional\b|\badoption across\b|\bacross organizations\b"),
-    ("foundational platforms", r"\bfoundational\b|\bplatform\b.{0,80}\b(teams|company|organization|org)\b"),
+    ("multi-year technical strategy", r"\b(multi year|long term)\b.{0,80}\b(technical strategy|architecture|roadmap)\b|\b(technical strategy|architecture|roadmap)\b.{0,80}\b(multi year|long term)\b"),
+    ("technical direction across teams", r"\b(technical direction|set direction|set technical direction|technical strategy)\b.{0,100}\b(senior engineers?|staff engineers?|cross team|across teams|multiple teams|organization|org|company)\b"),
+    ("cross-team architecture", r"\barchitecture\b.{0,100}\b(cross team|across teams|multiple teams|organization|org|company wide|organization wide)\b"),
+    ("standards adopted across teams", r"\b(standards?|frameworks?|patterns?)\b.{0,120}\b(adopted|used|rolled out|implemented)\b.{0,80}\b(across teams|multiple teams|company wide|organization|org)\b"),
+    ("cross-organization migration", r"\b(migration|migrations|deprecation|deprecations)\b.{0,120}\b(across organizations|across teams|multiple teams|company wide|organization|org)\b"),
+    ("cross-organizational adoption", r"\b(cross organizational|cross organization|cross org)\b.{0,80}\badoption\b|\badoption\b.{0,100}\b(across organizations|across teams|multiple teams|company wide|organization|org)\b"),
+    ("organizational alignment", r"\balign(?:ed|ing)?\b.{0,140}\b(product|finance|engineering|data science|business)\b.{0,140}\b(product|finance|engineering|data science|business)\b"),
+    ("executive influence", r"\binfluenc(?:ed|e|ing)\b.{0,100}\b(directors?|vps?|vice presidents?|executives?|senior leadership)\b"),
+    ("influence without authority", r"\b(directed|led|influenced)\b.{0,100}\b(without formal authority|without authority)\b"),
+    ("broad platform adoption", r"\b(platforms?|architecture)\b.{0,120}\b(adopted|used|rolled out|broadly|company wide|organization wide|across teams|multiple teams)\b"),
+    ("organization-scale review", r"\b(design|code|architecture)\s+reviews?\b.{0,120}\b(organization|org|company|across teams|multiple teams)\b"),
     ("mentoring senior engineers", r"\bmentor(?:ed|ing)?\b.{0,80}\bsenior engineers?\b"),
 )
 
@@ -317,12 +321,8 @@ def evaluate_job_admission(
 
     seniority_match: Literal["strong", "partial", "weak", "unknown"] = "unknown"
     if job_seniority_level in {"senior_staff", "principal"}:
-        if resume_staff_scope_signals:
-            seniority_match = (
-                "strong"
-                if len(resume_staff_scope_signals) >= 2
-                else "partial"
-            )
+        if len(resume_staff_scope_signals) >= 2:
+            seniority_match = "strong"
         else:
             seniority_match = "weak"
             critical_gaps.append(
