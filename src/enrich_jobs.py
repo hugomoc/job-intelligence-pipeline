@@ -58,6 +58,7 @@ FAILED_STATUSES = {
 }
 
 AGGREGATOR_SOURCES_REQUIRING_IDENTITY = {
+    "glassdoor",
     "lensa",
     "jobleads",
 }

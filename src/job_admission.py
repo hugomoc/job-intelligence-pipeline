@@ -33,6 +33,7 @@ class JobAdmissionEvaluation:
     required_skill_match: Literal["strong", "partial", "weak", "unknown"]
     responsibility_match: Literal["strong", "partial", "weak", "unknown"]
     seniority_match: Literal["strong", "partial", "weak", "unknown"]
+    job_seniority_level: str = "unknown"
     critical_skill_gaps: list[str] = field(default_factory=list)
     matched_specializations: list[str] = field(default_factory=list)
     matched_resume_signals: list[str] = field(default_factory=list)
@@ -67,6 +68,17 @@ RESPONSIBILITY_PATTERNS: tuple[tuple[str, str], ...] = (
     ("data warehouse", r"\bdata warehouse|\bwarehouse\b"),
     ("reporting automation", r"\breporting|\bdashboard|\bautomation"),
     ("orchestration", r"\borchestrat|\bairflow|\bdag\b"),
+)
+
+STAFF_SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("technical direction", r"\btechnical direction\b|\btechnical strategy\b"),
+    ("cross-team architecture", r"\barchitecture\b.{0,80}\b(cross team|across teams|organization|org|company wide|platform)\b"),
+    ("multi-year strategy", r"\bmulti year\b|\blong term\b.{0,40}\b(strategy|architecture|roadmap)\b"),
+    ("influence without authority", r"\binfluence\b.{0,80}\b(without authority|senior engineers|directors|vps?|executives?)\b"),
+    ("standards and frameworks", r"\bstandards?\b|\bframeworks?\b|\bpatterns?\b"),
+    ("cross-organizational adoption", r"\bcross organizational\b|\bcross functional\b|\badoption across\b|\bacross organizations\b"),
+    ("foundational platforms", r"\bfoundational\b|\bplatform\b.{0,80}\b(teams|company|organization|org)\b"),
+    ("mentoring senior engineers", r"\bmentor(?:ed|ing)?\b.{0,80}\bsenior engineers?\b"),
 )
 
 PRODUCTION_RESUME_FIELDS = (
@@ -161,6 +173,40 @@ def role_family_strength(title: str | None) -> Literal["strong", "possible", "we
     return "none"
 
 
+def seniority_level_from_title(title: str | None) -> str:
+    text = normalize_text(title)
+
+    if re.search(r"\bsenior staff\b|\bsr staff\b", text):
+        return "senior_staff"
+
+    if re.search(r"\bprincipal\b", text):
+        return "principal"
+
+    if re.search(r"\bstaff\b", text):
+        return "staff"
+
+    if re.search(r"\blead\b", text):
+        return "lead"
+
+    if re.search(r"\bsenior\b|\bsr\b|\biii\b|\biv\b", text):
+        return "senior"
+
+    if re.search(r"\bjunior\b|\bentry\b|\bi\b", text):
+        return "entry"
+
+    return "unknown"
+
+
+def staff_scope_signals(text: str) -> list[str]:
+    normalized = normalize_text(text)
+
+    return [
+        label
+        for label, pattern in STAFF_SCOPE_PATTERNS
+        if re.search(pattern, normalized)
+    ]
+
+
 def strength_from_count(count: int, strong_at: int = 2) -> Literal["strong", "partial", "weak", "unknown"]:
     if count >= strong_at:
         return "strong"
@@ -202,6 +248,9 @@ def evaluate_job_admission(
     )
     classification = classify_job_title(title)
     family_match = role_family_strength(title)
+    job_seniority_level = seniority_level_from_title(title)
+    job_staff_scope_signals = staff_scope_signals(job_text)
+    resume_staff_scope_signals = staff_scope_signals(resume_text)
 
     title_specializations = [
         signal
@@ -267,13 +316,32 @@ def evaluate_job_admission(
     )
 
     seniority_match: Literal["strong", "partial", "weak", "unknown"] = "unknown"
-    if re.search(r"\b(manager|director|head of|vp|vice president)\b", title_text):
+    if job_seniority_level in {"senior_staff", "principal"}:
+        if resume_staff_scope_signals:
+            seniority_match = (
+                "strong"
+                if len(resume_staff_scope_signals) >= 2
+                else "partial"
+            )
+        else:
+            seniority_match = "weak"
+            critical_gaps.append(
+                f"{job_seniority_level.replace('_', ' ').title()} organizational IC scope"
+            )
+    elif job_seniority_level == "staff":
+        if resume_staff_scope_signals:
+            seniority_match = "strong"
+        elif job_staff_scope_signals:
+            seniority_match = "weak"
+        else:
+            seniority_match = "partial"
+    elif re.search(r"\b(manager|director|head of|vp|vice president)\b", title_text):
         if re.search(r"\b(manager|managed|people leadership|direct reports)\b", resume_text):
             seniority_match = "partial"
         else:
             seniority_match = "weak"
             critical_gaps.append("management experience")
-    elif re.search(r"\b(senior|sr|lead|staff|principal|iv|iii)\b", title.casefold()):
+    elif job_seniority_level in {"senior", "lead"}:
         seniority_match = "strong" if re.search(r"\b(senior|lead|principal|architect|12|10|15)\b", resume_text) else "partial"
 
     if classification.category == FILTERED_OUT:
@@ -283,6 +351,7 @@ def evaluate_job_admission(
             required_skill_match=required_skill_match,
             responsibility_match=responsibility_match,
             seniority_match=seniority_match,
+            job_seniority_level=job_seniority_level,
             critical_skill_gaps=list(dict.fromkeys(critical_gaps)),
             matched_specializations=matched_specializations,
             matched_resume_signals=sorted(set(title_core_matches + job_core_matches + project_only_matches + responsibility_matches)),
@@ -297,6 +366,7 @@ def evaluate_job_admission(
             required_skill_match=required_skill_match,
             responsibility_match=responsibility_match,
             seniority_match=seniority_match,
+            job_seniority_level=job_seniority_level,
             critical_skill_gaps=list(dict.fromkeys(critical_gaps)),
             matched_specializations=matched_specializations,
             matched_resume_signals=sorted(set(title_core_matches + job_core_matches + project_only_matches + responsibility_matches)),
@@ -317,6 +387,7 @@ def evaluate_job_admission(
                 required_skill_match=required_skill_match,
                 responsibility_match=responsibility_match,
                 seniority_match=seniority_match,
+                job_seniority_level=job_seniority_level,
                 critical_skill_gaps=[],
                 matched_specializations=matched_specializations,
                 matched_resume_signals=sorted(
@@ -360,6 +431,7 @@ def evaluate_job_admission(
             required_skill_match=required_skill_match,
             responsibility_match=responsibility_match,
             seniority_match=seniority_match,
+            job_seniority_level=job_seniority_level,
             critical_skill_gaps=[],
             matched_specializations=matched_specializations,
             matched_resume_signals=sorted(set(title_core_matches + job_core_matches + project_only_matches + responsibility_matches)),
@@ -375,6 +447,7 @@ def evaluate_job_admission(
         required_skill_match=required_skill_match,
         responsibility_match=responsibility_match,
         seniority_match=seniority_match,
+        job_seniority_level=job_seniority_level,
         critical_skill_gaps=[],
         matched_specializations=matched_specializations,
         matched_resume_signals=sorted(set(title_core_matches + job_core_matches + project_only_matches + responsibility_matches)),

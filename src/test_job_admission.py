@@ -87,6 +87,57 @@ def test_excludes_forward_deployed_databricks_gap() -> None:
     assert result.specialization_match == "weak"
 
 
+def test_excludes_databricks_gap() -> None:
+    result = decision("Data Engineer, Databricks (Senior)")
+
+    assert result.admission_decision == "exclude"
+    assert "Databricks" in result.critical_skill_gaps
+
+
+def test_includes_production_databricks_experience() -> None:
+    profile = {
+        **RESUME_PROFILE,
+        "production_skills": [
+            *RESUME_PROFILE["production_skills"],
+            "Databricks",
+        ],
+    }
+    result = evaluate_job_admission(
+        job={
+            "title": "Data Engineer, Databricks (Senior)",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": "",
+        },
+        resume_profile=profile,
+    )
+
+    assert result.admission_decision == "include"
+    assert "Databricks" not in result.critical_skill_gaps
+    assert result.specialization_match == "strong"
+
+
+def test_project_databricks_does_not_satisfy_production_gap() -> None:
+    profile = {
+        **RESUME_PROFILE,
+        "project_skills": [
+            "Databricks",
+        ],
+    }
+    result = evaluate_job_admission(
+        job={
+            "title": "Data Engineer, Databricks (Senior)",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": "",
+        },
+        resume_profile=profile,
+    )
+
+    assert result.admission_decision == "exclude"
+    assert "Databricks" in result.critical_skill_gaps
+
+
 def test_excludes_sap_gap() -> None:
     result = decision("SAP Data Engineer")
 
@@ -108,6 +159,113 @@ def test_excludes_management_gap() -> None:
     assert (
         "management" in result.admission_reason.casefold()
         or "management experience" in result.critical_skill_gaps
+    )
+
+
+def test_senior_role_has_strong_seniority_match() -> None:
+    result = decision(
+        "Senior Data Engineer with Snowflake SQL Python"
+    )
+
+    assert result.job_seniority_level == "senior"
+    assert result.seniority_match == "strong"
+
+
+def test_staff_role_with_cross_team_scope_is_not_rejected_by_title() -> None:
+    profile = {
+        **RESUME_PROFILE,
+        "leadership_evidence": [
+            "Set technical direction for cross-team data architecture and standards.",
+        ],
+    }
+    result = evaluate_job_admission(
+        job={
+            "title": "Staff Data Engineer",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": (
+                "Lead architecture across teams and establish standards "
+                "for foundational data platforms."
+            ),
+        },
+        resume_profile=profile,
+    )
+
+    assert result.job_seniority_level == "staff"
+    assert result.seniority_match == "strong"
+    assert not result.critical_skill_gaps
+
+
+def test_staff_role_without_scope_is_not_strong_seniority() -> None:
+    result = decision(
+        "Staff Data Engineer",
+        description=(
+            "Own architecture across teams and set technical strategy "
+            "for data platforms."
+        ),
+    )
+
+    assert result.job_seniority_level == "staff"
+    assert result.seniority_match == "weak"
+
+
+def test_senior_staff_role_without_org_scope_is_critical_gap() -> None:
+    result = decision(
+        "Senior Staff Data Engineer",
+        description=(
+            "Set multi-year technical strategy, align organizations, "
+            "and influence directors on foundational data architecture."
+        ),
+    )
+
+    assert result.job_seniority_level == "senior_staff"
+    assert result.seniority_match == "weak"
+    assert any(
+        "Senior Staff" in gap
+        for gap in result.critical_skill_gaps
+    )
+
+
+def test_senior_staff_role_with_org_scope_is_allowed() -> None:
+    profile = {
+        **RESUME_PROFILE,
+        "leadership_evidence": [
+            "Owned multi-year technical strategy for a data platform.",
+            "Aligned cross-organizational adoption and influenced senior engineers.",
+        ],
+    }
+    result = evaluate_job_admission(
+        job={
+            "title": "Senior Staff Data Engineer",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": (
+                "Set multi-year technical strategy and drive "
+                "cross-organizational adoption."
+            ),
+        },
+        resume_profile=profile,
+    )
+
+    assert result.job_seniority_level == "senior_staff"
+    assert result.seniority_match == "strong"
+    assert not result.critical_skill_gaps
+
+
+def test_principal_role_scope_gap_affects_admission() -> None:
+    result = decision(
+        "Principal Data Engineer",
+        description=(
+            "Own organization-wide architecture and set technical "
+            "direction for foundational data products."
+        ),
+    )
+
+    assert result.job_seniority_level == "principal"
+    assert result.seniority_match == "weak"
+    assert any(
+        "Principal" in gap
+        for gap in result.critical_skill_gaps
     )
 
 
@@ -170,9 +328,18 @@ def main() -> None:
     test_includes_supported_data_engineering_title()
     test_includes_supported_analytics_engineering_title()
     test_excludes_forward_deployed_databricks_gap()
+    test_excludes_databricks_gap()
+    test_includes_production_databricks_experience()
+    test_project_databricks_does_not_satisfy_production_gap()
     test_excludes_sap_gap()
     test_excludes_ml_gap()
     test_excludes_management_gap()
+    test_senior_role_has_strong_seniority_match()
+    test_staff_role_with_cross_team_scope_is_not_rejected_by_title()
+    test_staff_role_without_scope_is_not_strong_seniority()
+    test_senior_staff_role_without_org_scope_is_critical_gap()
+    test_senior_staff_role_with_org_scope_is_allowed()
+    test_principal_role_scope_gap_affects_admission()
     test_excludes_title_family_only()
     test_excludes_no_description_tableau_gap()
     test_excludes_possible_match_with_one_broad_title_signal()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -19,6 +20,7 @@ from src.enrichment.job_description import JobDescriptionResult
 from src.enrichment.official_job_resolver import (
     OFFICIAL_FOUND_VERIFIED,
     OFFICIAL_NOT_FOUND,
+    OFFICIAL_BLOCKED,
     OfficialJobResolutionResult,
     should_attempt_official_resolution,
 )
@@ -40,6 +42,63 @@ DESCRIPTION = " ".join(
     ]
     * 12
 )
+
+
+GLASSDOOR_URL = (
+    "https://www.glassdoor.com/job-listing/data-engineer-example-"
+    "JV_IC1147341_KO0,13.htm?jobListingId=12345"
+)
+
+
+def job_posting_html(
+    title: str = "Data Engineer",
+    company: str = "Example Co",
+    location: str = "Remote",
+    description: str = DESCRIPTION,
+) -> str:
+    payload = {
+        "@context": "https://schema.org",
+        "@type": "JobPosting",
+        "title": title,
+        "description": description,
+        "hiringOrganization": {
+            "@type": "Organization",
+            "name": company,
+        },
+        "jobLocation": {
+            "@type": "Place",
+            "address": {
+                "addressLocality": location,
+            },
+        },
+    }
+
+    return (
+        "<html><head><script type='application/ld+json'>"
+        f"{json.dumps(payload)}"
+        "</script></head><body></body></html>"
+    )
+
+
+def mock_client(
+    routes: dict[str, httpx.Response],
+) -> httpx.Client:
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = routes.get(str(request.url))
+
+        if response is None:
+            return httpx.Response(
+                404,
+                request=request,
+            )
+
+        response.request = request
+        return response
+
+    return httpx.Client(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=True,
+    )
 
 
 def with_temp_database(callback) -> None:
@@ -459,6 +518,241 @@ def test_needs_official_resolution_direct_function() -> None:
     )
 
 
+def test_glassdoor_digest_without_description_is_selected_for_resolution() -> None:
+    def scenario() -> None:
+        insert_raw_job(
+            "glassdoor-new",
+            source="glassdoor",
+            title="Data Engineer",
+            company_name="Example Co",
+            apply_url=GLASSDOOR_URL,
+        )
+
+        jobs = selected_jobs()
+
+        assert [
+            job["record_key"]
+            for job in jobs
+        ] == ["glassdoor-new"]
+        assert jobs[0]["needs_official_resolution"] is True
+
+    with_temp_database(scenario)
+
+
+def test_glassdoor_full_description_is_saved() -> None:
+    def scenario() -> None:
+        insert_raw_job(
+            "glassdoor-description",
+            source="glassdoor",
+            title="Data Engineer",
+            company_name="Example Co",
+            apply_url=GLASSDOOR_URL,
+        )
+        job = selected_jobs()[0]
+
+        with mock_client(
+            {
+                GLASSDOOR_URL: httpx.Response(
+                    200,
+                    text=job_posting_html(),
+                    headers={"content-type": "text/html"},
+                )
+            }
+        ) as client:
+            result = process_enrichment_job(
+                job,
+                client,
+            )
+
+        with database.get_connection() as connection:
+            stored_description = connection.execute(
+                """
+                SELECT description
+                FROM raw_jobs
+                WHERE record_key = 'glassdoor-description'
+                """
+            ).fetchone()[0]
+
+        assert result.updated is True
+        assert result.stored_status == "enriched"
+        assert stored_description == DESCRIPTION
+
+    with_temp_database(scenario)
+
+
+def test_glassdoor_blocked_page_uses_verified_official_description() -> None:
+    def scenario() -> None:
+        insert_raw_job(
+            "glassdoor-official",
+            source="glassdoor",
+            title="Data Engineer",
+            company_name="Example Co",
+            apply_url=GLASSDOOR_URL,
+        )
+        job = selected_jobs()[0]
+        original_resolve = enrich_jobs.resolve_official_job
+
+        def fake_resolve_official_job(job, client):
+            return OfficialJobResolutionResult(
+                status=OFFICIAL_FOUND_VERIFIED,
+                official_job_url="https://boards.greenhouse.io/example/jobs/123",
+                official_url_source="greenhouse",
+                official_url_resolved_at=datetime.now(timezone.utc),
+                official_url_confidence=1.0,
+                official_url_validation_reason="identity accepted",
+                resolved_title="Data Engineer",
+                resolved_company="Example Co",
+                resolved_location="Remote",
+                description_result=JobDescriptionResult(
+                    requested_url="https://boards.greenhouse.io/example/jobs/123",
+                    final_url="https://boards.greenhouse.io/example/jobs/123",
+                    status="enriched",
+                    http_status=200,
+                    extraction_method="json_ld",
+                    description=DESCRIPTION,
+                    word_count=len(DESCRIPTION.split()),
+                    error_message=None,
+                    resolved_title="Data Engineer",
+                    resolved_company="Example Co",
+                    resolved_location="Remote",
+                ),
+                identity_validation=JobIdentityValidation(
+                    accepted=True,
+                    confidence=1.0,
+                    title_similarity=1.0,
+                    company_similarity=1.0,
+                    occupation_match=True,
+                    reason="accepted",
+                ),
+            )
+
+        enrich_jobs.resolve_official_job = fake_resolve_official_job
+
+        try:
+            with mock_client(
+                {
+                    GLASSDOOR_URL: httpx.Response(
+                        403,
+                        text="<html>captcha access denied</html>",
+                    )
+                }
+            ) as client:
+                result = process_enrichment_job(
+                    job,
+                    client,
+                )
+        finally:
+            enrich_jobs.resolve_official_job = original_resolve
+
+        assert result.updated is True
+        assert result.official_resolution is not None
+        assert result.official_resolution.status == OFFICIAL_FOUND_VERIFIED
+
+    with_temp_database(scenario)
+
+
+def test_glassdoor_blocked_without_official_match_stays_unscored() -> None:
+    def scenario() -> None:
+        insert_raw_job(
+            "glassdoor-unresolved",
+            source="glassdoor",
+            title="Data Engineer",
+            company_name="Example Co",
+            apply_url=GLASSDOOR_URL,
+        )
+        job = selected_jobs()[0]
+        original_resolve = enrich_jobs.resolve_official_job
+
+        def fake_resolve_official_job(job, client):
+            return OfficialJobResolutionResult(
+                status=OFFICIAL_NOT_FOUND,
+                official_job_url=None,
+                official_url_source="search",
+                official_url_resolved_at=datetime.now(timezone.utc),
+                official_url_confidence=None,
+                official_url_validation_reason="no verified match",
+                resolved_title=None,
+                resolved_company=None,
+                resolved_location=None,
+            )
+
+        enrich_jobs.resolve_official_job = fake_resolve_official_job
+
+        try:
+            with mock_client(
+                {
+                    GLASSDOOR_URL: httpx.Response(
+                        403,
+                        text="<html>captcha access denied</html>",
+                    )
+                }
+            ) as client:
+                result = process_enrichment_job(
+                    job,
+                    client,
+                )
+        finally:
+            enrich_jobs.resolve_official_job = original_resolve
+
+        assert result.updated is False
+        assert result.official_resolution is not None
+        assert result.official_resolution.status == OFFICIAL_NOT_FOUND
+
+    with_temp_database(scenario)
+
+
+def test_glassdoor_failed_resolution_retries_after_cooldown() -> None:
+    def scenario() -> None:
+        insert_raw_job(
+            "glassdoor-old",
+            source="glassdoor",
+            title="Data Engineer",
+            company_name="Example Co",
+            apply_url=GLASSDOOR_URL,
+        )
+        insert_attempt(
+            "glassdoor-old",
+            source="glassdoor",
+            official_status=OFFICIAL_NOT_FOUND,
+            official_resolved_at=datetime.now(timezone.utc) - timedelta(days=8),
+        )
+
+        assert selected_record_keys() == ["glassdoor-old"]
+
+    with_temp_database(scenario)
+
+
+def test_glassdoor_wrong_company_description_is_rejected() -> None:
+    def scenario() -> None:
+        insert_raw_job(
+            "glassdoor-wrong-company",
+            source="glassdoor",
+            title="Data Engineer",
+            company_name="Example Co",
+            apply_url=GLASSDOOR_URL,
+        )
+        job = selected_jobs()[0]
+
+        with mock_client(
+            {
+                GLASSDOOR_URL: httpx.Response(
+                    200,
+                    text=job_posting_html(company="Wrong Co"),
+                    headers={"content-type": "text/html"},
+                )
+            }
+        ) as client:
+            result = process_enrichment_job(
+                job,
+                client,
+            )
+
+        assert result.updated is False
+        assert result.stored_status == "resolution_rejected"
+
+    with_temp_database(scenario)
+
+
 def main() -> None:
     test_previous_failed_lensa_attempt_with_null_official_status_is_selected()
     test_found_verified_is_not_selected_again_for_official_resolution()
@@ -469,6 +763,12 @@ def main() -> None:
     test_enriched_aggregator_page_still_triggers_official_resolution_when_missing()
     test_monzo_historical_lensa_record_resolves_official_url_without_refetching_lensa()
     test_needs_official_resolution_direct_function()
+    test_glassdoor_digest_without_description_is_selected_for_resolution()
+    test_glassdoor_full_description_is_saved()
+    test_glassdoor_blocked_page_uses_verified_official_description()
+    test_glassdoor_blocked_without_official_match_stays_unscored()
+    test_glassdoor_failed_resolution_retries_after_cooldown()
+    test_glassdoor_wrong_company_description_is_rejected()
     print("Official enrichment retry tests passed.")
 
 

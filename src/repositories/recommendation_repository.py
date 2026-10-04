@@ -1040,7 +1040,12 @@ def apply_admission_gate(
     include_low_priority: bool = True,
     keep_filtered_out: bool = False,
 ) -> list[dict[str, Any]]:
-    """Attach resume-aware fit metadata without hiding reviewable jobs."""
+    """Attach resume-aware fit metadata and remove hard mismatches.
+
+    ``include_low_priority`` keeps soft/uncertain target-lane jobs visible. It
+    must not resurrect explicit hard exclusions such as critical title
+    specializations missing from the production resume.
+    """
     resume_profile = load_resume_profile_payload(resume_hash)
 
     if resume_profile is None:
@@ -1065,22 +1070,31 @@ def apply_admission_gate(
         job["required_skill_match"] = evaluation.required_skill_match
         job["responsibility_match"] = evaluation.responsibility_match
         job["seniority_match"] = evaluation.seniority_match
+        job["job_seniority_level"] = evaluation.job_seniority_level
         job["critical_skill_gaps"] = evaluation.critical_skill_gaps
         job["matched_resume_signals"] = evaluation.matched_resume_signals
+        title_classification = (
+            job.get("title_classification")
+            or classify_job_title(job.get("title")).category
+        )
+
+        is_preserved_status = job.get("application_status") in preserved_statuses
+        is_filtered_title = title_classification == "FILTERED_OUT"
+        has_critical_gaps = bool(evaluation.critical_skill_gaps)
+        is_hard_exclusion = has_critical_gaps or (
+            is_filtered_title
+            and not keep_filtered_out
+        )
+        is_soft_low_priority = (
+            include_low_priority
+            and not is_hard_exclusion
+            and evaluation.admission_decision == "exclude"
+        )
 
         if (
-            job.get("application_status") in preserved_statuses
-            or (
-                include_low_priority
-                and (
-                    keep_filtered_out
-                    or job.get("title_classification") != "FILTERED_OUT"
-                )
-            )
-            or (
-                not include_low_priority
-                and evaluation.admission_decision == "include"
-            )
+            is_preserved_status
+            or evaluation.admission_decision == "include"
+            or is_soft_low_priority
         ):
             admitted_jobs.append(job)
 
@@ -2214,7 +2228,9 @@ def load_unscreened_job_eligibility_candidates(
             enrichment_attempts AS (
                 SELECT
                     record_key,
-                    status AS enrichment_status
+                    status AS enrichment_status,
+                    official_job_url,
+                    official_url_status
                 FROM job_enrichment_attempts
             ),
 
@@ -2236,6 +2252,8 @@ def load_unscreened_job_eligibility_candidates(
                     END AS description,
                     jobs.source,
                     jobs.apply_url,
+                    enrichment_attempts.official_job_url,
+                    enrichment_attempts.official_url_status,
                     ROW_NUMBER() OVER (
                         PARTITION BY jobs.canonical_job_key
                         ORDER BY
@@ -2296,13 +2314,14 @@ def load_unscreened_job_eligibility_candidates(
                 salary_text,
                 description,
                 source,
-                apply_url
+                apply_url,
+                official_job_url,
+                official_url_status
             FROM ranked_jobs
             WHERE job_rank = 1
             ORDER BY
                 title,
                 company_name
-            LIMIT ?
             """.format(
                 excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
             ),
@@ -2310,17 +2329,23 @@ def load_unscreened_job_eligibility_candidates(
                 resume_hash,
                 prompt_version,
                 EXCLUDED_TITLE_SQL_REGEX,
-                limit,
             ],
         )
 
         columns = [description[0] for description in cursor.description]
         rows = cursor.fetchall()
 
-    return apply_admission_gate(
-        jobs=[dict(zip(columns, row)) for row in rows],
-        resume_hash=resume_hash,
+    jobs = filter_user_reviewable_jobs(
+        [
+            dict(zip(columns, row))
+            for row in rows
+        ]
     )
+
+    return apply_admission_gate(
+        jobs=jobs,
+        resume_hash=resume_hash,
+    )[:limit]
 
 
 def load_pipeline_operation_metrics(

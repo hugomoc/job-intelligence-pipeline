@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 from src.ai.resume_matcher import (
     MATCHER_PROMPT_VERSION,
     JobMatchAnalysis,
+    build_resume_job_match,
     determine_recommendation,
     validate_missing_qualifications,
 )
@@ -17,10 +18,13 @@ from src.score_jobs_ai import (
 
 def make_profile(
     production_skills: list[str] | None = None,
+    project_skills: list[str] | None = None,
     databases_warehouses: list[str] | None = None,
     cloud_platforms: list[str] | None = None,
     tools_platforms: list[str] | None = None,
     data_engineering_capabilities: list[str] | None = None,
+    ai_ml_experience: list[str] | None = None,
+    industries: list[str] | None = None,
 ) -> ResumeProfile:
     return ResumeProfile(
         professional_summary=(
@@ -31,7 +35,7 @@ def make_profile(
         seniority="senior",
         years_of_relevant_experience=8,
         production_skills=production_skills or [],
-        project_skills=[],
+        project_skills=project_skills or [],
         data_engineering_capabilities=(
             data_engineering_capabilities or []
         ),
@@ -42,8 +46,8 @@ def make_profile(
         ),
         cloud_platforms=cloud_platforms or [],
         tools_platforms=tools_platforms or [],
-        ai_ml_experience=[],
-        industries=[],
+        ai_ml_experience=ai_ml_experience or [],
+        industries=industries or [],
         certifications=[],
         education=[],
         quantified_achievements=[],
@@ -56,14 +60,15 @@ def make_profile(
 def make_analysis(
     hard_missing: list[str],
     preferred_missing: list[str] | None = None,
+    score: int = 95,
 ) -> JobMatchAnalysis:
     return JobMatchAnalysis(
-        title_fit=80,
-        skills_fit=80,
-        experience_fit=80,
-        seniority_fit=80,
-        industry_fit=70,
-        location_fit=70,
+        title_fit=score,
+        skills_fit=score,
+        experience_fit=score,
+        seniority_fit=score,
+        industry_fit=score,
+        location_fit=score,
         confidence="high",
         matching_strengths=[],
         hard_requirements_missing=hard_missing,
@@ -72,6 +77,28 @@ def make_analysis(
         ),
         risk_factors=[],
         summary="Synthetic analysis.",
+    )
+
+
+def scored_match(
+    profile: ResumeProfile,
+    title: str,
+    description: str,
+    analysis: JobMatchAnalysis | None = None,
+):
+    return build_resume_job_match(
+        resume_profile=profile,
+        job={
+            "record_key": "job-1",
+            "title": title,
+            "company_name": "Example Co",
+            "location": "Remote",
+            "description": description,
+        },
+        model_name="unit-test",
+        analysis=analysis or make_analysis([]),
+        description_word_count=len(description.split()),
+        description_complete=True,
     )
 
 
@@ -192,6 +219,190 @@ def test_agile_is_not_missing_when_demonstrated() -> None:
     ) == []
 
 
+def test_missing_critical_ai_specialization_caps_score_and_explains_major_gap() -> None:
+    profile = make_profile(
+        production_skills=[
+            "Python",
+            "SQL",
+            "Snowflake",
+            "AWS",
+            "Airflow",
+            "dbt",
+        ],
+        data_engineering_capabilities=[
+            "production data pipelines",
+        ],
+    )
+    description = " ".join(
+        [
+            "Role summary: build production RAG pipelines and agentic workflows.",
+            "Responsibilities include MCP tool integrations and AI systems used by real users.",
+            "Requirements include demonstrated experience building production LLM agents.",
+        ]
+        * 8
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Data Engineer, AI Systems",
+        description,
+    )
+
+    assert match.overall_score <= 49
+    assert match.analysis.skills_fit <= 70
+    assert any(
+        "production RAG" in item
+        or "agentic" in item
+        for item in match.analysis.hard_requirements_missing
+    )
+    assert "Major gap" in match.analysis.summary
+
+
+def test_missing_preferred_skill_does_not_trigger_critical_penalty() -> None:
+    profile = make_profile(
+        production_skills=[
+            "Python",
+            "SQL",
+            "Snowflake",
+            "AWS",
+        ],
+    )
+    description = " ".join(
+        [
+            "Responsibilities include SQL modeling and Snowflake pipelines.",
+            "Preferred experience with Domo dashboards is a bonus.",
+        ]
+        * 10
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Data Engineer",
+        description,
+    )
+
+    assert match.overall_score == 95
+    assert match.analysis.hard_requirements_missing == []
+
+
+def test_equivalent_warehouse_requirement_does_not_trigger_critical_penalty() -> None:
+    profile = make_profile(
+        databases_warehouses=[
+            "Snowflake",
+        ],
+        production_skills=[
+            "Snowflake",
+            "SQL",
+        ],
+    )
+    description = " ".join(
+        [
+            "Requirements include Snowflake, BigQuery, Redshift, or similar warehouse experience.",
+            "Responsibilities include dimensional modeling and ELT pipelines.",
+        ]
+        * 10
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Analytics Engineer",
+        description,
+    )
+
+    assert match.overall_score == 95
+    assert match.analysis.hard_requirements_missing == []
+
+
+def test_project_ai_does_not_satisfy_production_ai_requirement() -> None:
+    profile = make_profile(
+        production_skills=[
+            "Python",
+            "SQL",
+            "Snowflake",
+        ],
+        project_skills=[
+            "Personal RAG chatbot with agentic workflows and MCP tools",
+        ],
+    )
+    description = " ".join(
+        [
+            "Required production experience building RAG and agentic AI systems.",
+            "Real users depend on these LLM tool integrations.",
+        ]
+        * 10
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Data Engineer, Agentic AI",
+        description,
+    )
+
+    assert match.overall_score <= 49
+    assert any(
+        "Project-only" in risk
+        for risk in match.analysis.risk_factors
+    )
+
+
+def test_production_ai_experience_satisfies_critical_requirement() -> None:
+    profile = make_profile(
+        production_skills=[
+            "Python",
+            "SQL",
+        ],
+        ai_ml_experience=[
+            "Owned production RAG pipelines and deployed agentic LLM systems for real users.",
+        ],
+    )
+    description = " ".join(
+        [
+            "Required production experience building RAG and agentic AI systems.",
+            "Responsibilities include LLM tool integrations for real users.",
+        ]
+        * 10
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Data Engineer, Agentic AI",
+        description,
+    )
+
+    assert match.overall_score == 95
+    assert match.analysis.hard_requirements_missing == []
+
+
+def test_repeated_specialization_is_treated_as_critical() -> None:
+    profile = make_profile(
+        production_skills=[
+            "Python",
+            "SQL",
+            "Snowflake",
+        ],
+    )
+    description = " ".join(
+        [
+            "Summary: Databricks is central to this platform.",
+            "Responsibilities include Databricks pipelines and lakehouse operations.",
+            "Qualifications require deep expertise with Databricks in production.",
+        ]
+        * 8
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Data Engineer",
+        description,
+    )
+
+    assert match.overall_score <= 49
+    assert any(
+        "Databricks" in item
+        for item in match.analysis.hard_requirements_missing
+    )
+
+
 def test_prompt_version_controls_cache_reuse() -> None:
     old_data_dir = database.DATA_DIR
     old_database_path = database.DATABASE_PATH
@@ -307,6 +518,12 @@ def main() -> None:
     test_all_warehouses_requirement_can_remain_missing()
     test_agile_can_remain_missing_when_absent()
     test_agile_is_not_missing_when_demonstrated()
+    test_missing_critical_ai_specialization_caps_score_and_explains_major_gap()
+    test_missing_preferred_skill_does_not_trigger_critical_penalty()
+    test_equivalent_warehouse_requirement_does_not_trigger_critical_penalty()
+    test_project_ai_does_not_satisfy_production_ai_requirement()
+    test_production_ai_experience_satisfies_critical_requirement()
+    test_repeated_specialization_is_treated_as_critical()
     test_prompt_version_controls_cache_reuse()
     test_incomplete_description_cannot_be_apply()
     test_incomplete_description_can_still_be_skip()

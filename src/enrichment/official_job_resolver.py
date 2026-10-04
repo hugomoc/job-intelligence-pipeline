@@ -46,6 +46,7 @@ OFFICIAL_ERROR = "ERROR"
 
 AGGREGATOR_SOURCES = {
     "bebee",
+    "glassdoor",
     "jobleads",
     "joblookup",
     "jobright",
@@ -54,6 +55,7 @@ AGGREGATOR_SOURCES = {
 
 AGGREGATOR_DOMAINS = {
     "bebee.com",
+    "glassdoor.com",
     "jobleads.com",
     "joblookup.com",
     "jobright.ai",

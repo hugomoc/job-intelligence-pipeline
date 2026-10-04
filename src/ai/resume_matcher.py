@@ -87,6 +87,112 @@ WAREHOUSE_GROUPS = {
 }
 
 
+@dataclass(frozen=True)
+class CriticalCapabilitySignal:
+    label: str
+    job_patterns: tuple[str, ...]
+    production_patterns: tuple[str, ...]
+    project_patterns: tuple[str, ...] = ()
+    skill_component: Literal[
+        "skills",
+        "experience",
+        "seniority",
+        "industry",
+    ] = "skills"
+
+
+CRITICAL_CAPABILITY_SIGNALS: tuple[
+    CriticalCapabilitySignal,
+    ...
+] = (
+    CriticalCapabilitySignal(
+        label="production RAG, agentic workflows, and AI tool integrations",
+        job_patterns=(
+            r"\brag\b",
+            r"\bretrieval augmented generation\b",
+            r"\bagentic\b",
+            r"\bagents?\b",
+            r"\bllm\b",
+            r"\blarge language model",
+            r"\bmcp\b",
+            r"\btool integrations?\b",
+            r"\bai systems?\b",
+        ),
+        production_patterns=(
+            r"\bproduction\b.{0,80}\b(rag|agentic|agents?|llm|mcp|ai systems?)\b",
+            r"\b(rag|agentic|agents?|llm|mcp|ai systems?)\b.{0,80}\bproduction\b",
+            r"\bdeployed\b.{0,80}\b(rag|agentic|agents?|llm|mcp|ai systems?)\b",
+            r"\b(real users|user facing|customer facing)\b.{0,80}\b(rag|agentic|agents?|llm|mcp|ai)\b",
+        ),
+        project_patterns=(
+            r"\b(rag|agentic|agents?|llm|mcp|ai)\b",
+        ),
+        skill_component="skills",
+    ),
+    CriticalCapabilitySignal(
+        label="Databricks production experience",
+        job_patterns=(r"\bdatabricks\b",),
+        production_patterns=(r"\bdatabricks\b",),
+        project_patterns=(r"\bdatabricks\b",),
+        skill_component="skills",
+    ),
+    CriticalCapabilitySignal(
+        label="Domo as a primary BI platform",
+        job_patterns=(r"\bdomo\b",),
+        production_patterns=(r"\bdomo\b",),
+        project_patterns=(r"\bdomo\b",),
+        skill_component="skills",
+    ),
+    CriticalCapabilitySignal(
+        label="healthcare claims domain expertise",
+        job_patterns=(
+            r"\bhealthcare claims?\b",
+            r"\bmedical claims?\b",
+            r"\bclaims analytics?\b",
+        ),
+        production_patterns=(
+            r"\bhealthcare claims?\b",
+            r"\bmedical claims?\b",
+            r"\bclaims analytics?\b",
+        ),
+        skill_component="industry",
+    ),
+    CriticalCapabilitySignal(
+        label="production machine-learning model deployment",
+        job_patterns=(
+            r"\bmodel deployment\b",
+            r"\bproduction ml\b",
+            r"\bmlops\b",
+            r"\bmachine learning\b.{0,80}\bproduction\b",
+        ),
+        production_patterns=(
+            r"\bmodel deployment\b",
+            r"\bproduction ml\b",
+            r"\bmlops\b",
+            r"\bdeployed\b.{0,80}\b(machine learning|ml models?)\b",
+        ),
+        project_patterns=(r"\b(machine learning|ml|model)\b",),
+        skill_component="skills",
+    ),
+    CriticalCapabilitySignal(
+        label="ledger or accounting data-domain expertise",
+        job_patterns=(
+            r"\bledger\b",
+            r"\baccounting\b",
+            r"\bfinancial close\b",
+            r"\bgeneral ledger\b",
+        ),
+        production_patterns=(
+            r"\bledger\b",
+            r"\baccounting\b",
+            r"\bfinancial close\b",
+            r"\bgeneral ledger\b",
+        ),
+        skill_component="industry",
+    ),
+)
+
+
 class JobMatchAnalysis(BaseModel):
     title_fit: int = Field(
         ge=0,
@@ -353,6 +459,21 @@ Rules:
 26. Before returning the final JSON, verify every item in
     hard_requirements_missing and preferred_qualifications_missing
     against the complete candidate profile one final time.
+27. Identify critical specializations that define the role, such
+    as production RAG/agent systems, Databricks, Domo, healthcare
+    claims, production ML deployment, ledger/accounting domain
+    expertise, or Staff/Principal organizational scope. Missing
+    one central specialization is a major gap even when the
+    candidate is an excellent generic data-engineering fit.
+28. Do not treat personal projects, AI-assisted coding, coursework
+    or generic tool usage as equivalent to production ownership
+    when the job asks for production systems serving real users.
+29. When a critical specialization is missing, lower the relevant
+    component score substantially and explain it as a major gap.
+    Do not describe it as a minor or preferred gap.
+30. Do not apply a major penalty for interchangeable alternatives
+    or preferred-only skills, such as Snowflake/BigQuery/Redshift
+    or similar when the candidate has one equivalent platform.
 
 CANDIDATE PROFILE:
 
@@ -422,6 +543,227 @@ def profile_to_text(
     return json.dumps(
         profile_data,
         ensure_ascii=False,
+    )
+
+
+def profile_fields_to_text(
+    resume_profile: ResumeProfile,
+    field_names: tuple[str, ...],
+) -> str:
+    profile_data = resume_profile.model_dump()
+
+    return json.dumps(
+        {
+            field_name: profile_data.get(field_name)
+            for field_name in field_names
+        },
+        ensure_ascii=False,
+    )
+
+
+def regex_present(
+    text: str,
+    patterns: tuple[str, ...],
+) -> bool:
+    normalized = normalize_match_text(text)
+
+    return any(
+        re.search(pattern, normalized)
+        for pattern in patterns
+    )
+
+
+def regex_count(
+    text: str,
+    patterns: tuple[str, ...],
+) -> int:
+    normalized = normalize_match_text(text)
+    count = 0
+
+    for pattern in patterns:
+        count += len(
+            re.findall(
+                pattern,
+                normalized,
+            )
+        )
+
+    return count
+
+
+CRITICAL_REQUIREMENT_CONTEXT_PATTERNS = (
+    r"\bmust have\b",
+    r"\brequired\b",
+    r"\brequirements?\b",
+    r"\bqualifications?\b",
+    r"\bproduction experience\b",
+    r"\bexperienced building\b",
+    r"\bdemonstrated experience\b",
+    r"\bdeep expertise\b",
+    r"\bextensive experience\b",
+    r"\bcore to\b",
+    r"\breal users?\b",
+    r"\bdepend on\b",
+)
+
+OPTIONAL_REQUIREMENT_CONTEXT_PATTERNS = (
+    r"\bpreferred\b",
+    r"\bnice to have\b",
+    r"\bbonus\b",
+    r"\bplus\b",
+    r"\boptional\b",
+)
+
+
+def capability_mentions_with_context(
+    job_text: str,
+    signal: CriticalCapabilitySignal,
+) -> int:
+    normalized = normalize_match_text(job_text)
+    mention_count = 0
+
+    for pattern in signal.job_patterns:
+        for match in re.finditer(pattern, normalized):
+            start = max(match.start() - 90, 0)
+            end = min(match.end() + 90, len(normalized))
+            window = normalized[start:end]
+            has_critical_context = regex_present(
+                window,
+                CRITICAL_REQUIREMENT_CONTEXT_PATTERNS,
+            )
+
+            if (
+                regex_present(
+                    window,
+                    OPTIONAL_REQUIREMENT_CONTEXT_PATTERNS,
+                )
+                and not has_critical_context
+            ):
+                continue
+
+            if has_critical_context:
+                mention_count += 2
+            else:
+                mention_count += 1
+
+    return mention_count
+
+
+def capability_is_central_to_job(
+    job: dict[str, Any],
+    description: str,
+    signal: CriticalCapabilitySignal,
+) -> bool:
+    title = str(job.get("title") or "")
+    title_has_signal = regex_present(
+        title,
+        signal.job_patterns,
+    )
+    description_mentions = capability_mentions_with_context(
+        description,
+        signal,
+    )
+
+    if title_has_signal:
+        return True
+
+    if description_mentions >= 3:
+        return True
+
+    if (
+        description_mentions >= 2
+        and regex_present(
+            description,
+            CRITICAL_REQUIREMENT_CONTEXT_PATTERNS,
+        )
+    ):
+        return True
+
+    return False
+
+
+def production_resume_text(
+    resume_profile: ResumeProfile,
+) -> str:
+    return profile_fields_to_text(
+        resume_profile,
+        (
+            "professional_summary",
+            "target_roles",
+            "current_or_recent_titles",
+            "production_skills",
+            "data_engineering_capabilities",
+            "bi_analytics_skills",
+            "programming_languages",
+            "databases_warehouses",
+            "cloud_platforms",
+            "tools_platforms",
+            "ai_ml_experience",
+            "industries",
+            "quantified_achievements",
+            "leadership_evidence",
+            "strengths_for_job_matching",
+        ),
+    )
+
+
+def project_resume_text(
+    resume_profile: ResumeProfile,
+) -> str:
+    return profile_fields_to_text(
+        resume_profile,
+        (
+            "project_skills",
+        ),
+    )
+
+
+def detect_critical_requirement_gaps(
+    resume_profile: ResumeProfile,
+    job: dict[str, Any],
+    description: str,
+) -> tuple[list[str], list[str], list[str]]:
+    """Find central job requirements absent from production resume evidence."""
+    production_text = production_resume_text(
+        resume_profile
+    )
+    project_text = project_resume_text(
+        resume_profile
+    )
+    gaps: list[str] = []
+    risks: list[str] = []
+    components: list[str] = []
+
+    for signal in CRITICAL_CAPABILITY_SIGNALS:
+        if not capability_is_central_to_job(
+            job=job,
+            description=description,
+            signal=signal,
+        ):
+            continue
+
+        if regex_present(
+            production_text,
+            signal.production_patterns,
+        ):
+            continue
+
+        gaps.append(signal.label)
+        components.append(signal.skill_component)
+
+        if signal.project_patterns and regex_present(
+            project_text,
+            signal.project_patterns,
+        ):
+            risks.append(
+                "Project-only or AI-assisted evidence exists for "
+                f"{signal.label}, but the job asks for production ownership."
+            )
+
+    return (
+        list(dict.fromkeys(gaps)),
+        list(dict.fromkeys(risks)),
+        list(dict.fromkeys(components)),
     )
 
 
@@ -925,6 +1267,71 @@ def build_resume_job_match(
         analysis=analysis,
         resume_profile=resume_profile,
     )
+
+    if description_complete:
+        critical_gaps, critical_risks, critical_components = (
+            detect_critical_requirement_gaps(
+                resume_profile=resume_profile,
+                job=job,
+                description=str(job.get("description") or ""),
+            )
+        )
+
+        if critical_gaps:
+            hard_requirements_missing = list(
+                dict.fromkeys(
+                    analysis.hard_requirements_missing
+                    + [
+                        f"Major gap: {gap}"
+                        for gap in critical_gaps
+                    ]
+                )
+            )
+            risk_factors = list(
+                dict.fromkeys(
+                    analysis.risk_factors
+                    + critical_risks
+                )
+            )
+            update: dict[str, Any] = {
+                "hard_requirements_missing": hard_requirements_missing,
+                "risk_factors": risk_factors,
+                "summary": (
+                    "Major gap: the role requires "
+                    f"{'; '.join(critical_gaps)}. "
+                    "The resume does not show equivalent production "
+                    "ownership for that specialization. "
+                    f"{analysis.summary}"
+                ),
+            }
+
+            if "skills" in critical_components:
+                update["skills_fit"] = min(
+                    analysis.skills_fit,
+                    70,
+                )
+
+            if "experience" in critical_components:
+                update["experience_fit"] = min(
+                    analysis.experience_fit,
+                    70,
+                )
+
+            if "industry" in critical_components:
+                update["industry_fit"] = min(
+                    analysis.industry_fit,
+                    65,
+                )
+
+            if "seniority" in critical_components:
+                update["seniority_fit"] = min(
+                    analysis.seniority_fit,
+                    65,
+                )
+
+            analysis = analysis.model_copy(
+                update=update,
+            )
 
     overall_score = calculate_overall_score(
         analysis

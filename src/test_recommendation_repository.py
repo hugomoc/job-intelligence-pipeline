@@ -13,8 +13,10 @@ from src.repositories.recommendation_repository import (
     description_state,
     exact_posting_identity,
     extract_embedded_destination_url,
+    load_all_jobs,
     load_candidate_jobs,
     load_latest_cached_resume_hash,
+    load_unscreened_job_eligibility_candidates,
     normalize_apply_url_for_identity,
     resolve_redirect_final_url,
     resolve_display_resume_hash,
@@ -204,6 +206,113 @@ def seed_resume_profile(
                 ),
             ],
         )
+
+
+def create_review_supporting_tables() -> None:
+    with database.get_connection() as connection:
+        connection.execute(
+            """
+            ALTER TABLE raw_jobs
+            ADD COLUMN IF NOT EXISTS description_updated_at TIMESTAMPTZ
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_matches (
+                record_key VARCHAR NOT NULL,
+                search_id VARCHAR NOT NULL,
+                search_title VARCHAR NOT NULL,
+                match_score INTEGER NOT NULL,
+                title_score INTEGER NOT NULL,
+                location_score INTEGER NOT NULL,
+                keyword_score INTEGER NOT NULL,
+                freshness_score INTEGER NOT NULL,
+                matched_keywords VARCHAR,
+                excluded_keywords VARCHAR,
+                reasons VARCHAR,
+                is_recommended BOOLEAN,
+                needs_review BOOLEAN
+            )
+            """
+        )
+        connection.execute("CREATE SCHEMA IF NOT EXISTS analytics")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analytics.mart_job_recommendations (
+                canonical_job_key VARCHAR,
+                resume_hash VARCHAR,
+                ai_prompt_version VARCHAR,
+                ai_score INTEGER,
+                recommendation VARCHAR,
+                confidence VARCHAR,
+                title_fit INTEGER,
+                skills_fit INTEGER,
+                experience_fit INTEGER,
+                seniority_fit INTEGER,
+                industry_fit INTEGER,
+                location_fit INTEGER,
+                matching_strengths VARCHAR,
+                hard_requirements_missing VARCHAR,
+                preferred_qualifications_missing VARCHAR,
+                risk_factors VARCHAR,
+                summary VARCHAR,
+                description_word_count INTEGER,
+                description_complete BOOLEAN,
+                has_incomplete_description BOOLEAN,
+                ai_scored_at TIMESTAMPTZ
+            )
+            """
+        )
+
+
+def seed_review_job(
+    record_key: str,
+    title: str,
+    source: str = "test",
+    description: str | None = None,
+    apply_url: str | None = None,
+    application_status: str | None = None,
+) -> None:
+    with database.get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO raw_jobs (
+                record_key,
+                job_fingerprint,
+                source,
+                title,
+                company_name,
+                location,
+                salary_text,
+                description,
+                apply_url
+            )
+            VALUES (?, ?, ?, ?, 'Example Co', 'Remote', NULL, ?, ?)
+            """,
+            [
+                record_key,
+                record_key,
+                source,
+                title,
+                description,
+                apply_url or f"https://example.com/jobs/{record_key}",
+            ],
+        )
+
+        if application_status:
+            connection.execute(
+                """
+                INSERT INTO application_status (
+                    record_key,
+                    status
+                )
+                VALUES (?, ?)
+                """,
+                [
+                    record_key,
+                    application_status,
+                ],
+            )
 
 
 def test_candidate_jobs_require_complete_descriptions() -> None:
@@ -520,6 +629,189 @@ def test_admission_gate_preserves_manual_statuses_for_filtered_titles() -> None:
                 "filtered-applied",
                 "filtered-removed",
             }
+
+        finally:
+            database.DATA_DIR = old_data_dir
+            database.DATABASE_PATH = old_database_path
+
+
+def test_admission_gate_keeps_hard_gaps_hidden_with_low_priority() -> None:
+    old_data_dir = database.DATA_DIR
+    old_database_path = database.DATABASE_PATH
+
+    with TemporaryDirectory() as temp_dir:
+        database.DATA_DIR = Path(temp_dir)
+        database.DATABASE_PATH = Path(temp_dir) / "jobs.duckdb"
+
+        try:
+            database.initialize_database()
+            seed_resume_profile()
+
+            jobs = apply_admission_gate(
+                jobs=[
+                    {
+                        "record_key": "databricks-gap",
+                        "title": "Data Engineer, Databricks (Senior)",
+                        "company_name": "Example Co",
+                        "location": "Remote",
+                        "description": None,
+                        "title_classification": "STRONG_MATCH",
+                        "application_status": "new",
+                    },
+                    {
+                        "record_key": "sap-gap",
+                        "title": "SAP Data Engineer",
+                        "company_name": "Example Co",
+                        "location": "Remote",
+                        "description": None,
+                        "title_classification": "STRONG_MATCH",
+                        "application_status": "new",
+                    },
+                    {
+                        "record_key": "power-bi-gap",
+                        "title": "Power BI Engineer",
+                        "company_name": "Example Co",
+                        "location": "Remote",
+                        "description": None,
+                        "title_classification": "POSSIBLE_MATCH",
+                        "application_status": "new",
+                    },
+                    {
+                        "record_key": "filtered-new",
+                        "title": "Software Engineer",
+                        "company_name": "Example Co",
+                        "location": "Remote",
+                        "description": None,
+                        "title_classification": "FILTERED_OUT",
+                        "application_status": "new",
+                    },
+                    {
+                        "record_key": "senior-staff-gap",
+                        "title": "Senior Staff Data Engineer",
+                        "company_name": "Example Co",
+                        "location": "Remote",
+                        "description": (
+                            "Set multi-year technical strategy and drive "
+                            "cross-organizational data architecture."
+                        ),
+                        "title_classification": "STRONG_MATCH",
+                        "application_status": "new",
+                    },
+                    {
+                        "record_key": "soft-data-engineer",
+                        "title": "Senior Data Engineer",
+                        "company_name": "Example Co",
+                        "location": "Remote",
+                        "description": None,
+                        "title_classification": "STRONG_MATCH",
+                        "application_status": "new",
+                    },
+                    {
+                        "record_key": "databricks-applied",
+                        "title": "Data Engineer, Databricks (Senior)",
+                        "company_name": "Example Co",
+                        "location": "Remote",
+                        "description": None,
+                        "title_classification": "STRONG_MATCH",
+                        "application_status": "applied",
+                    },
+                    {
+                        "record_key": "sap-removed",
+                        "title": "SAP Data Engineer",
+                        "company_name": "Example Co",
+                        "location": "Remote",
+                        "description": None,
+                        "title_classification": "STRONG_MATCH",
+                        "application_status": "removed",
+                    },
+                ],
+                resume_hash="resume-1",
+                include_low_priority=True,
+            )
+
+            assert {
+                job["record_key"]
+                for job in jobs
+            } == {
+                "soft-data-engineer",
+                "databricks-applied",
+                "sap-removed",
+            }
+
+        finally:
+            database.DATA_DIR = old_data_dir
+            database.DATABASE_PATH = old_database_path
+
+
+def test_load_all_jobs_hides_databricks_hard_gap() -> None:
+    old_data_dir = database.DATA_DIR
+    old_database_path = database.DATABASE_PATH
+
+    with TemporaryDirectory() as temp_dir:
+        database.DATA_DIR = Path(temp_dir)
+        database.DATABASE_PATH = Path(temp_dir) / "jobs.duckdb"
+
+        try:
+            database.initialize_database()
+            seed_resume_profile()
+            create_review_supporting_tables()
+            seed_review_job(
+                record_key="databricks-gap",
+                title="Data Engineer, Databricks (Senior)",
+            )
+            seed_review_job(
+                record_key="generic-data-engineer",
+                title="Senior Data Engineer",
+            )
+
+            jobs = load_all_jobs(resume_hash="resume-1")
+
+            assert [
+                job["record_key"]
+                for job in jobs
+            ] == ["generic-data-engineer"]
+
+        finally:
+            database.DATA_DIR = old_data_dir
+            database.DATABASE_PATH = old_database_path
+
+
+def test_unscreened_eligibility_candidates_skip_hard_gaps_and_aggregators() -> None:
+    old_data_dir = database.DATA_DIR
+    old_database_path = database.DATABASE_PATH
+
+    with TemporaryDirectory() as temp_dir:
+        database.DATA_DIR = Path(temp_dir)
+        database.DATABASE_PATH = Path(temp_dir) / "jobs.duckdb"
+
+        try:
+            database.initialize_database()
+            seed_resume_profile()
+            create_review_supporting_tables()
+            seed_review_job(
+                record_key="databricks-gap",
+                title="Data Engineer, Databricks (Senior)",
+            )
+            seed_review_job(
+                record_key="unresolved-lensa",
+                title="Senior Data Engineer with Snowflake",
+                source="lensa",
+                apply_url="https://lensa.com/jobs/unresolved-lensa",
+            )
+            seed_review_job(
+                record_key="generic-data-engineer",
+                title="Senior Data Engineer",
+            )
+
+            candidates = load_unscreened_job_eligibility_candidates(
+                resume_hash="resume-1",
+                limit=10,
+            )
+
+            assert [
+                candidate["record_key"]
+                for candidate in candidates
+            ] == ["generic-data-engineer"]
 
         finally:
             database.DATA_DIR = old_data_dir
@@ -1343,6 +1635,9 @@ def main() -> None:
     test_candidate_jobs_require_complete_descriptions()
     test_admission_gate_keeps_target_titles_needing_enrichment()
     test_admission_gate_preserves_manual_statuses_for_filtered_titles()
+    test_admission_gate_keeps_hard_gaps_hidden_with_low_priority()
+    test_load_all_jobs_hides_databricks_hard_gap()
+    test_unscreened_eligibility_candidates_skip_hard_gaps_and_aggregators()
     test_description_state_is_separate_from_fit()
     test_fit_priority_uses_current_complete_ai_score()
     test_fit_priority_falls_back_when_ai_score_is_incomplete_or_stale()
