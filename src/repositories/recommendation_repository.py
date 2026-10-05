@@ -104,6 +104,8 @@ JOB_ID_QUERY_PARAMETERS = {
 
 HIGH_PRIORITY_RECENT_DAYS = 7
 MEDIUM_PRIORITY_RECENT_DAYS = 30
+ENRICHMENT_WAITING_PRIORITY_CAP = 30
+ENRICHMENT_WAITING_PRIORITY_STEP_DAYS = 3
 MINIMUM_FULL_DESCRIPTION_WORDS = 80
 DESCRIPTION_QUALITY_PATTERN = re.compile(
     r"\b("
@@ -544,6 +546,40 @@ def job_age_days(
     )
 
 
+def enrichment_waiting_days(
+    job: dict[str, Any],
+    now: datetime | None = None,
+) -> int | None:
+    """Estimate how long a still-incomplete job has waited for enrichment."""
+    desc_state = description_state(job)
+
+    if desc_state == "FULL_JD":
+        return None
+
+    reference_time = now or datetime.now(timezone.utc)
+
+    if reference_time.tzinfo is None:
+        reference_time = reference_time.replace(tzinfo=timezone.utc)
+
+    last_attempted = normalize_datetime(
+        job.get("previous_attempted_at")
+        or job.get("enrichment_attempted_at")
+        or job.get("official_url_resolved_at")
+    )
+    waiting_since = last_attempted or best_job_date(job)
+
+    if waiting_since is None:
+        return None
+
+    return max(
+        0,
+        (
+            reference_time.astimezone(timezone.utc)
+            - waiting_since.astimezone(timezone.utc)
+        ).days,
+    )
+
+
 def description_has_quality_signals(description: Any) -> bool:
     """Detect whether text looks like a real JD, not only long page chrome."""
     return bool(
@@ -692,6 +728,8 @@ def calculate_enrichment_priority(
     )
     desc_state = description_state(job)
     age = job_age_days(job, now=now)
+    attempt_count = int(job.get("attempt_count") or 0)
+    waiting_days = enrichment_waiting_days(job, now=now)
 
     if status == "new":
         score += 40
@@ -750,6 +788,39 @@ def calculate_enrichment_priority(
     elif desc_state == "ENRICHMENT_REJECTED":
         score -= 40
         reasons.append("rejected enrichment")
+
+    if (
+        status == "new"
+        and title_classification in {"STRONG_MATCH", "POSSIBLE_MATCH"}
+        and desc_state in {
+            "NEEDS_ENRICHMENT",
+            "PARTIAL_JD",
+            "ENRICHMENT_REJECTED",
+        }
+    ):
+        if attempt_count <= 0:
+            score += 20
+            reasons.append("never attempted")
+        else:
+            attempt_penalty = min(20, attempt_count * 4)
+            score -= attempt_penalty
+            reasons.append(f"attempt penalty -{attempt_penalty}")
+
+        if waiting_days is not None:
+            waiting_bonus = min(
+                ENRICHMENT_WAITING_PRIORITY_CAP,
+                (
+                    waiting_days
+                    // ENRICHMENT_WAITING_PRIORITY_STEP_DAYS
+                )
+                * 5,
+            )
+
+            if waiting_bonus:
+                score += waiting_bonus
+                reasons.append(
+                    f"waiting {waiting_days}d +{waiting_bonus}"
+                )
 
     rule_score = job.get("rule_score") or job.get("match_score") or 0
 
@@ -1271,6 +1342,9 @@ def load_all_jobs(
                 SELECT
                     enriched_jobs.canonical_job_key,
                     status AS enrichment_status,
+                    http_status AS enrichment_http_status,
+                    error_message AS enrichment_error_message,
+                    attempt_count AS enrichment_attempt_count,
                     final_url AS resolved_candidate_url,
                     resolved_candidate_title,
                     resolved_candidate_company,
@@ -1345,6 +1419,9 @@ def load_all_jobs(
                 jobs.title_filter_reason,
                 jobs.title_matched_pattern,
                 enrichment_attempts.enrichment_status,
+                enrichment_attempts.enrichment_http_status,
+                enrichment_attempts.enrichment_error_message,
+                enrichment_attempts.enrichment_attempt_count,
                 enrichment_attempts.resolved_candidate_url,
                 enrichment_attempts.resolved_candidate_title,
                 enrichment_attempts.resolved_candidate_company,
@@ -1500,6 +1577,31 @@ def load_all_jobs(
         job["enrichment_priority_score"] = enrichment_priority.score
         job["enrichment_priority_tier"] = enrichment_priority.tier
         job["enrichment_priority_reason"] = enrichment_priority.reason
+
+    queue_candidates = sorted(
+        [
+            job
+            for job in jobs
+            if str(job.get("application_status") or "new").casefold()
+            == "new"
+            and job.get("description_state") in {
+                "NEEDS_ENRICHMENT",
+                "PARTIAL_JD",
+                "ENRICHMENT_REJECTED",
+            }
+            and job.get("title_classification") != "FILTERED_OUT"
+        ],
+        key=lambda job: (
+            job.get("enrichment_priority_score") or 0,
+            job.get("sent_at")
+            or job.get("discovered_at")
+            or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+        reverse=True,
+    )
+
+    for index, job in enumerate(queue_candidates, start=1):
+        job["approximate_enrichment_queue_rank"] = index
 
     def review_priority(
         job: dict[str, Any],

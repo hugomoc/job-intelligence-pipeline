@@ -30,6 +30,7 @@ from src.ui.job_recommendation_service import (
     process_resume_upload,
 )
 from src.ui.job_links import select_job_open_target
+from src.ui.job_pipeline_state import derive_job_pipeline_state
 from src.ui.pagination import PAGE_SIZE_OPTIONS, paginate_items
 
 
@@ -225,6 +226,7 @@ def render_job_listing(job: dict) -> None:
         "application_status",
         "new",
     )
+    pipeline_state = derive_job_pipeline_state(job)
 
     with st.container(border=True):
         header_left, header_right = st.columns([4, 1])
@@ -260,7 +262,7 @@ def render_job_listing(job: dict) -> None:
                     f"Confidence: {job.get('confidence')}"
                 )
             else:
-                st.caption("Not AI-scored")
+                st.caption(pipeline_state.label)
 
             st.caption(
                 APPLICATION_STATUS_LABELS.get(
@@ -359,8 +361,16 @@ def render_job_listing(job: dict) -> None:
             if status_text == "resolution_rejected":
                 st.warning("Enrichment: identity mismatch rejected.")
 
+        if (
+            pipeline_state.details
+            or job.get("enrichment_status")
+            or job.get("official_job_url")
+        ):
             with st.expander("Enrichment details"):
-                st.caption(f"Status: {status_text}")
+                st.caption(f"Pipeline state: {pipeline_state.label}")
+
+                for detail_label, detail_value in pipeline_state.details:
+                    st.caption(f"{detail_label}: {detail_value}")
 
                 if job.get("identity_validation_reason"):
                     st.caption(
@@ -617,11 +627,26 @@ if enrich_descriptions_clicked or (run_daily_clicked and ingestion_succeeded):
                 resume_hash=st.session_state.get("resume_hash"),
             )
             st.write(f"Jobs selected: {enrichment_result.jobs_selected}")
+            st.write(f"Jobs processed: {enrichment_result.jobs_processed}")
+            st.write(
+                "Eligible for enrichment: "
+                f"{enrichment_result.eligible_for_enrichment}"
+            )
+            st.write(f"Never attempted: {enrichment_result.never_attempted}")
+            st.write(
+                "Needs official lookup: "
+                f"{enrichment_result.needs_official_resolution}"
+            )
             st.write(f"Descriptions updated: {enrichment_result.descriptions_updated}")
             st.write(f"Pages blocked: {enrichment_result.blocked}")
             st.write(f"No description found: {enrichment_result.no_description}")
             st.write(f"Fetch errors: {enrichment_result.fetch_error}")
             st.write(f"Not improved: {enrichment_result.not_improved}")
+            st.write(
+                f"Elapsed seconds: {enrichment_result.elapsed_seconds:.1f}"
+            )
+            if enrichment_result.stopped_for_time_budget:
+                st.write("Stopped because the time budget was reached.")
             st.write(f"Rule matches refreshed: {enrichment_result.rule_matches_refreshed}")
             render_run_log(
                 "Description enrichment log",

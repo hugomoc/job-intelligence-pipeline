@@ -17,10 +17,11 @@ from src.database import (
     get_raw_jobs,
 )
 from src.enrich_jobs import (
+    ENRICHMENT_DIAGNOSTIC_QUEUE_LIMIT,
     create_http_client,
     load_jobs_to_enrich,
-    process_enrichment_job,
-    save_enrichment_attempt,
+    process_enrichment_batch,
+    summarize_enrichment_queue,
 )
 from src.ingest_all import ingest_source
 from src.matching.job_matcher import score_all_jobs
@@ -52,6 +53,8 @@ class IngestionSummary:
 @dataclass(frozen=True)
 class EnrichmentSummary:
     jobs_selected: int
+    jobs_processed: int
+    eligible_for_enrichment: int
     descriptions_updated: int
     enriched: int
     blocked: int
@@ -61,6 +64,11 @@ class EnrichmentSummary:
     not_improved: int
     rule_matches_refreshed: int
     log_lines: tuple[str, ...]
+    never_attempted: int = 0
+    previously_attempted: int = 0
+    needs_official_resolution: int = 0
+    stopped_for_time_budget: bool = False
+    elapsed_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -194,99 +202,75 @@ def run_description_enrichment(
     source: str | None = None,
     retry_failed: bool = False,
     resume_hash: str | None = None,
+    max_seconds: float | None = None,
 ) -> EnrichmentSummary:
     """Fetch richer descriptions for stored jobs without changing source rows."""
     try:
-        jobs = load_jobs_to_enrich(
-            limit=limit,
+        queue_jobs = load_jobs_to_enrich(
+            limit=max(
+                limit,
+                ENRICHMENT_DIAGNOSTIC_QUEUE_LIMIT,
+            ),
             minimum_words=minimum_words,
             source=source,
             retry_failed=retry_failed,
             force=False,
             resume_hash=resume_hash,
         )
+        jobs = queue_jobs[:limit]
 
-        totals = {
-            "enriched": 0,
-            "blocked": 0,
-            "no_description": 0,
-            "fetch_error": 0,
-            "invalid_url": 0,
-            "not_improved": 0,
-            "resolution_rejected": 0,
-        }
-        descriptions_updated = 0
+        queue_summary = summarize_enrichment_queue(queue_jobs)
         log_lines: list[str] = [
-            f"Jobs selected for description enrichment: {len(jobs)}"
+            f"Jobs selected for description enrichment: {len(jobs)}",
+            (
+                "Queue diagnostics: "
+                f"eligible={queue_summary['eligible_for_enrichment']}; "
+                f"never attempted={queue_summary['never_attempted']}; "
+                f"previously attempted={queue_summary['previously_attempted']}; "
+                "needs official lookup="
+                f"{queue_summary['needs_official_resolution']}"
+            ),
         ]
 
         with create_http_client() as client:
-            for index, job in enumerate(jobs, start=1):
-                log_lines.append(
-                    "Enriching "
-                    f"{index}/{len(jobs)}: "
-                    f"{job.get('title') or 'Untitled job'} | "
-                    f"{job.get('company_name') or 'Unknown company'}"
-                )
+            batch_summary = process_enrichment_batch(
+                jobs=jobs,
+                client=client,
+                delay_seconds=0.0,
+                max_seconds=max_seconds,
+            )
 
-                processed = process_enrichment_job(
-                    job=job,
-                    client=client,
-                )
-
-                result = processed.result
-                stored_status = processed.stored_status
-                stored_error = processed.stored_error
-                identity_validation = processed.identity_validation
-                updated = processed.updated
-
-                if processed.official_resolution:
-                    official = processed.official_resolution
-                    log_lines.append(
-                        "Official resolution: "
-                        f"{official.status}; "
-                        f"url={official.official_job_url or '<none>'}; "
-                        f"reason={official.official_url_validation_reason}"
-                    )
-
-                if updated:
-                    descriptions_updated += 1
-
-                save_enrichment_attempt(
-                    job=job,
-                    result=result,
-                    status=stored_status,
-                    error_message=stored_error,
-                    identity_validation=identity_validation,
-                    official_resolution=processed.official_resolution,
-                )
-
-                totals[stored_status] = (
-                    totals.get(stored_status, 0) + 1
-                )
-
-                log_lines.append(
-                    f"Status: {stored_status}; "
-                    f"words: {result.word_count}; "
-                    f"updated: {'yes' if updated else 'no'}"
-                )
+        log_lines.extend(batch_summary.log_lines)
 
         rule_matches_refreshed = 0
 
-        if descriptions_updated:
+        if batch_summary.descriptions_updated:
             rule_matches_refreshed = refresh_rule_matches()
 
         return EnrichmentSummary(
             jobs_selected=len(jobs),
-            descriptions_updated=descriptions_updated,
-            enriched=totals["enriched"],
-            blocked=totals["blocked"],
-            no_description=totals["no_description"],
-            fetch_error=totals["fetch_error"],
-            invalid_url=totals["invalid_url"],
-            not_improved=totals["not_improved"],
+            jobs_processed=batch_summary.jobs_processed,
+            eligible_for_enrichment=(
+                queue_summary["eligible_for_enrichment"]
+            ),
+            descriptions_updated=batch_summary.descriptions_updated,
+            enriched=batch_summary.totals["enriched"],
+            blocked=batch_summary.totals["blocked"],
+            no_description=batch_summary.totals["no_description"],
+            fetch_error=batch_summary.totals["fetch_error"],
+            invalid_url=batch_summary.totals["invalid_url"],
+            not_improved=batch_summary.totals["not_improved"],
             rule_matches_refreshed=rule_matches_refreshed,
             log_lines=tuple(log_lines),
+            never_attempted=queue_summary["never_attempted"],
+            previously_attempted=queue_summary["previously_attempted"],
+            needs_official_resolution=(
+                queue_summary["needs_official_resolution"]
+            ),
+            stopped_for_time_budget=(
+                batch_summary.stopped_for_time_budget
+            ),
+            elapsed_seconds=batch_summary.elapsed_seconds,
         )
 
     except Exception as error:
@@ -320,6 +304,16 @@ def run_unscored_job_backlog(
             (
                 "Automatic description enrichment",
                 f"Jobs selected: {enrichment_summary.jobs_selected}",
+                f"Jobs processed: {enrichment_summary.jobs_processed}",
+                (
+                    "Eligible for enrichment: "
+                    f"{enrichment_summary.eligible_for_enrichment}"
+                ),
+                f"Never attempted: {enrichment_summary.never_attempted}",
+                (
+                    "Needs official lookup: "
+                    f"{enrichment_summary.needs_official_resolution}"
+                ),
                 f"Descriptions updated: {enrichment_summary.descriptions_updated}",
                 f"Pages blocked: {enrichment_summary.blocked}",
                 f"No description found: {enrichment_summary.no_description}",

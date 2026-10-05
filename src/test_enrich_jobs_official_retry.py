@@ -10,9 +10,12 @@ import httpx
 from src import database
 from src import enrich_jobs
 from src.enrich_jobs import (
+    DEFAULT_ENRICHMENT_LIMIT,
+    EnrichmentProcessingResult,
     initialize_enrichment_tables,
     load_jobs_to_enrich,
     needs_official_resolution,
+    process_enrichment_batch,
     process_enrichment_job,
     save_enrichment_attempt,
 )
@@ -186,6 +189,7 @@ def insert_attempt(
     official_url: str | None = None,
     official_resolved_at: datetime | None = None,
     attempted_at: datetime | None = None,
+    attempt_count: int = 1,
 ) -> None:
     timestamp = attempted_at or datetime.now(timezone.utc)
 
@@ -221,7 +225,7 @@ def insert_attempt(
                 None,
                 0,
                 "No description found.",
-                1,
+                attempt_count,
                 timestamp,
                 official_url,
                 official_status,
@@ -304,6 +308,147 @@ def test_official_not_found_after_cooldown_is_selected() -> None:
         )
 
         assert selected_record_keys() == ["monzo-old-not-found"]
+
+    with_temp_database(scenario)
+
+
+def test_never_attempted_relevant_job_beats_repeated_failed_job() -> None:
+    def scenario() -> None:
+        now = datetime.now(timezone.utc)
+        insert_raw_job(
+            "robots-never",
+            source="linkedin",
+            title="Senior Data Engineer",
+            company_name="Robots & Pencils",
+            apply_url="https://www.linkedin.com/jobs/view/111",
+        )
+        insert_raw_job(
+            "robots-repeated",
+            source="linkedin",
+            title="Senior Data Engineer",
+            company_name="Robots & Pencils",
+            apply_url="https://www.linkedin.com/jobs/view/222",
+        )
+        insert_attempt(
+            "robots-repeated",
+            source="linkedin",
+            status="blocked",
+            official_status=OFFICIAL_NOT_FOUND,
+            official_resolved_at=now - timedelta(days=8),
+            attempted_at=now - timedelta(days=8),
+            attempt_count=6,
+        )
+
+        jobs = load_jobs_to_enrich(
+            limit=2,
+            minimum_words=40,
+            source=None,
+            retry_failed=False,
+            force=False,
+        )
+
+        assert jobs[0]["record_key"] == "robots-never"
+        assert jobs[0]["description_state"] == "NEEDS_ENRICHMENT"
+        assert jobs[0]["needs_official_resolution"] is True
+
+    with_temp_database(scenario)
+
+
+def test_default_batch_can_select_more_than_five_jobs() -> None:
+    def scenario() -> None:
+        for index in range(6):
+            insert_raw_job(
+                f"batch-{index}",
+                source="linkedin",
+                title="Senior Data Engineer",
+                company_name=f"Company {index}",
+                apply_url=f"https://www.linkedin.com/jobs/view/{index}",
+            )
+
+        jobs = load_jobs_to_enrich(
+            limit=DEFAULT_ENRICHMENT_LIMIT,
+            minimum_words=40,
+            source=None,
+            retry_failed=False,
+            force=False,
+        )
+
+        assert DEFAULT_ENRICHMENT_LIMIT == 25
+        assert len(jobs) == 6
+
+    with_temp_database(scenario)
+
+
+def test_batch_continues_after_individual_enrichment_failure() -> None:
+    def scenario() -> None:
+        insert_raw_job(
+            "batch-fail",
+            source="linkedin",
+            title="Senior Data Engineer",
+            company_name="Failure Co",
+            apply_url="https://www.linkedin.com/jobs/view/333",
+        )
+        insert_raw_job(
+            "batch-continue",
+            source="linkedin",
+            title="Senior Data Engineer",
+            company_name="Success Co",
+            apply_url="https://www.linkedin.com/jobs/view/444",
+        )
+        jobs = load_jobs_to_enrich(
+            limit=DEFAULT_ENRICHMENT_LIMIT,
+            minimum_words=40,
+            source=None,
+            retry_failed=False,
+            force=False,
+        )
+        original_processor = enrich_jobs.process_enrichment_job
+
+        def fake_processor(job: dict, client) -> EnrichmentProcessingResult:
+            if job["record_key"] == "batch-fail":
+                raise RuntimeError("synthetic fetch failure")
+
+            return EnrichmentProcessingResult(
+                result=JobDescriptionResult(
+                    requested_url=job["apply_url"],
+                    final_url=job["apply_url"],
+                    status="no_description",
+                    http_status=200,
+                    extraction_method="test",
+                    description="",
+                    word_count=0,
+                    error_message="No description found.",
+                ),
+                stored_status="no_description",
+                stored_error="No description found.",
+                identity_validation=None,
+                official_resolution=None,
+                updated=False,
+            )
+
+        try:
+            enrich_jobs.process_enrichment_job = fake_processor
+            summary = process_enrichment_batch(
+                jobs=jobs,
+                client=object(),
+                delay_seconds=0,
+            )
+        finally:
+            enrich_jobs.process_enrichment_job = original_processor
+
+        assert summary.jobs_processed == 2
+        assert summary.totals["fetch_error"] == 1
+        assert summary.totals["no_description"] == 1
+
+        with database.get_connection() as connection:
+            attempt_count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM job_enrichment_attempts
+                """
+            ).fetchone()[0]
+
+        assert attempt_count == 2
 
     with_temp_database(scenario)
 
@@ -988,6 +1133,9 @@ def main() -> None:
     test_found_verified_is_not_selected_again_for_official_resolution()
     test_official_not_found_recently_is_in_cooldown()
     test_official_not_found_after_cooldown_is_selected()
+    test_never_attempted_relevant_job_beats_repeated_failed_job()
+    test_default_batch_can_select_more_than_five_jobs()
+    test_batch_continues_after_individual_enrichment_failure()
     test_full_description_lensa_without_official_url_is_selected()
     test_direct_greenhouse_full_description_is_not_selected()
     test_enriched_aggregator_page_still_triggers_official_resolution_when_missing()

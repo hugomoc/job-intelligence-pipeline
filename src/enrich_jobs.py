@@ -70,6 +70,8 @@ OFFICIAL_RETRY_STATUSES = {
     OFFICIAL_ERROR,
     OFFICIAL_NOT_FOUND,
 }
+DEFAULT_ENRICHMENT_LIMIT = 25
+ENRICHMENT_DIAGNOSTIC_QUEUE_LIMIT = 10_000
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,17 @@ class EnrichmentProcessingResult:
     identity_validation: JobIdentityValidation | None
     official_resolution: OfficialJobResolutionResult | None
     updated: bool
+
+
+@dataclass(frozen=True)
+class EnrichmentBatchSummary:
+    jobs_selected: int
+    jobs_processed: int
+    descriptions_updated: int
+    totals: dict[str, int]
+    stopped_for_time_budget: bool
+    elapsed_seconds: float
+    log_lines: tuple[str, ...]
 
 
 def initialize_enrichment_tables() -> None:
@@ -620,6 +633,7 @@ def load_jobs_to_enrich(
             if not needs_description and not needs_official:
                 continue
 
+        job["enrichment_queue_rank"] = len(selected) + 1
         selected.append(job)
         selected_exact_keys.add(exact_key)
         selected_duplicate_keys.add(duplicate_key)
@@ -628,6 +642,177 @@ def load_jobs_to_enrich(
             break
 
     return selected
+
+
+def default_enrichment_totals() -> dict[str, int]:
+    return {
+        "enriched": 0,
+        "blocked": 0,
+        "no_description": 0,
+        "fetch_error": 0,
+        "invalid_url": 0,
+        "not_improved": 0,
+        "resolution_rejected": 0,
+    }
+
+
+def summarize_enrichment_queue(
+    jobs: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Summarize the active enrichment batch without mutating job state."""
+    return {
+        "eligible_for_enrichment": len(jobs),
+        "never_attempted": sum(
+            1
+            for job in jobs
+            if int(job.get("attempt_count") or 0) == 0
+        ),
+        "previously_attempted": sum(
+            1
+            for job in jobs
+            if int(job.get("attempt_count") or 0) > 0
+        ),
+        "needs_description": sum(
+            1
+            for job in jobs
+            if job.get("needs_description_enrichment")
+        ),
+        "needs_official_resolution": sum(
+            1
+            for job in jobs
+            if job.get("needs_official_resolution")
+        ),
+    }
+
+
+def failed_processing_result(
+    job: dict[str, Any],
+    error: Exception,
+) -> EnrichmentProcessingResult:
+    error_message = f"{type(error).__name__}: {error}"
+
+    return EnrichmentProcessingResult(
+        result=JobDescriptionResult(
+            requested_url=str(job.get("apply_url") or ""),
+            final_url=None,
+            status="fetch_error",
+            http_status=None,
+            extraction_method=None,
+            description="",
+            word_count=0,
+            error_message=error_message,
+        ),
+        stored_status="fetch_error",
+        stored_error=error_message,
+        identity_validation=None,
+        official_resolution=None,
+        updated=False,
+    )
+
+
+def process_enrichment_batch(
+    jobs: list[dict[str, Any]],
+    client,
+    delay_seconds: float = 0.0,
+    max_seconds: float | None = None,
+    emit=None,
+) -> EnrichmentBatchSummary:
+    """Process a bounded batch and keep going after per-job failures."""
+    totals = default_enrichment_totals()
+    updated_count = 0
+    processed_count = 0
+    stopped_for_time_budget = False
+    started_at = time.monotonic()
+    log_lines: list[str] = []
+
+    def log(message: str) -> None:
+        log_lines.append(message)
+
+        if emit:
+            emit(message)
+
+    for index, job in enumerate(jobs, start=1):
+        if (
+            max_seconds is not None
+            and time.monotonic() - started_at >= max_seconds
+        ):
+            stopped_for_time_budget = True
+            log(
+                "Stopping enrichment because the max-seconds "
+                f"budget was reached after {processed_count} jobs."
+            )
+            break
+
+        log(
+            "Enriching "
+            f"{index}/{len(jobs)}: "
+            f"{job.get('title') or 'Untitled job'} | "
+            f"{job.get('company_name') or 'Unknown company'}"
+        )
+
+        try:
+            processed = process_enrichment_job(
+                job=job,
+                client=client,
+            )
+        except Exception as error:
+            processed = failed_processing_result(
+                job=job,
+                error=error,
+            )
+
+        result = processed.result
+        stored_status = processed.stored_status
+        stored_error = processed.stored_error
+        identity_validation = processed.identity_validation
+
+        if processed.official_resolution:
+            official = processed.official_resolution
+            log(
+                "Official resolution: "
+                f"{official.status}; "
+                f"url={official.official_job_url or '<none>'}; "
+                f"reason={official.official_url_validation_reason}"
+            )
+
+        if processed.updated:
+            updated_count += 1
+
+        save_enrichment_attempt(
+            job=job,
+            result=result,
+            status=stored_status,
+            error_message=stored_error,
+            identity_validation=identity_validation,
+            official_resolution=processed.official_resolution,
+        )
+
+        totals[stored_status] = (
+            totals.get(stored_status, 0) + 1
+        )
+        processed_count += 1
+
+        log(
+            f"Status: {stored_status}; "
+            f"words: {result.word_count}; "
+            f"updated: {'yes' if processed.updated else 'no'}"
+        )
+
+        if (
+            index < len(jobs)
+            and delay_seconds > 0
+        ):
+            time.sleep(delay_seconds)
+
+    return EnrichmentBatchSummary(
+        jobs_selected=len(jobs),
+        jobs_processed=processed_count,
+        descriptions_updated=updated_count,
+        totals=totals,
+        stopped_for_time_budget=stopped_for_time_budget,
+        elapsed_seconds=time.monotonic() - started_at,
+        log_lines=tuple(log_lines),
+    )
 
 
 def save_enrichment_attempt(
@@ -996,10 +1181,10 @@ def main() -> None:
     parser.add_argument(
         "--limit",
         type=int,
-        default=5,
+        default=DEFAULT_ENRICHMENT_LIMIT,
         help=(
             "Maximum jobs to process. "
-            "Default: 5."
+            f"Default: {DEFAULT_ENRICHMENT_LIMIT}."
         ),
     )
 
@@ -1052,6 +1237,16 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Optional wall-clock processing budget. "
+            "The batch stops before starting another job when reached."
+        ),
+    )
+
     arguments = parser.parse_args()
 
     if arguments.limit < 1:
@@ -1066,13 +1261,24 @@ def main() -> None:
         print("--delay cannot be negative.")
         raise SystemExit(1)
 
-    jobs = load_jobs_to_enrich(
-        limit=arguments.limit,
+    if (
+        arguments.max_seconds is not None
+        and arguments.max_seconds <= 0
+    ):
+        print("--max-seconds must be greater than 0.")
+        raise SystemExit(1)
+
+    queue_jobs = load_jobs_to_enrich(
+        limit=max(
+            arguments.limit,
+            ENRICHMENT_DIAGNOSTIC_QUEUE_LIMIT,
+        ),
         minimum_words=arguments.min_words,
         source=arguments.source,
         retry_failed=arguments.retry_failed,
         force=arguments.force,
     )
+    jobs = queue_jobs[:arguments.limit]
 
     if not jobs:
         print(
@@ -1081,97 +1287,55 @@ def main() -> None:
         )
         return
 
+    queue_summary = summarize_enrichment_queue(queue_jobs)
+
     print(
         f"Jobs selected for enrichment: "
         f"{len(jobs)}"
     )
-
-    totals = {
-        "enriched": 0,
-        "blocked": 0,
-        "no_description": 0,
-        "fetch_error": 0,
-        "invalid_url": 0,
-        "not_improved": 0,
-        "resolution_rejected": 0,
-    }
-
-    updated_count = 0
+    print(
+        "Queue diagnostics: "
+        f"eligible={queue_summary['eligible_for_enrichment']}; "
+        f"never_attempted={queue_summary['never_attempted']}; "
+        f"previously_attempted={queue_summary['previously_attempted']}; "
+        f"needs_description={queue_summary['needs_description']}; "
+        "needs_official_resolution="
+        f"{queue_summary['needs_official_resolution']}"
+    )
 
     with create_http_client() as client:
-        for index, job in enumerate(
+        batch_summary = process_enrichment_batch(
             jobs,
-            start=1,
-        ):
-            print(
-                f"\nProcessing job "
-                f"{index} of {len(jobs)}..."
-            )
-
-            processed = process_enrichment_job(
-                job=job,
-                client=client,
-            )
-
-            result = processed.result
-            stored_status = processed.stored_status
-            stored_error = processed.stored_error
-            identity_validation = processed.identity_validation
-            updated = processed.updated
-
-            if processed.official_resolution:
-                official = processed.official_resolution
-                print(
-                    "Official resolution: "
-                    f"{official.status}; "
-                    f"url={official.official_job_url or '<none>'}; "
-                    f"reason={official.official_url_validation_reason}"
-                )
-
-            if updated:
-                updated_count += 1
-
-            save_enrichment_attempt(
-                job=job,
-                result=result,
-                status=stored_status,
-                error_message=stored_error,
-                identity_validation=identity_validation,
-                official_resolution=processed.official_resolution,
-            )
-
-            totals[stored_status] = (
-                totals.get(
-                    stored_status,
-                    0,
-                )
-                + 1
-            )
-
-            print_result(
-                job=job,
-                result=result,
-                updated=updated,
-            )
-
-            if index < len(jobs):
-                time.sleep(
-                    arguments.delay
-                )
+            client=client,
+            delay_seconds=arguments.delay,
+            max_seconds=arguments.max_seconds,
+            emit=print,
+        )
 
     print("\nEnrichment complete")
     print(
+        f"Processed this run: "
+        f"{batch_summary.jobs_processed}"
+    )
+    print(
         f"Descriptions updated: "
-        f"{updated_count}"
+        f"{batch_summary.descriptions_updated}"
+    )
+    print(
+        f"Elapsed seconds: "
+        f"{batch_summary.elapsed_seconds:.1f}"
     )
 
-    for status, count in totals.items():
+    if batch_summary.stopped_for_time_budget:
+        print("Stopped because max-seconds was reached.")
+
+    for status, count in batch_summary.totals.items():
         if count:
             print(
                 f"{status}: {count}"
             )
 
-    if updated_count:
+    if batch_summary.descriptions_updated:
         print(
             "\nDescriptions changed. "
             "Refresh rule scores with:"

@@ -953,10 +953,36 @@ def test_enrichment_priority_orders_useful_new_jobs_first() -> None:
         "application_status": "removed",
     }
 
-    assert priority(new_strong_recent) > priority(old_strong)
+    assert priority(old_strong) > priority(new_strong_recent)
     assert priority(new_strong_recent) > priority(new_possible_recent)
     assert priority(new_possible_recent) > priority(applied_recent)
     assert priority(applied_recent) > priority(removed_recent)
+
+
+def test_never_attempted_enrichment_priority_beats_repeated_failures() -> None:
+    now = datetime(2026, 10, 1, tzinfo=timezone.utc)
+
+    def priority(job: dict) -> int:
+        return calculate_enrichment_priority(job, now=now).score
+
+    base_job = {
+        "application_status": "new",
+        "title_classification": "STRONG_MATCH",
+        "raw_description_word_count": 0,
+        "discovered_at": now - timedelta(days=1),
+        "rule_score": 90,
+    }
+    never_attempted = {
+        **base_job,
+        "attempt_count": 0,
+    }
+    repeated_failure = {
+        **base_job,
+        "attempt_count": 6,
+        "previous_attempted_at": now - timedelta(days=1),
+    }
+
+    assert priority(never_attempted) > priority(repeated_failure)
 
 
 def test_ai_score_cache_uses_exact_posting_not_duplicate_fingerprint() -> None:
@@ -1642,6 +1668,7 @@ def main() -> None:
     test_fit_priority_uses_current_complete_ai_score()
     test_fit_priority_falls_back_when_ai_score_is_incomplete_or_stale()
     test_enrichment_priority_orders_useful_new_jobs_first()
+    test_never_attempted_enrichment_priority_beats_repeated_failures()
     test_ai_score_cache_uses_exact_posting_not_duplicate_fingerprint()
     test_application_status_uses_exact_posting_identity()
     test_apply_url_identity_removes_tracking_parameters_only()
