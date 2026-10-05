@@ -62,6 +62,11 @@ TECH_ALIASES: dict[str, set[str]] = {
         "delta lake",
         "lakehouse",
     },
+    "spark": {
+        "spark",
+        "apache spark",
+        "pyspark",
+    },
     "looker": {"looker", "looker studio"},
     "tableau": {"tableau"},
     "power_bi": {
@@ -100,6 +105,11 @@ WAREHOUSE_GROUPS = {
     "databricks",
 }
 
+DATA_PROCESSING_GROUPS = {
+    "databricks",
+    "spark",
+}
+
 BI_PLATFORM_GROUPS = {
     "looker",
     "tableau",
@@ -110,6 +120,7 @@ BI_PLATFORM_GROUPS = {
 INTERCHANGEABLE_TECH_GROUPS = (
     CLOUD_GROUPS,
     WAREHOUSE_GROUPS,
+    DATA_PROCESSING_GROUPS,
     BI_PLATFORM_GROUPS,
 )
 
@@ -720,13 +731,18 @@ def requirement_has_satisfied_alternative(
     ):
         return False
 
+    if requirement_allows_open_equivalent(requirement):
+        acceptable_groups = interchangeable_groups
+    else:
+        acceptable_groups = mentioned_groups
+
     return any(
         profile_has_alias_group(
             resume_profile,
             group_name,
             include_certifications=False,
         )
-        for group_name in interchangeable_groups
+        for group_name in acceptable_groups
     )
 
 
@@ -1027,6 +1043,31 @@ def requirement_uses_alternatives(
     ) or "(" in requirement
 
 
+def requirement_allows_open_equivalent(
+    requirement: str,
+) -> bool:
+    normalized = normalize_match_text(requirement)
+
+    return any(
+        marker in f" {normalized} "
+        for marker in (
+            " or similar ",
+            " or equivalent ",
+            " comparable ",
+            " such as ",
+            " e g ",
+            " eg ",
+            " for example ",
+            " equivalent platform ",
+            " equivalent tool ",
+            " equivalent technology ",
+            " similar platform ",
+            " similar tool ",
+            " similar technology ",
+        )
+    )
+
+
 def requirement_requires_all(
     requirement: str,
 ) -> bool:
@@ -1040,6 +1081,31 @@ def requirement_requires_all(
             " both ",
         )
     )
+
+
+def acceptable_alternative_groups(
+    groups: set[str],
+    requirement: str,
+) -> set[str]:
+    if not (
+        requirement_uses_alternatives(requirement)
+        and not requirement_requires_all(requirement)
+    ):
+        return groups
+
+    if not requirement_allows_open_equivalent(
+        requirement
+    ):
+        return groups
+
+    acceptable: set[str] = set(groups)
+
+    for group in groups:
+        acceptable.update(
+            interchangeable_family_for_group(group)
+        )
+
+    return acceptable
 
 
 def significant_terms(value: str) -> set[str]:
@@ -1097,13 +1163,17 @@ def requirement_is_demonstrated(
                 requirement_uses_alternatives(requirement)
                 and not requirement_requires_all(requirement)
             ):
+                acceptable_groups = acceptable_alternative_groups(
+                    groups,
+                    requirement,
+                )
                 return any(
                     profile_has_alias_group(
                         resume_profile,
                         group,
                         include_certifications=False,
                     )
-                    for group in mentioned_clouds
+                    for group in acceptable_groups
                 )
 
             return all(
@@ -1137,12 +1207,16 @@ def requirement_is_demonstrated(
                 requirement_uses_alternatives(requirement)
                 and not requirement_requires_all(requirement)
             ):
+                acceptable_groups = acceptable_alternative_groups(
+                    groups,
+                    requirement,
+                )
                 return any(
                     profile_has_alias_group(
                         resume_profile,
                         group,
                     )
-                    for group in mentioned_warehouses
+                    for group in acceptable_groups
                 )
 
             return all(
@@ -1202,12 +1276,16 @@ def requirement_is_demonstrated(
             requirement_uses_alternatives(requirement)
             and not requirement_requires_all(requirement)
         ):
+            acceptable_groups = acceptable_alternative_groups(
+                groups,
+                requirement,
+            )
             return any(
                 profile_has_alias_group(
                     resume_profile,
                     group,
                 )
-                for group in groups
+                for group in acceptable_groups
             )
 
         return all(

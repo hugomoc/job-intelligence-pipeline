@@ -539,6 +539,236 @@ def test_glassdoor_digest_without_description_is_selected_for_resolution() -> No
     with_temp_database(scenario)
 
 
+def test_linkedin_missing_description_is_selected_for_official_resolution() -> None:
+    def scenario() -> None:
+        insert_raw_job(
+            "linkedin-machinify",
+            source="linkedin",
+            title="Senior Data Engineer - Analytics",
+            company_name="Machinify",
+            apply_url="https://www.linkedin.com/jobs/view/4469362702/",
+        )
+
+        jobs = selected_jobs()
+
+        assert [job["record_key"] for job in jobs] == ["linkedin-machinify"]
+        assert jobs[0]["needs_description_enrichment"] is True
+        assert jobs[0]["needs_official_resolution"] is True
+
+    with_temp_database(scenario)
+
+
+def test_indeed_incomplete_description_is_selected_for_official_resolution() -> None:
+    def scenario() -> None:
+        insert_raw_job(
+            "indeed-incomplete",
+            source="indeed",
+            title="Senior Analytics Engineer",
+            company_name="Example Co",
+            description="Short alert summary with no requirements.",
+            apply_url="https://www.indeed.com/viewjob?jk=123",
+        )
+
+        jobs = selected_jobs()
+
+        assert [job["record_key"] for job in jobs] == ["indeed-incomplete"]
+        assert jobs[0]["needs_description_enrichment"] is True
+        assert jobs[0]["needs_official_resolution"] is True
+
+    with_temp_database(scenario)
+
+
+def test_unknown_source_missing_description_can_use_official_resolution() -> None:
+    def scenario() -> None:
+        insert_raw_job(
+            "unknown-source",
+            source="newboard",
+            title="Senior Data Engineer",
+            company_name="Example Co",
+            apply_url="https://jobs.example-board.test/job/123",
+        )
+
+        jobs = selected_jobs()
+
+        assert [job["record_key"] for job in jobs] == ["unknown-source"]
+        assert jobs[0]["needs_official_resolution"] is True
+
+    with_temp_database(scenario)
+
+
+def test_linkedin_incomplete_direct_fetch_uses_official_fallback() -> None:
+    original_fetch = enrich_jobs.fetch_job_description
+    original_resolve = enrich_jobs.resolve_official_job
+
+    def scenario() -> None:
+        insert_raw_job(
+            "linkedin-fallback",
+            source="linkedin",
+            title="Senior Data Engineer - Analytics",
+            company_name="Machinify",
+            apply_url="https://www.linkedin.com/jobs/view/4469362702/",
+        )
+        job = selected_jobs()[0]
+
+        def fake_fetch(*args, **kwargs):
+            return JobDescriptionResult(
+                requested_url=job["apply_url"],
+                final_url=job["apply_url"],
+                status="no_description",
+                http_status=200,
+                extraction_method="html_selector",
+                description="",
+                word_count=0,
+                error_message="No sufficiently complete job description was found.",
+            )
+
+        def fake_resolve(job: dict, client: httpx.Client):
+            description_result = JobDescriptionResult(
+                requested_url=GREENHOUSE_MONZO_URL,
+                final_url=GREENHOUSE_MONZO_URL,
+                status="enriched",
+                http_status=200,
+                extraction_method="json_ld",
+                description=DESCRIPTION,
+                word_count=len(DESCRIPTION.split()),
+                error_message=None,
+                resolved_title="Senior Data Engineer - Analytics",
+                resolved_company="Machinify",
+                resolved_location="Remote",
+            )
+            identity_validation = JobIdentityValidation(
+                accepted=True,
+                confidence=1.0,
+                title_similarity=1.0,
+                company_similarity=1.0,
+                occupation_match=True,
+                reason="accepted",
+            )
+
+            return OfficialJobResolutionResult(
+                status=OFFICIAL_FOUND_VERIFIED,
+                official_job_url=GREENHOUSE_MONZO_URL,
+                official_url_source="greenhouse",
+                official_url_resolved_at=datetime.now(timezone.utc),
+                official_url_confidence=1.0,
+                official_url_validation_reason="identity accepted",
+                resolved_title="Senior Data Engineer - Analytics",
+                resolved_company="Machinify",
+                resolved_location="Remote",
+                description_result=description_result,
+                identity_validation=identity_validation,
+            )
+
+        enrich_jobs.fetch_job_description = fake_fetch
+        enrich_jobs.resolve_official_job = fake_resolve
+
+        try:
+            with httpx.Client() as client:
+                result = process_enrichment_job(job, client)
+        finally:
+            enrich_jobs.fetch_job_description = original_fetch
+            enrich_jobs.resolve_official_job = original_resolve
+
+        assert result.updated is True
+        assert result.official_resolution is not None
+        assert result.official_resolution.status == OFFICIAL_FOUND_VERIFIED
+
+    with_temp_database(scenario)
+
+
+def test_direct_greenhouse_valid_description_skips_official_search() -> None:
+    original_resolve = enrich_jobs.resolve_official_job
+
+    def scenario() -> None:
+        insert_raw_job(
+            record_key="greenhouse-valid",
+            source="greenhouse",
+            title="Staff Analytics Engineer",
+            company_name="Monzo",
+            apply_url=GREENHOUSE_MONZO_URL,
+        )
+        job = selected_jobs()[0]
+
+        def forbidden_resolve(*args, **kwargs):
+            raise AssertionError("Official search should not run after a valid ATS fetch")
+
+        enrich_jobs.resolve_official_job = forbidden_resolve
+
+        try:
+            with mock_client(
+                {
+                    GREENHOUSE_MONZO_URL: httpx.Response(
+                        200,
+                        text=job_posting_html(
+                            title="Staff Analytics Engineer",
+                            company="Monzo",
+                        ),
+                        headers={"content-type": "text/html"},
+                    )
+                }
+            ) as client:
+                result = process_enrichment_job(job, client)
+        finally:
+            enrich_jobs.resolve_official_job = original_resolve
+
+        assert result.updated is True
+        assert result.official_resolution is None
+
+    with_temp_database(scenario)
+
+
+def test_failed_official_resolution_cooldown_applies_to_linkedin() -> None:
+    def scenario() -> None:
+        insert_raw_job(
+            "linkedin-recent-not-found",
+            source="linkedin",
+            title="Senior Data Engineer - Analytics",
+            company_name="Machinify",
+            apply_url="https://www.linkedin.com/jobs/view/4469362702/",
+        )
+        insert_attempt(
+            "linkedin-recent-not-found",
+            source="linkedin",
+            official_status=OFFICIAL_NOT_FOUND,
+            official_resolved_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+
+        assert selected_record_keys() == []
+
+    with_temp_database(scenario)
+
+
+def test_same_duplicate_from_multiple_sources_is_selected_once() -> None:
+    def scenario() -> None:
+        insert_raw_job(
+            "linkedin-copy",
+            source="linkedin",
+            title="Senior Data Engineer - Analytics",
+            company_name="Machinify",
+            apply_url="https://www.linkedin.com/jobs/view/4469362702/",
+        )
+        insert_raw_job(
+            "lensa-copy",
+            source="lensa",
+            title="Senior Data Engineer - Analytics",
+            company_name="Machinify",
+            apply_url=LENSA_MONZO_URL,
+        )
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE raw_jobs
+                SET job_fingerprint = 'machinify-senior-data-engineer'
+                WHERE record_key IN ('linkedin-copy', 'lensa-copy')
+                """
+            )
+
+        assert len(selected_jobs()) == 1
+
+    with_temp_database(scenario)
+
+
 def test_glassdoor_full_description_is_saved() -> None:
     def scenario() -> None:
         insert_raw_job(
@@ -764,6 +994,13 @@ def main() -> None:
     test_monzo_historical_lensa_record_resolves_official_url_without_refetching_lensa()
     test_needs_official_resolution_direct_function()
     test_glassdoor_digest_without_description_is_selected_for_resolution()
+    test_linkedin_missing_description_is_selected_for_official_resolution()
+    test_indeed_incomplete_description_is_selected_for_official_resolution()
+    test_unknown_source_missing_description_can_use_official_resolution()
+    test_linkedin_incomplete_direct_fetch_uses_official_fallback()
+    test_direct_greenhouse_valid_description_skips_official_search()
+    test_failed_official_resolution_cooldown_applies_to_linkedin()
+    test_same_duplicate_from_multiple_sources_is_selected_once()
     test_glassdoor_full_description_is_saved()
     test_glassdoor_blocked_page_uses_verified_official_description()
     test_glassdoor_blocked_without_official_match_stays_unscored()

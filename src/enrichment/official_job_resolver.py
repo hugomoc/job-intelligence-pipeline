@@ -1,4 +1,4 @@
-"""Find verified employer/ATS postings when aggregator URLs are unusable.
+"""Find verified employer/ATS postings when source URLs are unusable.
 
 The resolver is intentionally bounded and deterministic. It starts with a small
 public search for the title/company, prefers known ATS or official company
@@ -162,21 +162,38 @@ def should_attempt_official_resolution(
     enrichment_result: JobDescriptionResult,
     identity_validation: JobIdentityValidation | None,
 ) -> bool:
-    """Decide whether an aggregator job needs official-site discovery."""
-    if is_aggregator_job(job):
-        return (
-            str(job.get("official_url_status") or "").strip()
-            != OFFICIAL_FOUND_VERIFIED
-        )
+    """Decide whether a job needs official-site discovery.
+
+    Source type is a strategy signal, not an eligibility gate: any source with
+    a missing, blocked, rejected, or incomplete description can fall back to an
+    official employer/ATS search. Aggregator sources still keep their stricter
+    preference for verified official URLs.
+    """
+    official_status = str(
+        job.get("official_url_status") or ""
+    ).strip()
+
+    if official_status == OFFICIAL_FOUND_VERIFIED:
+        return False
 
     if (
         enrichment_result.status == "enriched"
         and identity_validation is not None
         and identity_validation.accepted
     ):
-        return False
+        return (
+            is_aggregator_job(job)
+            or is_aggregator_domain(enrichment_result.final_url)
+            or not (
+                enrichment_result.resolved_title
+                and enrichment_result.resolved_company
+            )
+        )
 
     if identity_validation is not None and not identity_validation.accepted:
+        return True
+
+    if is_aggregator_job(job):
         return True
 
     if enrichment_result.status != "enriched":

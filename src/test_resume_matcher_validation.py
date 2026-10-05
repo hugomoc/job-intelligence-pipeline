@@ -372,6 +372,128 @@ def test_databricks_or_snowflake_required_accepts_snowflake() -> None:
     assert match.analysis.hard_requirements_missing == []
 
 
+def test_closed_databricks_or_spark_does_not_accept_snowflake() -> None:
+    profile = make_profile(
+        databases_warehouses=[
+            "Snowflake",
+        ],
+        production_skills=[
+            "Snowflake",
+            "SQL",
+        ],
+    )
+    description = " ".join(
+        [
+            "Requirements include Databricks or Spark required for production data engineering.",
+            "Responsibilities include lakehouse operations and production pipelines.",
+        ]
+        * 10
+    )
+
+    match = scored_match(
+        profile,
+        "Senior Data Engineer",
+        description,
+    )
+
+    assert match.overall_score <= 49
+    assert any(
+        "Databricks" in item
+        for item in match.analysis.hard_requirements_missing
+    )
+
+
+def test_closed_domo_or_tableau_does_not_accept_looker() -> None:
+    profile = make_profile(
+        production_skills=[
+            "SQL",
+            "Looker",
+        ],
+        tools_platforms=[
+            "Looker",
+        ],
+    )
+    description = " ".join(
+        [
+            "Requirements include Domo or Tableau required for executive dashboard delivery.",
+            "Responsibilities include BI development, reporting, and stakeholder analytics.",
+        ]
+        * 10
+    )
+
+    match = scored_match(
+        profile,
+        "Senior BI Engineer",
+        description,
+    )
+
+    assert match.overall_score <= 49
+    assert any(
+        "Domo" in item
+        for item in match.analysis.hard_requirements_missing
+    )
+
+
+def test_open_bi_platform_alternatives_accept_power_bi() -> None:
+    profile = make_profile(
+        production_skills=[
+            "SQL",
+            "Power BI",
+        ],
+        tools_platforms=[
+            "Power BI",
+        ],
+    )
+    description = " ".join(
+        [
+            "Requirements include Domo, Tableau, Looker, or similar BI platform experience.",
+            "Responsibilities include BI development, reporting, and stakeholder analytics.",
+        ]
+        * 10
+    )
+
+    match = scored_match(
+        profile,
+        "Senior BI Engineer",
+        description,
+    )
+
+    assert match.overall_score == 95
+    assert match.analysis.hard_requirements_missing == []
+
+
+def test_closed_aws_or_azure_does_not_accept_gcp() -> None:
+    profile = make_profile(
+        cloud_platforms=[
+            "GCP",
+        ],
+        production_skills=[
+            "Google Cloud Platform",
+        ],
+    )
+
+    assert validated_missing(
+        profile,
+        ["AWS or Azure required"],
+    ) == ["AWS or Azure required"]
+
+
+def test_open_equivalent_cloud_platform_accepts_gcp() -> None:
+    profile = make_profile(
+        cloud_platforms=[
+            "GCP",
+        ],
+        production_skills=[
+            "Google Cloud Platform",
+        ],
+    )
+
+    assert validated_missing(
+        profile,
+        ["AWS, Azure, GCP, or equivalent cloud platform"],
+    ) == []
+
+
 def test_databricks_preferred_only_is_not_a_major_gap() -> None:
     profile = make_profile(
         databases_warehouses=[
@@ -711,6 +833,11 @@ def main() -> None:
     test_equivalent_warehouse_requirement_does_not_trigger_critical_penalty()
     test_databricks_in_alternative_warehouse_list_is_not_a_gap()
     test_databricks_or_snowflake_required_accepts_snowflake()
+    test_closed_databricks_or_spark_does_not_accept_snowflake()
+    test_closed_domo_or_tableau_does_not_accept_looker()
+    test_open_bi_platform_alternatives_accept_power_bi()
+    test_closed_aws_or_azure_does_not_accept_gcp()
+    test_open_equivalent_cloud_platform_accepts_gcp()
     test_databricks_preferred_only_is_not_a_major_gap()
     test_mandatory_core_databricks_requirement_remains_hard_gap()
     test_cloud_warehouse_alternatives_accept_redshift()

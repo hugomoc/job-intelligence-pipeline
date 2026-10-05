@@ -292,9 +292,6 @@ def needs_official_resolution(
     force: bool = False,
     now: datetime | None = None,
 ) -> bool:
-    if not is_aggregator_job(job):
-        return False
-
     status = official_status_value(job)
 
     if status == OFFICIAL_FOUND_VERIFIED:
@@ -302,6 +299,12 @@ def needs_official_resolution(
 
     if force:
         return True
+
+    if (
+        job.get("description_state") == "FULL_JD"
+        and not is_aggregator_job(job)
+    ):
+        return False
 
     if not status:
         return True
@@ -844,10 +847,6 @@ def process_enrichment_job(
             True,
         )
     )
-    needs_official = bool(
-        job.get("needs_official_resolution")
-    )
-
     if needs_description:
         source_result = fetch_job_description(
             url=job["apply_url"],
@@ -889,8 +888,7 @@ def process_enrichment_job(
                 )
 
     if (
-        needs_official
-        or should_attempt_official_resolution(
+        should_attempt_official_resolution(
             job=job,
             enrichment_result=source_result,
             identity_validation=identity_validation,
