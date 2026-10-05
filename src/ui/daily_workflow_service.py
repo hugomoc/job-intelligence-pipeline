@@ -17,6 +17,7 @@ from src.database import (
     get_raw_jobs,
 )
 from src.enrich_jobs import (
+    DEFAULT_ENRICHMENT_LIMIT,
     ENRICHMENT_DIAGNOSTIC_QUEUE_LIMIT,
     create_http_client,
     load_jobs_to_enrich,
@@ -283,14 +284,25 @@ def run_description_enrichment(
         ) from error
 
 
+def automatic_enrichment_limit(
+    scoring_limit: int,
+) -> int:
+    """Run enrichment broadly enough before the narrower AI scoring queue."""
+    return max(
+        max(scoring_limit, 1),
+        DEFAULT_ENRICHMENT_LIMIT,
+    )
+
+
 def run_unscored_job_backlog(
     resume_hash: str | None,
     limit: int,
     minimum_rule_score: int,
 ) -> UiBacklogSummary:
     try:
+        enrichment_limit = automatic_enrichment_limit(limit)
         enrichment_summary = run_description_enrichment(
-            limit=max(limit, 1),
+            limit=enrichment_limit,
             minimum_words=80,
             resume_hash=resume_hash,
         )

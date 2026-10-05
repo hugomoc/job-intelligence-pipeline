@@ -11,6 +11,7 @@ from datetime import date, timedelta
 
 import streamlit as st
 
+from src.enrich_jobs import DEFAULT_ENRICHMENT_LIMIT
 from src.repositories.recommendation_repository import (
     derive_fit_priority,
     load_all_jobs,
@@ -484,7 +485,7 @@ with st.sidebar:
         "Descriptions to enrich",
         min_value=1,
         max_value=100,
-        value=20,
+        value=DEFAULT_ENRICHMENT_LIMIT,
         step=5,
     )
     backlog_status_placeholder = st.empty()

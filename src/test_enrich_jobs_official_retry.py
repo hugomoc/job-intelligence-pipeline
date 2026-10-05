@@ -29,6 +29,7 @@ from src.enrichment.official_job_resolver import (
 )
 from src.enrichment.job_identity import JobIdentityValidation
 from src.ui.job_links import select_job_open_target
+from src.ui.daily_workflow_service import automatic_enrichment_limit
 
 
 LENSA_MONZO_URL = (
@@ -190,6 +191,7 @@ def insert_attempt(
     official_resolved_at: datetime | None = None,
     attempted_at: datetime | None = None,
     attempt_count: int = 1,
+    http_status: int | None = None,
 ) -> None:
     timestamp = attempted_at or datetime.now(timezone.utc)
 
@@ -221,7 +223,7 @@ def insert_attempt(
                 LENSA_MONZO_URL,
                 None,
                 status,
-                None,
+                http_status,
                 None,
                 0,
                 "No description found.",
@@ -375,6 +377,70 @@ def test_default_batch_can_select_more_than_five_jobs() -> None:
 
         assert DEFAULT_ENRICHMENT_LIMIT == 25
         assert len(jobs) == 6
+
+    with_temp_database(scenario)
+
+
+def test_rank_21_linkedin_job_is_in_default_ui_enrichment_batch() -> None:
+    def scenario() -> None:
+        now = datetime.now(timezone.utc)
+
+        for index in range(20):
+            insert_raw_job(
+                f"higher-priority-{index}",
+                source="linkedin",
+                title="Senior Data Engineer",
+                company_name=f"Higher Priority {index}",
+                apply_url=f"https://www.linkedin.com/jobs/view/higher-{index}",
+            )
+
+        insert_raw_job(
+            "robots-pencils-rank-21",
+            source="linkedin",
+            title="Senior Data Engineer",
+            company_name="Robots & Pencils",
+            apply_url="https://www.linkedin.com/jobs/view/robots-rank-21",
+        )
+        insert_attempt(
+            "robots-pencils-rank-21",
+            source="linkedin",
+            status="blocked",
+            official_status=OFFICIAL_BLOCKED,
+            official_resolved_at=now - timedelta(days=8),
+            attempted_at=now - timedelta(days=8),
+            attempt_count=5,
+            http_status=429,
+        )
+
+        too_narrow_jobs = load_jobs_to_enrich(
+            limit=20,
+            minimum_words=40,
+            source=None,
+            retry_failed=False,
+            force=False,
+        )
+        default_jobs = load_jobs_to_enrich(
+            limit=automatic_enrichment_limit(20),
+            minimum_words=40,
+            source=None,
+            retry_failed=False,
+            force=False,
+        )
+        robots_job = next(
+            job
+            for job in default_jobs
+            if job["record_key"] == "robots-pencils-rank-21"
+        )
+
+        assert "robots-pencils-rank-21" not in [
+            job["record_key"]
+            for job in too_narrow_jobs
+        ]
+        assert automatic_enrichment_limit(20) == DEFAULT_ENRICHMENT_LIMIT
+        assert robots_job["enrichment_queue_rank"] == 21
+        assert robots_job["description_state"] == "NEEDS_ENRICHMENT"
+        assert robots_job["previous_status"] == "blocked"
+        assert robots_job["needs_official_resolution"] is True
 
     with_temp_database(scenario)
 
@@ -1135,6 +1201,7 @@ def main() -> None:
     test_official_not_found_after_cooldown_is_selected()
     test_never_attempted_relevant_job_beats_repeated_failed_job()
     test_default_batch_can_select_more_than_five_jobs()
+    test_rank_21_linkedin_job_is_in_default_ui_enrichment_batch()
     test_batch_continues_after_individual_enrichment_failure()
     test_full_description_lensa_without_official_url_is_selected()
     test_direct_greenhouse_full_description_is_not_selected()
