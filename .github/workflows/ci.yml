@@ -17,7 +17,7 @@ jobs:
       PYTHONPATH: .
       PYTHONDONTWRITEBYTECODE: "1"
       RUN_LIVE_EMAIL_TESTS: "0"
-      JOB_INTELLIGENCE_DB_PATH: ${{ runner.temp }}/jobs.duckdb
+      JOB_INTELLIGENCE_DB_PATH: /tmp/job-intelligence-ci.duckdb
 
     steps:
       - name: Check out repository
@@ -45,5 +45,5 @@ jobs:
         working-directory: job_intelligence_dbt
         env:
           DBT_PROFILES_DIR: .
-          JOB_INTELLIGENCE_DB_PATH: ${{ runner.temp }}/jobs.duckdb
+          JOB_INTELLIGENCE_DB_PATH: /tmp/job-intelligence-ci.duckdb
         run: dbt parse
