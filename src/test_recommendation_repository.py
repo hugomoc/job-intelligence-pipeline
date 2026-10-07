@@ -13,6 +13,7 @@ from src.repositories.recommendation_repository import (
     description_state,
     exact_posting_identity,
     extract_embedded_destination_url,
+    initialize_job_eligibility_table,
     load_all_jobs,
     load_candidate_jobs,
     load_latest_cached_resume_hash,
@@ -34,6 +35,7 @@ from src.job_title_filter import (
     excluded_job_title_reason,
     is_excluded_job_title,
 )
+from src.verified_posting_identity import description_hash
 
 
 def seed_job(
@@ -265,6 +267,23 @@ def create_review_supporting_tables() -> None:
         )
 
 
+def with_temp_review_database(callback) -> None:
+    old_data_dir = database.DATA_DIR
+    old_database_path = database.DATABASE_PATH
+
+    with TemporaryDirectory() as temp_dir:
+        database.DATA_DIR = Path(temp_dir)
+        database.DATABASE_PATH = Path(temp_dir) / "jobs.duckdb"
+
+        try:
+            database.initialize_database()
+            create_review_supporting_tables()
+            callback()
+        finally:
+            database.DATA_DIR = old_data_dir
+            database.DATABASE_PATH = old_database_path
+
+
 def seed_review_job(
     record_key: str,
     title: str,
@@ -313,6 +332,74 @@ def seed_review_job(
                     application_status,
                 ],
             )
+
+
+def seed_verified_attempt(
+    record_key: str,
+    verified_posting_key: str,
+    source: str = "linkedin",
+    description: str | None = None,
+    official_job_url: str = "https://boards.greenhouse.io/example/jobs/123",
+    description_hash_value: str | None = None,
+    matched_prior_record_key: str | None = None,
+    matched_prior_source: str | None = None,
+    reused_description: bool = False,
+) -> None:
+    initialize_job_eligibility_table()
+
+    with database.get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO job_enrichment_attempts (
+                record_key,
+                source,
+                requested_url,
+                final_url,
+                status,
+                http_status,
+                extraction_method,
+                description_word_count,
+                error_message,
+                official_job_url,
+                official_url_status,
+                official_url_source,
+                official_url_confidence,
+                official_url_validation_reason,
+                official_resolved_title,
+                official_resolved_company,
+                official_resolved_location,
+                verified_posting_key,
+                description_hash,
+                description_source,
+                posting_status,
+                matched_prior_record_key,
+                matched_prior_source,
+                reused_description,
+                attempt_count
+            )
+            VALUES (
+                ?, ?, ?, ?, 'enriched', 200, 'json_ld',
+                ?, NULL, ?, 'FOUND_VERIFIED', 'greenhouse', 1.0,
+                'identity accepted', 'Senior Data Engineer',
+                'Robots and Pencils', 'Remote only, United States',
+                ?, ?, 'official', 'unknown', ?, ?, ?, 1
+            )
+            """,
+            [
+                record_key,
+                source,
+                official_job_url,
+                official_job_url,
+                len((description or "").split()),
+                official_job_url,
+                verified_posting_key,
+                description_hash_value
+                or description_hash(description),
+                matched_prior_record_key,
+                matched_prior_source,
+                reused_description,
+            ],
+        )
 
 
 def test_candidate_jobs_require_complete_descriptions() -> None:
@@ -774,6 +861,410 @@ def test_load_all_jobs_hides_databricks_hard_gap() -> None:
         finally:
             database.DATA_DIR = old_data_dir
             database.DATABASE_PATH = old_database_path
+
+
+def test_load_all_jobs_attaches_ai_score_for_lowercase_mart_url_key() -> None:
+    old_data_dir = database.DATA_DIR
+    old_database_path = database.DATABASE_PATH
+
+    with TemporaryDirectory() as temp_dir:
+        database.DATA_DIR = Path(temp_dir)
+        database.DATABASE_PATH = Path(temp_dir) / "jobs.duckdb"
+
+        try:
+            database.initialize_database()
+            seed_resume_profile()
+            create_review_supporting_tables()
+
+            apply_url = (
+                "https://cb4sdw3d.r.us-west-2.awstrack.me/L0/"
+                "https:%2F%2Fbuiltin.com%2Fjob%2Fanalytics-engineer-"
+                "customer-experience%2F11470517%3Fi=ABC123"
+                "%26utm_source=ses/1/TokenABC"
+            )
+            description = " ".join(
+                [
+                    "Responsibilities include analytics engineering, SQL, "
+                    "dbt, Snowflake, data modeling, stakeholder "
+                    "partnership, and customer experience analytics."
+                ] * 15
+            )
+            seed_review_job(
+                record_key="polymarket-builtin",
+                title="Analytics Engineer, Customer Experience",
+                source="builtin",
+                description=description,
+                apply_url=apply_url,
+            )
+
+            ui_key = exact_posting_identity(
+                source="builtin",
+                source_job_id=None,
+                apply_url=apply_url,
+                record_key="polymarket-builtin",
+            )
+
+            with database.get_connection() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO analytics.mart_job_recommendations (
+                        canonical_job_key,
+                        resume_hash,
+                        ai_prompt_version,
+                        ai_score,
+                        recommendation,
+                        confidence,
+                        title_fit,
+                        skills_fit,
+                        experience_fit,
+                        seniority_fit,
+                        industry_fit,
+                        location_fit,
+                        matching_strengths,
+                        hard_requirements_missing,
+                        preferred_qualifications_missing,
+                        risk_factors,
+                        summary,
+                        description_word_count,
+                        description_complete,
+                        has_incomplete_description,
+                        ai_scored_at
+                    )
+                    VALUES (
+                        ?,
+                        'resume-1',
+                        ?,
+                        88,
+                        'apply',
+                        'high',
+                        90,
+                        90,
+                        85,
+                        90,
+                        80,
+                        100,
+                        '[]',
+                        '[]',
+                        '[]',
+                        '[]',
+                        'Strong analytics engineering fit.',
+                        658,
+                        true,
+                        false,
+                        CURRENT_TIMESTAMP
+                    )
+                    """,
+                    [
+                        ui_key.lower(),
+                        MATCHER_PROMPT_VERSION,
+                    ],
+                )
+
+            jobs = load_all_jobs(resume_hash="resume-1")
+            polymarket_job = next(
+                job
+                for job in jobs
+                if job["record_key"] == "polymarket-builtin"
+            )
+
+            assert ui_key != ui_key.lower()
+            assert polymarket_job["ai_score"] == 88
+            assert polymarket_job["recommendation"] == "apply"
+            assert polymarket_job["description_complete"] is True
+
+        finally:
+            database.DATA_DIR = old_data_dir
+            database.DATABASE_PATH = old_database_path
+
+
+def test_fuzzy_duplicate_without_verified_key_does_not_share_status() -> None:
+    def scenario() -> None:
+        seed_resume_profile()
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+        seed_review_job(
+            record_key="linkedin-robots",
+            title="Senior Data Engineer",
+            source="linkedin",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+            application_status="applied",
+        )
+        seed_review_job(
+            record_key="wellfound-robots",
+            title="Sr. Data Engineer",
+            source="wellfound",
+            description=full_description,
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=222-sr-data-engineer"
+            ),
+        )
+
+        jobs = {
+            job["record_key"]: job
+            for job in load_all_jobs(resume_hash="resume-1")
+        }
+
+        assert jobs["linkedin-robots"]["application_status"] == "applied"
+        assert jobs["wellfound-robots"]["application_status"] == "new"
+
+    with_temp_review_database(scenario)
+
+
+def test_verified_posting_key_shares_applied_status_across_sources() -> None:
+    def scenario() -> None:
+        seed_resume_profile()
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+        verified_key = "greenhouse:123"
+        official_url = "https://boards.greenhouse.io/example/jobs/123"
+
+        seed_review_job(
+            record_key="linkedin-robots",
+            title="Senior Data Engineer",
+            source="linkedin",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+            application_status="applied",
+        )
+        seed_review_job(
+            record_key="wellfound-robots",
+            title="Sr. Data Engineer",
+            source="wellfound",
+            description=full_description,
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=222-sr-data-engineer"
+            ),
+        )
+        seed_verified_attempt(
+            record_key="linkedin-robots",
+            source="linkedin",
+            verified_posting_key=verified_key,
+            official_job_url=official_url,
+            description=full_description,
+        )
+        seed_verified_attempt(
+            record_key="wellfound-robots",
+            source="wellfound",
+            verified_posting_key=verified_key,
+            official_job_url=official_url,
+            description=full_description,
+        )
+
+        jobs = {
+            job["record_key"]: job
+            for job in load_all_jobs(resume_hash="resume-1")
+        }
+
+        assert jobs["wellfound-robots"]["application_status"] == "applied"
+        assert jobs["wellfound-robots"]["application_status_scope"] == (
+            "verified_posting"
+        )
+        assert jobs["wellfound-robots"]["application_status_source"] == (
+            "linkedin"
+        )
+
+    with_temp_review_database(scenario)
+
+
+def test_verified_posting_key_shares_removed_status_across_sources() -> None:
+    def scenario() -> None:
+        seed_resume_profile()
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+        verified_key = "greenhouse:123"
+        official_url = "https://boards.greenhouse.io/example/jobs/123"
+
+        seed_review_job(
+            record_key="linkedin-robots",
+            title="Senior Data Engineer",
+            source="linkedin",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+            application_status="removed",
+        )
+        seed_review_job(
+            record_key="wellfound-robots",
+            title="Sr. Data Engineer",
+            source="wellfound",
+            description=full_description,
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=222-sr-data-engineer"
+            ),
+        )
+        seed_verified_attempt(
+            record_key="linkedin-robots",
+            source="linkedin",
+            verified_posting_key=verified_key,
+            official_job_url=official_url,
+            description=full_description,
+        )
+        seed_verified_attempt(
+            record_key="wellfound-robots",
+            source="wellfound",
+            verified_posting_key=verified_key,
+            official_job_url=official_url,
+            description=full_description,
+        )
+
+        jobs = {
+            job["record_key"]: job
+            for job in load_all_jobs(resume_hash="resume-1")
+        }
+
+        assert jobs["wellfound-robots"]["application_status"] == "removed"
+        assert jobs["wellfound-robots"]["application_status_scope"] == (
+            "verified_posting"
+        )
+
+    with_temp_review_database(scenario)
+
+
+def test_verified_score_reuse_requires_same_description_hash() -> None:
+    def scenario() -> None:
+        seed_resume_profile()
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+        changed_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "warehouse requirements and analytics engineering."
+            ] * 20
+        )
+        verified_key = "greenhouse:123"
+        official_url = "https://boards.greenhouse.io/example/jobs/123"
+
+        seed_review_job(
+            record_key="linkedin-robots",
+            title="Senior Data Engineer",
+            source="linkedin",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+        )
+        seed_review_job(
+            record_key="wellfound-robots",
+            title="Sr. Data Engineer",
+            source="wellfound",
+            description=full_description,
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=222-sr-data-engineer"
+            ),
+        )
+        seed_review_job(
+            record_key="wellfound-changed",
+            title="Sr. Data Engineer",
+            source="wellfound",
+            description=changed_description,
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=333-sr-data-engineer"
+            ),
+        )
+        seed_verified_attempt(
+            record_key="linkedin-robots",
+            source="linkedin",
+            verified_posting_key=verified_key,
+            official_job_url=official_url,
+            description=full_description,
+        )
+        seed_verified_attempt(
+            record_key="wellfound-robots",
+            source="wellfound",
+            verified_posting_key=verified_key,
+            official_job_url=official_url,
+            description=full_description,
+        )
+        seed_verified_attempt(
+            record_key="wellfound-changed",
+            source="wellfound",
+            verified_posting_key=verified_key,
+            official_job_url=official_url,
+            description=changed_description,
+        )
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO resume_job_scores (
+                    resume_hash,
+                    record_key,
+                    overall_score,
+                    recommendation,
+                    title_fit,
+                    skills_fit,
+                    experience_fit,
+                    seniority_fit,
+                    industry_fit,
+                    location_fit,
+                    confidence,
+                    matching_strengths,
+                    hard_requirements_missing,
+                    preferred_qualifications_missing,
+                    risk_factors,
+                    summary,
+                    description_word_count,
+                    description_complete,
+                    model_name,
+                    prompt_version
+                )
+                VALUES (
+                    'resume-1',
+                    'linkedin-robots',
+                    91,
+                    'apply',
+                    90,
+                    92,
+                    91,
+                    90,
+                    80,
+                    100,
+                    'high',
+                    '[]',
+                    '[]',
+                    '[]',
+                    '[]',
+                    'Strong fit.',
+                    120,
+                    true,
+                    'model-1',
+                    ?
+                )
+                """,
+                [MATCHER_PROMPT_VERSION],
+            )
+
+        jobs = {
+            job["record_key"]: job
+            for job in load_all_jobs(resume_hash="resume-1")
+        }
+
+        assert jobs["wellfound-robots"]["ai_score"] == 91
+        assert jobs["wellfound-robots"]["ai_score_scope"] == (
+            "verified_posting"
+        )
+        assert jobs["wellfound-changed"]["ai_score"] is None
+
+    with_temp_review_database(scenario)
 
 
 def test_unscreened_eligibility_candidates_skip_hard_gaps_and_aggregators() -> None:
@@ -1663,6 +2154,11 @@ def main() -> None:
     test_admission_gate_preserves_manual_statuses_for_filtered_titles()
     test_admission_gate_keeps_hard_gaps_hidden_with_low_priority()
     test_load_all_jobs_hides_databricks_hard_gap()
+    test_load_all_jobs_attaches_ai_score_for_lowercase_mart_url_key()
+    test_fuzzy_duplicate_without_verified_key_does_not_share_status()
+    test_verified_posting_key_shares_applied_status_across_sources()
+    test_verified_posting_key_shares_removed_status_across_sources()
+    test_verified_score_reuse_requires_same_description_hash()
     test_unscreened_eligibility_candidates_skip_hard_gaps_and_aggregators()
     test_description_state_is_separate_from_fit()
     test_fit_priority_uses_current_complete_ai_score()

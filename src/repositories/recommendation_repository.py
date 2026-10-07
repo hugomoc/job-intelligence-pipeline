@@ -932,6 +932,116 @@ def initialize_job_eligibility_table() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS resume_job_scores (
+                resume_hash VARCHAR NOT NULL,
+                record_key VARCHAR NOT NULL,
+                overall_score INTEGER NOT NULL,
+                recommendation VARCHAR NOT NULL,
+                title_fit INTEGER NOT NULL,
+                skills_fit INTEGER NOT NULL,
+                experience_fit INTEGER NOT NULL,
+                seniority_fit INTEGER NOT NULL,
+                industry_fit INTEGER NOT NULL,
+                location_fit INTEGER NOT NULL,
+                confidence VARCHAR NOT NULL,
+                matching_strengths VARCHAR,
+                hard_requirements_missing VARCHAR,
+                preferred_qualifications_missing VARCHAR,
+                risk_factors VARCHAR,
+                summary VARCHAR,
+                description_word_count INTEGER NOT NULL,
+                description_complete BOOLEAN NOT NULL,
+                model_name VARCHAR NOT NULL,
+                prompt_version VARCHAR DEFAULT 'v1',
+                scored_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (resume_hash, record_key)
+            )
+            """
+        )
+
+        for statement in (
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS overall_score INTEGER
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS recommendation VARCHAR
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS title_fit INTEGER
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS skills_fit INTEGER
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS experience_fit INTEGER
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS seniority_fit INTEGER
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS industry_fit INTEGER
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS location_fit INTEGER
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS confidence VARCHAR
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS matching_strengths VARCHAR
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS hard_requirements_missing VARCHAR
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS preferred_qualifications_missing VARCHAR
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS risk_factors VARCHAR
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS summary VARCHAR
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS description_word_count INTEGER
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS description_complete BOOLEAN
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS model_name VARCHAR
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS prompt_version VARCHAR
+            DEFAULT 'v1'
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS scored_at TIMESTAMPTZ
+            DEFAULT CURRENT_TIMESTAMP
+            """,
+        ):
+            connection.execute(statement)
 
         for statement in (
             """
@@ -997,6 +1107,34 @@ def initialize_job_eligibility_table() -> None:
             """
             ALTER TABLE job_enrichment_attempts
             ADD COLUMN IF NOT EXISTS official_resolved_location VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS verified_posting_key VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS description_hash VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS description_source VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS posting_status VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS matched_prior_record_key VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS matched_prior_source VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS reused_description BOOLEAN
             """,
         ):
             connection.execute(statement)
@@ -1314,6 +1452,9 @@ def load_all_jobs(
                 SELECT
                     status_jobs.posting_status_key,
                     status.status,
+                    status_jobs.source AS status_source,
+                    status.record_key AS status_record_key,
+                    status.updated_at AS status_updated_at,
                     row_number() over (
                         partition by status_jobs.posting_status_key
                         order by
@@ -1323,6 +1464,28 @@ def load_all_jobs(
                 FROM application_status as status
                 INNER JOIN raw_jobs_with_identity as status_jobs
                     ON status.record_key = status_jobs.record_key
+            ),
+
+            verified_application_status AS (
+                SELECT
+                    attempts.verified_posting_key,
+                    status.status,
+                    status_jobs.source AS status_source,
+                    status.record_key AS status_record_key,
+                    status.updated_at AS status_updated_at,
+                    row_number() over (
+                        partition by attempts.verified_posting_key
+                        order by
+                            status.updated_at desc nulls last,
+                            status.record_key
+                    ) as status_rank
+                FROM application_status as status
+                INNER JOIN raw_jobs_with_identity as status_jobs
+                    ON status.record_key = status_jobs.record_key
+                INNER JOIN job_enrichment_attempts AS attempts
+                    ON status.record_key = attempts.record_key
+                WHERE attempts.verified_posting_key IS NOT NULL
+                  AND TRIM(attempts.verified_posting_key) <> ''
             ),
 
             latest_eligibility AS (
@@ -1360,6 +1523,13 @@ def load_all_jobs(
                     official_resolved_title,
                     official_resolved_company,
                     official_resolved_location,
+                    verified_posting_key,
+                    description_hash,
+                    description_source,
+                    posting_status,
+                    matched_prior_record_key,
+                    matched_prior_source,
+                    reused_description,
                     last_attempted_at AS enrichment_attempted_at,
                     row_number() over (
                         partition by enriched_jobs.canonical_job_key
@@ -1377,6 +1547,49 @@ def load_all_jobs(
                     AS enriched_jobs
                     ON attempts.record_key =
                        enriched_jobs.record_key
+            ),
+
+            verified_scores AS (
+                SELECT
+                    attempts.verified_posting_key,
+                    attempts.description_hash,
+                    scores.overall_score AS ai_score,
+                    scores.recommendation,
+                    scores.confidence,
+                    scores.title_fit,
+                    scores.skills_fit,
+                    scores.experience_fit,
+                    scores.seniority_fit,
+                    scores.industry_fit,
+                    scores.location_fit,
+                    scores.matching_strengths,
+                    scores.hard_requirements_missing,
+                    scores.preferred_qualifications_missing,
+                    scores.risk_factors,
+                    scores.summary,
+                    scores.description_word_count,
+                    scores.description_complete,
+                    false AS has_incomplete_description,
+                    scores.prompt_version AS ai_prompt_version,
+                    scores.scored_at AS ai_scored_at,
+                    row_number() over (
+                        partition by
+                            attempts.verified_posting_key,
+                            attempts.description_hash
+                        order by
+                            scores.scored_at desc nulls last,
+                            scores.record_key
+                    ) as score_rank
+                FROM resume_job_scores AS scores
+                INNER JOIN job_enrichment_attempts AS attempts
+                    ON scores.record_key = attempts.record_key
+                WHERE scores.resume_hash = ?
+                  AND coalesce(scores.prompt_version, 'v1') = ?
+                  AND scores.description_complete = true
+                  AND attempts.verified_posting_key IS NOT NULL
+                  AND TRIM(attempts.verified_posting_key) <> ''
+                  AND attempts.description_hash IS NOT NULL
+                  AND TRIM(attempts.description_hash) <> ''
             )
 
             SELECT
@@ -1437,32 +1650,119 @@ def load_all_jobs(
                 enrichment_attempts.official_resolved_title,
                 enrichment_attempts.official_resolved_company,
                 enrichment_attempts.official_resolved_location,
+                enrichment_attempts.verified_posting_key,
+                enrichment_attempts.description_hash,
+                enrichment_attempts.description_source,
+                enrichment_attempts.posting_status,
+                enrichment_attempts.matched_prior_record_key,
+                enrichment_attempts.matched_prior_source,
+                enrichment_attempts.reused_description,
                 enrichment_attempts.enrichment_attempted_at,
                 matches.search_title as best_search_title,
                 matches.match_score as rule_score,
                 coalesce(
                     canonical_status.status,
+                    verified_status.status,
                     'new'
                 ) as application_status,
-                recommendations.ai_score,
-                recommendations.recommendation,
-                recommendations.confidence,
-                recommendations.title_fit,
-                recommendations.skills_fit,
-                recommendations.experience_fit,
-                recommendations.seniority_fit,
-                recommendations.industry_fit,
-                recommendations.location_fit,
-                recommendations.matching_strengths,
-                recommendations.hard_requirements_missing,
-                recommendations.preferred_qualifications_missing,
-                recommendations.risk_factors,
-                recommendations.summary,
-                recommendations.description_word_count,
-                recommendations.description_complete,
-                recommendations.has_incomplete_description,
-                recommendations.ai_prompt_version,
-                recommendations.ai_scored_at
+                CASE
+                    WHEN canonical_status.status IS NOT NULL
+                    THEN 'exact'
+                    WHEN verified_status.status IS NOT NULL
+                    THEN 'verified_posting'
+                    ELSE 'default'
+                END AS application_status_scope,
+                coalesce(
+                    canonical_status.status_source,
+                    verified_status.status_source
+                ) AS application_status_source,
+                coalesce(
+                    canonical_status.status_record_key,
+                    verified_status.status_record_key
+                ) AS application_status_record_key,
+                coalesce(
+                    recommendations.ai_score,
+                    verified_scores.ai_score
+                ) AS ai_score,
+                coalesce(
+                    recommendations.recommendation,
+                    verified_scores.recommendation
+                ) AS recommendation,
+                coalesce(
+                    recommendations.confidence,
+                    verified_scores.confidence
+                ) AS confidence,
+                coalesce(
+                    recommendations.title_fit,
+                    verified_scores.title_fit
+                ) AS title_fit,
+                coalesce(
+                    recommendations.skills_fit,
+                    verified_scores.skills_fit
+                ) AS skills_fit,
+                coalesce(
+                    recommendations.experience_fit,
+                    verified_scores.experience_fit
+                ) AS experience_fit,
+                coalesce(
+                    recommendations.seniority_fit,
+                    verified_scores.seniority_fit
+                ) AS seniority_fit,
+                coalesce(
+                    recommendations.industry_fit,
+                    verified_scores.industry_fit
+                ) AS industry_fit,
+                coalesce(
+                    recommendations.location_fit,
+                    verified_scores.location_fit
+                ) AS location_fit,
+                coalesce(
+                    recommendations.matching_strengths,
+                    verified_scores.matching_strengths
+                ) AS matching_strengths,
+                coalesce(
+                    recommendations.hard_requirements_missing,
+                    verified_scores.hard_requirements_missing
+                ) AS hard_requirements_missing,
+                coalesce(
+                    recommendations.preferred_qualifications_missing,
+                    verified_scores.preferred_qualifications_missing
+                ) AS preferred_qualifications_missing,
+                coalesce(
+                    recommendations.risk_factors,
+                    verified_scores.risk_factors
+                ) AS risk_factors,
+                coalesce(
+                    recommendations.summary,
+                    verified_scores.summary
+                ) AS summary,
+                coalesce(
+                    recommendations.description_word_count,
+                    verified_scores.description_word_count
+                ) AS description_word_count,
+                coalesce(
+                    recommendations.description_complete,
+                    verified_scores.description_complete
+                ) AS description_complete,
+                coalesce(
+                    recommendations.has_incomplete_description,
+                    verified_scores.has_incomplete_description
+                ) AS has_incomplete_description,
+                coalesce(
+                    recommendations.ai_prompt_version,
+                    verified_scores.ai_prompt_version
+                ) AS ai_prompt_version,
+                coalesce(
+                    recommendations.ai_scored_at,
+                    verified_scores.ai_scored_at
+                ) AS ai_scored_at,
+                CASE
+                    WHEN recommendations.ai_score IS NOT NULL
+                    THEN 'exact'
+                    WHEN verified_scores.ai_score IS NOT NULL
+                    THEN 'verified_posting'
+                    ELSE NULL
+                END AS ai_score_scope
             FROM jobs
             LEFT JOIN best_matches as matches
                 ON jobs.canonical_job_key =
@@ -1474,8 +1774,8 @@ def load_all_jobs(
                     canonical_status.posting_status_key
                AND canonical_status.status_rank = 1
             LEFT JOIN analytics.mart_job_recommendations as recommendations
-                ON jobs.canonical_job_key =
-                   recommendations.canonical_job_key
+                ON lower(jobs.canonical_job_key) =
+                   lower(recommendations.canonical_job_key)
                AND recommendations.resume_hash = ?
                AND recommendations.ai_prompt_version = ?
                AND recommendations.description_word_count >= 80
@@ -1494,6 +1794,16 @@ def load_all_jobs(
                 ON jobs.canonical_job_key =
                    enrichment_attempts.canonical_job_key
                AND enrichment_attempts.enrichment_rank = 1
+            LEFT JOIN verified_application_status AS verified_status
+                ON enrichment_attempts.verified_posting_key =
+                   verified_status.verified_posting_key
+               AND verified_status.status_rank = 1
+            LEFT JOIN verified_scores
+                ON enrichment_attempts.verified_posting_key =
+                   verified_scores.verified_posting_key
+               AND enrichment_attempts.description_hash =
+                   verified_scores.description_hash
+               AND verified_scores.score_rank = 1
             WHERE lower(coalesce(jobs.source, '')) NOT IN (
                   {excluded_job_sources}
               )
@@ -1507,6 +1817,8 @@ def load_all_jobs(
             [
                 selected_resume_hash,
                 ELIGIBILITY_PROMPT_VERSION,
+                selected_resume_hash,
+                MATCHER_PROMPT_VERSION,
                 selected_resume_hash,
                 MATCHER_PROMPT_VERSION,
             ],
@@ -1805,6 +2117,14 @@ def load_candidate_jobs(
                 INNER JOIN jobs AS current_jobs
                     ON scored_jobs.canonical_job_key =
                        current_jobs.canonical_job_key
+                LEFT JOIN job_enrichment_attempts
+                    AS scored_attempts
+                    ON scored_jobs.record_key =
+                       scored_attempts.record_key
+                LEFT JOIN job_enrichment_attempts
+                    AS current_attempts
+                    ON current_jobs.record_key =
+                       current_attempts.record_key
                 WHERE scores.resume_hash = ?
                   AND (
                       ? = true
@@ -1812,6 +2132,41 @@ def load_candidate_jobs(
                   )
                   AND coalesce(scores.prompt_version, 'v1') = ?
                   AND scores.description_complete = true
+                  AND scores.scored_at >= coalesce(
+                      current_jobs.description_updated_at,
+                      TIMESTAMPTZ '1970-01-01 00:00:00+00'
+                  )
+                UNION
+                SELECT DISTINCT
+                    current_jobs.canonical_job_key
+                FROM resume_job_scores AS scores
+                INNER JOIN jobs AS scored_jobs
+                    ON scores.record_key =
+                       scored_jobs.record_key
+                INNER JOIN job_enrichment_attempts
+                    AS scored_attempts
+                    ON scored_jobs.record_key =
+                       scored_attempts.record_key
+                INNER JOIN job_enrichment_attempts
+                    AS current_attempts
+                    ON scored_attempts.verified_posting_key =
+                       current_attempts.verified_posting_key
+                   AND scored_attempts.description_hash =
+                       current_attempts.description_hash
+                INNER JOIN jobs AS current_jobs
+                    ON current_attempts.record_key =
+                       current_jobs.record_key
+                WHERE scores.resume_hash = ?
+                  AND (
+                      ? = true
+                      OR scores.model_name = ?
+                  )
+                  AND coalesce(scores.prompt_version, 'v1') = ?
+                  AND scores.description_complete = true
+                  AND scored_attempts.verified_posting_key IS NOT NULL
+                  AND TRIM(scored_attempts.verified_posting_key) <> ''
+                  AND scored_attempts.description_hash IS NOT NULL
+                  AND TRIM(scored_attempts.description_hash) <> ''
                   AND scores.scored_at >= coalesce(
                       current_jobs.description_updated_at,
                       TIMESTAMPTZ '1970-01-01 00:00:00+00'
@@ -1991,6 +2346,10 @@ def load_candidate_jobs(
                 excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
             ),
             [
+                resume_hash,
+                reuse_any_model,
+                model_name,
+                prompt_version,
                 resume_hash,
                 reuse_any_model,
                 model_name,

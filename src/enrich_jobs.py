@@ -46,6 +46,12 @@ from src.repositories.recommendation_repository import (
     description_state,
     register_exact_posting_identity_function,
 )
+from src.verified_posting_identity import (
+    candidate_duplicate_fingerprint,
+    description_hash,
+    is_known_official_or_ats_url,
+    verified_posting_key_from_url,
+)
 
 
 FAILED_STATUSES = {
@@ -199,6 +205,34 @@ def initialize_enrichment_tables() -> None:
             """
             ALTER TABLE job_enrichment_attempts
             ADD COLUMN IF NOT EXISTS official_resolved_location VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS verified_posting_key VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS description_hash VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS description_source VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS posting_status VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS matched_prior_record_key VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS matched_prior_source VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS reused_description BOOLEAN
             """,
         ):
             connection.execute(statement)
@@ -362,6 +396,253 @@ def needs_description_enrichment(
     return True
 
 
+def load_verified_reuse_candidates(
+    minimum_words: int,
+) -> list[dict[str, Any]]:
+    """Load verified historical postings that can seed safe local reuse."""
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            SELECT
+                jobs.record_key,
+                jobs.source,
+                jobs.title,
+                jobs.company_name,
+                jobs.location,
+                jobs.description,
+                jobs.description_updated_at,
+                attempts.verified_posting_key,
+                attempts.description_hash,
+                attempts.official_job_url,
+                attempts.official_url_status,
+                attempts.official_url_source,
+                attempts.official_url_confidence,
+                attempts.official_url_validation_reason,
+                attempts.official_resolved_title,
+                attempts.official_resolved_company,
+                attempts.official_resolved_location,
+                attempts.last_attempted_at,
+                attempts.posting_status
+            FROM raw_jobs AS jobs
+            INNER JOIN job_enrichment_attempts AS attempts
+                ON jobs.record_key = attempts.record_key
+            WHERE attempts.verified_posting_key IS NOT NULL
+              AND TRIM(attempts.verified_posting_key) <> ''
+              AND attempts.status = 'enriched'
+              AND jobs.description IS NOT NULL
+              AND TRIM(jobs.description) <> ''
+              AND array_length(
+                  regexp_split_to_array(
+                      TRIM(jobs.description),
+                      '\\s+'
+                  )
+              ) >= ?
+            """,
+            [minimum_words],
+        )
+        columns = [
+            description[0]
+            for description in cursor.description
+        ]
+        rows = cursor.fetchall()
+
+    return [
+        dict(zip(columns, row))
+        for row in rows
+    ]
+
+
+def find_verified_reuse_candidate(
+    job: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> tuple[dict[str, Any], JobIdentityValidation] | None:
+    """Find a verified historical posting that safely matches this job."""
+    job_candidate_key = candidate_duplicate_fingerprint(
+        str(job.get("title") or ""),
+        str(job.get("company_name") or ""),
+        str(job.get("location") or ""),
+    )
+
+    if not job_candidate_key.strip("|"):
+        return None
+
+    for candidate in candidates:
+        if candidate.get("record_key") == job.get("record_key"):
+            continue
+
+        candidate_key = candidate_duplicate_fingerprint(
+            str(candidate.get("title") or ""),
+            str(candidate.get("company_name") or ""),
+            str(candidate.get("location") or ""),
+        )
+
+        if candidate_key != job_candidate_key:
+            continue
+
+        validation = validate_job_identity(
+            original_title=str(job.get("title") or ""),
+            original_company=str(job.get("company_name") or ""),
+            resolved_title=str(
+                candidate.get("official_resolved_title")
+                or candidate.get("title")
+                or ""
+            ),
+            resolved_company=str(
+                candidate.get("official_resolved_company")
+                or candidate.get("company_name")
+                or ""
+            ),
+            original_location=str(job.get("location") or ""),
+            resolved_location=str(
+                candidate.get("official_resolved_location")
+                or candidate.get("location")
+                or ""
+            ),
+        )
+
+        if validation.accepted:
+            return candidate, validation
+
+    return None
+
+
+def reuse_verified_description(
+    job: dict[str, Any],
+    candidate: dict[str, Any],
+    validation: JobIdentityValidation,
+) -> None:
+    """Copy a verified description/official identity onto a source duplicate."""
+    description = str(candidate.get("description") or "")
+    word_count = count_words(description)
+    official_url = str(candidate.get("official_job_url") or "")
+    now = datetime.now(timezone.utc)
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE raw_jobs
+            SET
+                description = ?,
+                description_updated_at = CURRENT_TIMESTAMP
+            WHERE record_key = ?
+            """,
+            [
+                description,
+                job["record_key"],
+            ],
+        )
+
+    job["description"] = description
+    job["description_updated_at"] = now
+    job["current_word_count"] = word_count
+    job["raw_description_word_count"] = word_count
+    job["description_quality_signals"] = description_has_quality_signals(
+        description
+    )
+    job["verified_posting_key"] = candidate.get("verified_posting_key")
+    job["description_hash"] = (
+        candidate.get("description_hash")
+        or description_hash(description)
+    )
+    job["description_source"] = "verified_reuse"
+    job["posting_status"] = candidate.get("posting_status") or "unknown"
+    job["matched_prior_record_key"] = candidate.get("record_key")
+    job["matched_prior_source"] = candidate.get("source")
+    job["reused_description"] = True
+    job["official_job_url"] = official_url
+    job["official_url_status"] = OFFICIAL_FOUND_VERIFIED
+    job["official_url_source"] = candidate.get("official_url_source")
+    job["official_url_confidence"] = candidate.get(
+        "official_url_confidence"
+    )
+    job["official_url_validation_reason"] = (
+        "reused verified posting identity from historical duplicate"
+    )
+    job["official_resolved_title"] = (
+        candidate.get("official_resolved_title")
+        or candidate.get("title")
+    )
+    job["official_resolved_company"] = (
+        candidate.get("official_resolved_company")
+        or candidate.get("company_name")
+    )
+    job["official_resolved_location"] = (
+        candidate.get("official_resolved_location")
+        or candidate.get("location")
+    )
+
+    result = JobDescriptionResult(
+        requested_url=str(job.get("apply_url") or ""),
+        final_url=official_url or str(candidate.get("final_url") or ""),
+        status="enriched",
+        http_status=None,
+        extraction_method="verified_reuse",
+        description=description,
+        word_count=word_count,
+        error_message=None,
+        resolved_title=str(job["official_resolved_title"] or ""),
+        resolved_company=str(job["official_resolved_company"] or ""),
+        resolved_location=str(job["official_resolved_location"] or ""),
+    )
+    official_resolution = OfficialJobResolutionResult(
+        status=OFFICIAL_FOUND_VERIFIED,
+        official_job_url=official_url,
+        official_url_source=str(candidate.get("official_url_source") or ""),
+        official_url_resolved_at=now,
+        official_url_confidence=float(validation.confidence),
+        official_url_validation_reason=validation.reason,
+        resolved_title=result.resolved_title,
+        resolved_company=result.resolved_company,
+        resolved_location=result.resolved_location,
+        description_result=result,
+        identity_validation=validation,
+    )
+
+    save_enrichment_attempt(
+        job=job,
+        result=result,
+        status="enriched",
+        error_message=None,
+        identity_validation=validation,
+        official_resolution=official_resolution,
+    )
+
+
+def reuse_verified_descriptions_before_queue(
+    jobs: list[dict[str, Any]],
+    minimum_words: int,
+) -> None:
+    """Apply verified local reuse before external enrichment is ranked."""
+    candidates = load_verified_reuse_candidates(
+        minimum_words=minimum_words,
+    )
+
+    if not candidates:
+        return
+
+    for job in jobs:
+        if int(job.get("current_word_count") or 0) >= minimum_words:
+            continue
+
+        if job.get("verified_posting_key"):
+            continue
+
+        match = find_verified_reuse_candidate(
+            job=job,
+            candidates=candidates,
+        )
+
+        if not match:
+            continue
+
+        candidate, validation = match
+        reuse_verified_description(
+            job=job,
+            candidate=candidate,
+            validation=validation,
+        )
+
+
 def load_jobs_to_enrich(
     limit: int,
     minimum_words: int,
@@ -488,6 +769,18 @@ def load_jobs_to_enrich(
         attempts.official_url_status,
         attempts.official_url_resolved_at,
         attempts.official_url_source,
+        attempts.official_url_confidence,
+        attempts.official_url_validation_reason,
+        attempts.official_resolved_title,
+        attempts.official_resolved_company,
+        attempts.official_resolved_location,
+        attempts.verified_posting_key,
+        attempts.description_hash,
+        attempts.description_source,
+        attempts.posting_status,
+        attempts.matched_prior_record_key,
+        attempts.matched_prior_source,
+        attempts.reused_description,
 
         COALESCE(
             matches.match_score,
@@ -556,6 +849,14 @@ def load_jobs_to_enrich(
         job["description_quality_signals"] = (
             description_has_quality_signals(job.get("description"))
         )
+        job["description_state"] = description_state(job)
+
+    reuse_verified_descriptions_before_queue(
+        jobs=jobs,
+        minimum_words=minimum_words,
+    )
+
+    for job in jobs:
         job["description_state"] = description_state(job)
 
     if resume_hash:
@@ -835,6 +1136,47 @@ def save_enrichment_attempt(
         else result.error_message
     )
 
+    verified_url = ""
+
+    if (
+        official_resolution
+        and official_resolution.status == OFFICIAL_FOUND_VERIFIED
+        and official_resolution.official_job_url
+    ):
+        verified_url = official_resolution.official_job_url
+    elif (
+        final_status == "enriched"
+        and result.final_url
+        and is_known_official_or_ats_url(result.final_url)
+        and (
+            identity_validation is None
+            or identity_validation.accepted
+        )
+    ):
+        verified_url = result.final_url
+
+    verified_posting_key = (
+        job.get("verified_posting_key")
+        or verified_posting_key_from_url(verified_url)
+        or None
+    )
+    stored_description_hash = (
+        job.get("description_hash")
+        or description_hash(result.description)
+        or None
+    )
+    description_source = (
+        job.get("description_source")
+        or (
+            official_resolution.official_url_source
+            if official_resolution
+            else None
+        )
+        or result.extraction_method
+    )
+    posting_status = job.get("posting_status") or "unknown"
+    reused_description = bool(job.get("reused_description"))
+
     with get_connection() as connection:
         connection.execute(
             """
@@ -872,6 +1214,13 @@ def save_enrichment_attempt(
                 official_resolved_title,
                 official_resolved_company,
                 official_resolved_location,
+                verified_posting_key,
+                description_hash,
+                description_source,
+                posting_status,
+                matched_prior_record_key,
+                matched_prior_source,
+                reused_description,
                 attempt_count,
                 last_attempted_at
             )
@@ -880,6 +1229,7 @@ def save_enrichment_attempt(
                 ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?,
                 CURRENT_TIMESTAMP
             )
             """,
@@ -961,6 +1311,13 @@ def save_enrichment_attempt(
                     if official_resolution
                     else None
                 ),
+                verified_posting_key,
+                stored_description_hash,
+                description_source,
+                posting_status,
+                job.get("matched_prior_record_key"),
+                job.get("matched_prior_source"),
+                reused_description,
                 previous_attempt_count + 1,
             ],
         )

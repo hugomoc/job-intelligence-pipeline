@@ -272,6 +272,13 @@ def render_job_listing(job: dict) -> None:
                 )
             )
 
+            if job.get("application_status_scope") == "verified_posting":
+                st.caption(
+                    "Previously "
+                    f"{application_status} via "
+                    f"{job.get('application_status_source') or 'another source'}"
+                )
+
             open_target = select_job_open_target(job)
             if open_target.url:
                 st.link_button(open_target.label, open_target.url)
@@ -366,6 +373,7 @@ def render_job_listing(job: dict) -> None:
             pipeline_state.details
             or job.get("enrichment_status")
             or job.get("official_job_url")
+            or job.get("verified_posting_key")
         ):
             with st.expander("Enrichment details"):
                 st.caption(f"Pipeline state: {pipeline_state.label}")
@@ -414,6 +422,24 @@ def render_job_listing(job: dict) -> None:
                         "Official URL: "
                         f"{job['official_job_url']}"
                     )
+
+                if job.get("verified_posting_key"):
+                    st.caption(
+                        "Verified posting key: "
+                        f"{job['verified_posting_key']}"
+                    )
+
+                if job.get("matched_prior_source"):
+                    st.caption(
+                        "Same verified opening as: "
+                        f"{job['matched_prior_source']}"
+                    )
+
+                if job.get("reused_description"):
+                    st.caption("Description reused from verified duplicate.")
+
+                if job.get("ai_score_scope") == "verified_posting":
+                    st.caption("AI score reused from verified duplicate.")
 
                 if job.get("official_url_validation_reason"):
                     st.caption(

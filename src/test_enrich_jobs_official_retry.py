@@ -30,6 +30,7 @@ from src.enrichment.official_job_resolver import (
 from src.enrichment.job_identity import JobIdentityValidation
 from src.ui.job_links import select_job_open_target
 from src.ui.daily_workflow_service import automatic_enrichment_limit
+from src.verified_posting_identity import description_hash
 
 
 LENSA_MONZO_URL = (
@@ -151,6 +152,7 @@ def insert_raw_job(
     source: str = "lensa",
     title: str = "Staff Analytics Engineer",
     company_name: str = "Monzo",
+    location: str = "Remote",
     description: str | None = None,
     apply_url: str = LENSA_MONZO_URL,
 ) -> None:
@@ -175,7 +177,7 @@ def insert_raw_job(
                 source,
                 title,
                 company_name,
-                "Remote",
+                location,
                 description,
                 apply_url,
             ],
@@ -192,6 +194,11 @@ def insert_attempt(
     attempted_at: datetime | None = None,
     attempt_count: int = 1,
     http_status: int | None = None,
+    verified_posting_key: str | None = None,
+    description_hash_value: str | None = None,
+    official_resolved_title: str | None = None,
+    official_resolved_company: str | None = None,
+    official_resolved_location: str | None = None,
 ) -> None:
     timestamp = attempted_at or datetime.now(timezone.utc)
 
@@ -213,9 +220,14 @@ def insert_attempt(
                 official_job_url,
                 official_url_status,
                 official_url_source,
-                official_url_resolved_at
+                official_url_resolved_at,
+                official_resolved_title,
+                official_resolved_company,
+                official_resolved_location,
+                verified_posting_key,
+                description_hash
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 record_key,
@@ -233,6 +245,11 @@ def insert_attempt(
                 official_status,
                 "greenhouse" if official_url else None,
                 official_resolved_at,
+                official_resolved_title,
+                official_resolved_company,
+                official_resolved_location,
+                verified_posting_key,
+                description_hash_value,
             ],
         )
 
@@ -1194,6 +1211,98 @@ def test_glassdoor_wrong_company_description_is_rejected() -> None:
     with_temp_database(scenario)
 
 
+def test_verified_historical_duplicate_reuses_description_before_queue() -> None:
+    def scenario() -> None:
+        verified_key = "greenhouse:123"
+        official_url = "https://boards.greenhouse.io/robotsandpencils/jobs/123"
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+
+        insert_raw_job(
+            "linkedin-robots",
+            source="linkedin",
+            title="Senior Data Engineer",
+            company_name="Robots & Pencils",
+            location="United States (Remote)",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+        )
+        insert_attempt(
+            "linkedin-robots",
+            source="linkedin",
+            status="enriched",
+            official_status=OFFICIAL_FOUND_VERIFIED,
+            official_url=official_url,
+            verified_posting_key=verified_key,
+            description_hash_value=description_hash(full_description),
+            official_resolved_title="Senior Data Engineer",
+            official_resolved_company="Robots and Pencils",
+            official_resolved_location="Remote only, United States",
+        )
+        insert_raw_job(
+            "wellfound-robots",
+            source="wellfound",
+            title="Sr. Data Engineer",
+            company_name="Robots and Pencils",
+            location="Remote only, United States",
+            description="short alert summary",
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=222-sr-data-engineer"
+            ),
+        )
+
+        jobs = load_jobs_to_enrich(
+            limit=100,
+            minimum_words=80,
+            source=None,
+            retry_failed=False,
+            force=False,
+        )
+
+        assert "wellfound-robots" not in [
+            job["record_key"]
+            for job in jobs
+        ]
+
+        with database.get_connection() as connection:
+            raw = connection.execute(
+                """
+                SELECT description
+                FROM raw_jobs
+                WHERE record_key = 'wellfound-robots'
+                """
+            ).fetchone()
+            attempt = connection.execute(
+                """
+                SELECT
+                    verified_posting_key,
+                    description_hash,
+                    matched_prior_record_key,
+                    matched_prior_source,
+                    reused_description
+                FROM job_enrichment_attempts
+                WHERE record_key = 'wellfound-robots'
+                """
+            ).fetchone()
+
+        assert raw is not None
+        assert len(raw[0].split()) >= 80
+        assert attempt == (
+            verified_key,
+            description_hash(full_description),
+            "linkedin-robots",
+            "linkedin",
+            True,
+        )
+
+    with_temp_database(scenario)
+
+
 def main() -> None:
     test_previous_failed_lensa_attempt_with_null_official_status_is_selected()
     test_found_verified_is_not_selected_again_for_official_resolution()
@@ -1221,6 +1330,7 @@ def main() -> None:
     test_glassdoor_blocked_without_official_match_stays_unscored()
     test_glassdoor_failed_resolution_retries_after_cooldown()
     test_glassdoor_wrong_company_description_is_rejected()
+    test_verified_historical_duplicate_reuses_description_before_queue()
     print("Official enrichment retry tests passed.")
 
 
