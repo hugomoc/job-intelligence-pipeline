@@ -4,6 +4,7 @@ from src.verified_posting_identity import (
     normalize_candidate_company,
     normalize_candidate_location,
     normalize_candidate_title,
+    is_specific_job_posting_url,
     verified_posting_key_from_url,
 )
 
@@ -21,6 +22,41 @@ def test_verified_key_uses_ats_identity() -> None:
         )
         == "lever:abc-123"
     )
+
+
+def test_generic_ats_and_careers_urls_do_not_create_verified_keys() -> None:
+    generic_urls = (
+        "https://boards.greenhouse.io/example",
+        "https://jobs.lever.co/example",
+        "https://example.com/careers",
+        "https://example.com/jobs",
+        "https://example.com/careers/jobs",
+    )
+
+    for url in generic_urls:
+        assert verified_posting_key_from_url(url) == ""
+        assert is_specific_job_posting_url(url) is False
+
+
+def test_specific_posting_urls_create_verified_keys() -> None:
+    assert (
+        verified_posting_key_from_url(
+            "https://boards.greenhouse.io/example/jobs/123"
+        )
+        == "greenhouse:123"
+    )
+    assert (
+        verified_posting_key_from_url(
+            "https://jobs.lever.co/example/abc-123"
+        )
+        == "lever:abc-123"
+    )
+    assert is_specific_job_posting_url(
+        "https://example.com/careers/senior-data-engineer-abc123"
+    )
+    assert verified_posting_key_from_url(
+        "https://example.com/careers/senior-data-engineer-abc123"
+    ).startswith("official-url:")
 
 
 def test_similar_jobs_with_different_official_ids_do_not_merge() -> None:
@@ -71,6 +107,8 @@ def test_description_hash_is_content_normalized() -> None:
 
 def main() -> None:
     test_verified_key_uses_ats_identity()
+    test_generic_ats_and_careers_urls_do_not_create_verified_keys()
+    test_specific_posting_urls_create_verified_keys()
     test_similar_jobs_with_different_official_ids_do_not_merge()
     test_title_company_location_candidate_normalization()
     test_candidate_fingerprint_is_fuzzy_not_verified_identity()

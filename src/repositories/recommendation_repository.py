@@ -29,6 +29,10 @@ from src.job_title_filter import (
     classify_job_title,
 )
 from src.ui.job_visibility import filter_user_reviewable_jobs
+from src.verified_posting_identity import (
+    TRUSTED_VERIFIED_KEY_SOURCES,
+    VERIFIED_KEY_TRUST_TRUSTED,
+)
 
 
 EXCLUDED_JOB_SOURCES: tuple[str, ...] = ()
@@ -36,6 +40,10 @@ EXCLUDED_JOB_SOURCES_SQL = ", ".join(
     f"'{source}'"
     for source in EXCLUDED_JOB_SOURCES
 ) or "'__no_excluded_sources__'"
+TRUSTED_VERIFIED_KEY_SOURCES_SQL = ", ".join(
+    f"'{source}'"
+    for source in sorted(TRUSTED_VERIFIED_KEY_SOURCES)
+) or "'__no_trusted_verified_key_sources__'"
 
 TRACKING_QUERY_PARAMETERS = {
     "ao",
@@ -1114,6 +1122,22 @@ def initialize_job_eligibility_table() -> None:
             """,
             """
             ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS verified_posting_key_source VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS verified_posting_key_verified_at TIMESTAMPTZ
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS verified_posting_key_confidence DOUBLE
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS verified_posting_key_trust VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
             ADD COLUMN IF NOT EXISTS description_hash VARCHAR
             """,
             """
@@ -1486,6 +1510,18 @@ def load_all_jobs(
                     ON status.record_key = attempts.record_key
                 WHERE attempts.verified_posting_key IS NOT NULL
                   AND TRIM(attempts.verified_posting_key) <> ''
+                  AND lower(
+                      coalesce(
+                          attempts.verified_posting_key_trust,
+                          ''
+                      )
+                  ) = '{trusted_verified_key_trust}'
+                  AND lower(
+                      coalesce(
+                          attempts.verified_posting_key_source,
+                          ''
+                      )
+                  ) IN ({trusted_verified_key_sources})
             ),
 
             latest_eligibility AS (
@@ -1524,6 +1560,10 @@ def load_all_jobs(
                     official_resolved_company,
                     official_resolved_location,
                     verified_posting_key,
+                    verified_posting_key_source,
+                    verified_posting_key_verified_at,
+                    verified_posting_key_confidence,
+                    verified_posting_key_trust,
                     description_hash,
                     description_source,
                     posting_status,
@@ -1588,6 +1628,18 @@ def load_all_jobs(
                   AND scores.description_complete = true
                   AND attempts.verified_posting_key IS NOT NULL
                   AND TRIM(attempts.verified_posting_key) <> ''
+                  AND lower(
+                      coalesce(
+                          attempts.verified_posting_key_trust,
+                          ''
+                      )
+                  ) = '{trusted_verified_key_trust}'
+                  AND lower(
+                      coalesce(
+                          attempts.verified_posting_key_source,
+                          ''
+                      )
+                  ) IN ({trusted_verified_key_sources})
                   AND attempts.description_hash IS NOT NULL
                   AND TRIM(attempts.description_hash) <> ''
             )
@@ -1651,6 +1703,10 @@ def load_all_jobs(
                 enrichment_attempts.official_resolved_company,
                 enrichment_attempts.official_resolved_location,
                 enrichment_attempts.verified_posting_key,
+                enrichment_attempts.verified_posting_key_source,
+                enrichment_attempts.verified_posting_key_verified_at,
+                enrichment_attempts.verified_posting_key_confidence,
+                enrichment_attempts.verified_posting_key_trust,
                 enrichment_attempts.description_hash,
                 enrichment_attempts.description_source,
                 enrichment_attempts.posting_status,
@@ -1798,12 +1854,36 @@ def load_all_jobs(
                 ON enrichment_attempts.verified_posting_key =
                    verified_status.verified_posting_key
                AND verified_status.status_rank = 1
+               AND lower(
+                   coalesce(
+                       enrichment_attempts.verified_posting_key_trust,
+                       ''
+                   )
+               ) = '{trusted_verified_key_trust}'
+               AND lower(
+                   coalesce(
+                       enrichment_attempts.verified_posting_key_source,
+                       ''
+                   )
+               ) IN ({trusted_verified_key_sources})
             LEFT JOIN verified_scores
                 ON enrichment_attempts.verified_posting_key =
                    verified_scores.verified_posting_key
                AND enrichment_attempts.description_hash =
                    verified_scores.description_hash
                AND verified_scores.score_rank = 1
+               AND lower(
+                   coalesce(
+                       enrichment_attempts.verified_posting_key_trust,
+                       ''
+                   )
+               ) = '{trusted_verified_key_trust}'
+               AND lower(
+                   coalesce(
+                       enrichment_attempts.verified_posting_key_source,
+                       ''
+                   )
+               ) IN ({trusted_verified_key_sources})
             WHERE lower(coalesce(jobs.source, '')) NOT IN (
                   {excluded_job_sources}
               )
@@ -1813,6 +1893,8 @@ def load_all_jobs(
                 jobs.company_name
             """.format(
                 excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
+                trusted_verified_key_sources=TRUSTED_VERIFIED_KEY_SOURCES_SQL,
+                trusted_verified_key_trust=VERIFIED_KEY_TRUST_TRUSTED,
             ),
             [
                 selected_resume_hash,
@@ -2165,6 +2247,30 @@ def load_candidate_jobs(
                   AND scores.description_complete = true
                   AND scored_attempts.verified_posting_key IS NOT NULL
                   AND TRIM(scored_attempts.verified_posting_key) <> ''
+                  AND lower(
+                      coalesce(
+                          scored_attempts.verified_posting_key_trust,
+                          ''
+                      )
+                  ) = '{trusted_verified_key_trust}'
+                  AND lower(
+                      coalesce(
+                          scored_attempts.verified_posting_key_source,
+                          ''
+                      )
+                  ) IN ({trusted_verified_key_sources})
+                  AND lower(
+                      coalesce(
+                          current_attempts.verified_posting_key_trust,
+                          ''
+                      )
+                  ) = '{trusted_verified_key_trust}'
+                  AND lower(
+                      coalesce(
+                          current_attempts.verified_posting_key_source,
+                          ''
+                      )
+                  ) IN ({trusted_verified_key_sources})
                   AND scored_attempts.description_hash IS NOT NULL
                   AND TRIM(scored_attempts.description_hash) <> ''
                   AND scores.scored_at >= coalesce(
@@ -2344,6 +2450,8 @@ def load_candidate_jobs(
                 company_name
             """.format(
                 excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
+                trusted_verified_key_sources=TRUSTED_VERIFIED_KEY_SOURCES_SQL,
+                trusted_verified_key_trust=VERIFIED_KEY_TRUST_TRUSTED,
             ),
             [
                 resume_hash,

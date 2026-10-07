@@ -48,9 +48,17 @@ from src.repositories.recommendation_repository import (
     register_exact_posting_identity_function,
 )
 from src.verified_posting_identity import (
+    VERIFIED_KEY_SOURCE_ACCEPTED_DIRECT_CANDIDATE,
+    VERIFIED_KEY_SOURCE_DIRECT_ATS_SOURCE,
+    VERIFIED_KEY_SOURCE_EMBEDDED_OFFICIAL_DESTINATION,
+    VERIFIED_KEY_SOURCE_OFFICIAL_FOUND_VERIFIED,
+    VERIFIED_KEY_SOURCE_SOURCE_REDIRECT_VERIFIED,
+    VERIFIED_KEY_SOURCE_VERIFIED_REUSE,
+    VERIFIED_KEY_TRUST_TRUSTED,
     candidate_duplicate_fingerprint,
     description_hash,
     is_known_official_or_ats_url,
+    verified_key_metadata_is_trusted,
     verified_posting_key_from_url,
 )
 
@@ -232,6 +240,22 @@ def initialize_enrichment_tables() -> None:
             """
             ALTER TABLE job_enrichment_attempts
             ADD COLUMN IF NOT EXISTS verified_posting_key VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS verified_posting_key_source VARCHAR
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS verified_posting_key_verified_at TIMESTAMPTZ
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS verified_posting_key_confidence DOUBLE
+            """,
+            """
+            ALTER TABLE job_enrichment_attempts
+            ADD COLUMN IF NOT EXISTS verified_posting_key_trust VARCHAR
             """,
             """
             ALTER TABLE job_enrichment_attempts
@@ -445,7 +469,11 @@ def load_verified_reuse_candidates(
                 attempts.official_resolved_company,
                 attempts.official_resolved_location,
                 attempts.last_attempted_at,
-                attempts.posting_status
+                attempts.posting_status,
+                attempts.verified_posting_key_source,
+                attempts.verified_posting_key_verified_at,
+                attempts.verified_posting_key_confidence,
+                attempts.verified_posting_key_trust
             FROM raw_jobs AS jobs
             INNER JOIN job_enrichment_attempts AS attempts
                 ON jobs.record_key = attempts.record_key
@@ -469,10 +497,49 @@ def load_verified_reuse_candidates(
         ]
         rows = cursor.fetchall()
 
-    return [
+    rows_as_dicts = [
         dict(zip(columns, row))
         for row in rows
     ]
+
+    trusted_candidates: list[dict[str, Any]] = []
+    for candidate in rows_as_dicts:
+        authoritative_key = authoritative_verified_key_for_job(candidate)
+
+        if not authoritative_key:
+            continue
+
+        if not stored_verified_key_is_trusted(candidate):
+            continue
+
+        candidate["verified_posting_key"] = authoritative_key
+        trusted_candidates.append(candidate)
+
+    return trusted_candidates
+
+
+def stored_verified_key_is_trusted(
+    job: dict[str, Any],
+) -> bool:
+    """Return true only for persisted keys with explicit trusted provenance."""
+    return verified_key_metadata_is_trusted(
+        job.get("verified_posting_key_source"),
+        job.get("verified_posting_key_trust"),
+    )
+
+
+def _compatible_verified_key(
+    stored_key: str,
+    derived_key: str,
+) -> str:
+    """Return a derived key only when it does not conflict with storage."""
+    if not derived_key:
+        return ""
+
+    if stored_key and stored_key != derived_key:
+        return ""
+
+    return derived_key
 
 
 def authoritative_verified_key_for_job(
@@ -481,7 +548,29 @@ def authoritative_verified_key_for_job(
     """Return verified identity from source-independent evidence only."""
     explicit_key = str(job.get("verified_posting_key") or "").strip()
 
-    if explicit_key:
+    if explicit_key and stored_verified_key_is_trusted(job):
+        official_url = str(job.get("official_job_url") or "").strip()
+        if (
+            str(job.get("official_url_status") or "").strip()
+            == OFFICIAL_FOUND_VERIFIED
+            and official_url
+        ):
+            official_key = verified_posting_key_from_url(official_url)
+
+            if official_key and official_key != explicit_key:
+                return ""
+
+        resolved_candidate_url = str(
+            job.get("resolved_candidate_url") or ""
+        ).strip()
+        if resolved_candidate_url and stored_candidate_identity_accepted(job):
+            resolved_key = verified_posting_key_from_url(
+                resolved_candidate_url
+            )
+
+            if resolved_key and resolved_key != explicit_key:
+                return ""
+
         return explicit_key
 
     official_status = str(
@@ -496,8 +585,13 @@ def authoritative_verified_key_for_job(
     ):
         key = verified_posting_key_from_url(official_url)
 
-        if key:
-            return key
+        compatible_key = _compatible_verified_key(
+            explicit_key,
+            key,
+        )
+
+        if compatible_key:
+            return compatible_key
 
     resolved_candidate_url = str(
         job.get("resolved_candidate_url") or ""
@@ -510,13 +604,23 @@ def authoritative_verified_key_for_job(
     ):
         key = verified_posting_key_from_url(resolved_candidate_url)
 
-        if key:
-            return key
+        compatible_key = _compatible_verified_key(
+            explicit_key,
+            key,
+        )
+
+        if compatible_key:
+            return compatible_key
 
     direct_key = direct_source_url_verified_key(job)
 
-    if direct_key:
-        return direct_key
+    compatible_direct_key = _compatible_verified_key(
+        explicit_key,
+        direct_key,
+    )
+
+    if compatible_direct_key:
+        return compatible_direct_key
 
     return ""
 
@@ -531,12 +635,42 @@ def stored_candidate_identity_accepted(
     confidence = job.get("identity_confidence")
 
     if confidence is None:
-        return True
+        return stored_verified_key_is_trusted(job)
 
     try:
         return float(confidence) >= 0.78
     except (TypeError, ValueError):
         return False
+
+
+def direct_source_verified_key_source(
+    job: dict[str, Any],
+) -> str:
+    """Classify why the source record's own URL can be trusted."""
+    apply_url = str(job.get("apply_url") or "").strip()
+    source = str(job.get("source") or "").strip().casefold()
+
+    embedded_destination = extract_embedded_destination_url(apply_url)
+
+    if (
+        embedded_destination
+        and is_known_official_or_ats_url(embedded_destination)
+        and verified_posting_key_from_url(embedded_destination)
+    ):
+        return VERIFIED_KEY_SOURCE_EMBEDDED_OFFICIAL_DESTINATION
+
+    if (
+        apply_url
+        and is_known_official_or_ats_url(apply_url)
+        and verified_posting_key_from_url(apply_url)
+    ):
+        if source in DIRECT_OFFICIAL_SOURCES:
+            return VERIFIED_KEY_SOURCE_DIRECT_ATS_SOURCE
+
+        if not is_aggregator_job(job):
+            return VERIFIED_KEY_SOURCE_DIRECT_ATS_SOURCE
+
+    return ""
 
 
 def direct_source_url_verified_key(
@@ -730,6 +864,10 @@ def reuse_verified_description(
         description
     )
     job["verified_posting_key"] = candidate.get("verified_posting_key")
+    job["verified_posting_key_source"] = VERIFIED_KEY_SOURCE_VERIFIED_REUSE
+    job["verified_posting_key_verified_at"] = now
+    job["verified_posting_key_confidence"] = float(validation.confidence)
+    job["verified_posting_key_trust"] = VERIFIED_KEY_TRUST_TRUSTED
     job["description_hash"] = (
         candidate.get("description_hash")
         or description_hash(description)
@@ -1031,6 +1169,10 @@ def load_jobs_to_enrich(
         attempts.official_resolved_company,
         attempts.official_resolved_location,
         attempts.verified_posting_key,
+        attempts.verified_posting_key_source,
+        attempts.verified_posting_key_verified_at,
+        attempts.verified_posting_key_confidence,
+        attempts.verified_posting_key_trust,
         attempts.description_hash,
         attempts.description_source,
         attempts.posting_status,
@@ -1372,6 +1514,131 @@ def process_enrichment_batch(
     )
 
 
+def _official_resolution_verified_key_metadata(
+    official_resolution: OfficialJobResolutionResult | None,
+) -> tuple[str | None, str | None, float | None, datetime | None]:
+    if (
+        not official_resolution
+        or official_resolution.status != OFFICIAL_FOUND_VERIFIED
+        or not official_resolution.official_job_url
+    ):
+        return None, None, None, None
+
+    key = verified_posting_key_from_url(
+        official_resolution.official_job_url
+    )
+
+    if not key:
+        return None, None, None, None
+
+    source = VERIFIED_KEY_SOURCE_OFFICIAL_FOUND_VERIFIED
+    if str(official_resolution.official_url_source or "") == "source_redirect":
+        source = VERIFIED_KEY_SOURCE_SOURCE_REDIRECT_VERIFIED
+
+    return (
+        key,
+        source,
+        official_resolution.official_url_confidence,
+        official_resolution.official_url_resolved_at,
+    )
+
+
+def _direct_source_verified_key_metadata(
+    job: dict[str, Any],
+) -> tuple[str | None, str | None, float | None, datetime | None]:
+    source = direct_source_verified_key_source(job)
+
+    if not source:
+        return None, None, None, None
+
+    key = direct_source_url_verified_key(job)
+
+    if not key:
+        return None, None, None, None
+
+    return (
+        key,
+        source,
+        1.0,
+        datetime.now(timezone.utc),
+    )
+
+
+def _accepted_result_verified_key_metadata(
+    result: JobDescriptionResult,
+    final_status: str,
+    identity_validation: JobIdentityValidation | None,
+) -> tuple[str | None, str | None, float | None, datetime | None]:
+    if (
+        final_status != "enriched"
+        or not result.final_url
+        or not is_known_official_or_ats_url(result.final_url)
+    ):
+        return None, None, None, None
+
+    if identity_validation is None or not identity_validation.accepted:
+        return None, None, None, None
+
+    key = verified_posting_key_from_url(result.final_url)
+
+    if not key:
+        return None, None, None, None
+
+    return (
+        key,
+        VERIFIED_KEY_SOURCE_ACCEPTED_DIRECT_CANDIDATE,
+        identity_validation.confidence,
+        datetime.now(timezone.utc),
+    )
+
+
+def verified_key_metadata_for_save(
+    job: dict[str, Any],
+    result: JobDescriptionResult,
+    final_status: str,
+    identity_validation: JobIdentityValidation | None,
+    official_resolution: OfficialJobResolutionResult | None,
+) -> tuple[str | None, str | None, datetime | None, float | None, str | None]:
+    """Return trusted key metadata that is safe to persist for reuse."""
+    stored_key = str(job.get("verified_posting_key") or "").strip()
+    evidence_candidates = (
+        _official_resolution_verified_key_metadata(official_resolution),
+        _direct_source_verified_key_metadata(job),
+        _accepted_result_verified_key_metadata(
+            result=result,
+            final_status=final_status,
+            identity_validation=identity_validation,
+        ),
+    )
+
+    for key, source, confidence, verified_at in evidence_candidates:
+        compatible_key = _compatible_verified_key(
+            stored_key,
+            str(key or ""),
+        )
+
+        if compatible_key and source:
+            return (
+                compatible_key,
+                source,
+                verified_at or datetime.now(timezone.utc),
+                confidence,
+                VERIFIED_KEY_TRUST_TRUSTED,
+            )
+
+    if stored_key and stored_verified_key_is_trusted(job):
+        return (
+            stored_key,
+            str(job.get("verified_posting_key_source") or "").strip(),
+            as_utc_datetime(job.get("verified_posting_key_verified_at"))
+            or datetime.now(timezone.utc),
+            job.get("verified_posting_key_confidence"),
+            VERIFIED_KEY_TRUST_TRUSTED,
+        )
+
+    return None, None, None, None, None
+
+
 def save_enrichment_attempt(
     job: dict[str, Any],
     result: JobDescriptionResult,
@@ -1392,29 +1659,18 @@ def save_enrichment_attempt(
         else result.error_message
     )
 
-    verified_url = ""
-
-    if (
-        official_resolution
-        and official_resolution.status == OFFICIAL_FOUND_VERIFIED
-        and official_resolution.official_job_url
-    ):
-        verified_url = official_resolution.official_job_url
-    elif (
-        final_status == "enriched"
-        and result.final_url
-        and is_known_official_or_ats_url(result.final_url)
-        and (
-            identity_validation is None
-            or identity_validation.accepted
-        )
-    ):
-        verified_url = result.final_url
-
-    verified_posting_key = (
-        job.get("verified_posting_key")
-        or verified_posting_key_from_url(verified_url)
-        or None
+    (
+        verified_posting_key,
+        verified_posting_key_source,
+        verified_posting_key_verified_at,
+        verified_posting_key_confidence,
+        verified_posting_key_trust,
+    ) = verified_key_metadata_for_save(
+        job=job,
+        result=result,
+        final_status=final_status,
+        identity_validation=identity_validation,
+        official_resolution=official_resolution,
     )
     stored_description_hash = (
         job.get("description_hash")
@@ -1471,6 +1727,10 @@ def save_enrichment_attempt(
                 official_resolved_company,
                 official_resolved_location,
                 verified_posting_key,
+                verified_posting_key_source,
+                verified_posting_key_verified_at,
+                verified_posting_key_confidence,
+                verified_posting_key_trust,
                 description_hash,
                 description_source,
                 posting_status,
@@ -1482,10 +1742,12 @@ def save_enrichment_attempt(
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?,
                 CURRENT_TIMESTAMP
             )
             """,
@@ -1568,6 +1830,10 @@ def save_enrichment_attempt(
                     else None
                 ),
                 verified_posting_key,
+                verified_posting_key_source,
+                verified_posting_key_verified_at,
+                verified_posting_key_confidence,
+                verified_posting_key_trust,
                 stored_description_hash,
                 description_source,
                 posting_status,

@@ -65,6 +65,30 @@ KNOWN_OFFICIAL_HOST_MARKERS = (
     "workdayjobs.com",
 )
 
+VERIFIED_KEY_TRUST_TRUSTED = "trusted"
+VERIFIED_KEY_TRUST_UNTRUSTED = "untrusted"
+VERIFIED_KEY_TRUST_CONFLICT = "conflict"
+
+VERIFIED_KEY_SOURCE_OFFICIAL_FOUND_VERIFIED = "official_found_verified"
+VERIFIED_KEY_SOURCE_DIRECT_ATS_SOURCE = "direct_ats_source"
+VERIFIED_KEY_SOURCE_SOURCE_REDIRECT_VERIFIED = "source_redirect_verified"
+VERIFIED_KEY_SOURCE_EMBEDDED_OFFICIAL_DESTINATION = (
+    "embedded_official_destination"
+)
+VERIFIED_KEY_SOURCE_ACCEPTED_DIRECT_CANDIDATE = "accepted_direct_candidate"
+VERIFIED_KEY_SOURCE_EXPLICIT_REQUISITION_ID = "explicit_requisition_id"
+VERIFIED_KEY_SOURCE_VERIFIED_REUSE = "verified_reuse"
+
+TRUSTED_VERIFIED_KEY_SOURCES = {
+    VERIFIED_KEY_SOURCE_OFFICIAL_FOUND_VERIFIED,
+    VERIFIED_KEY_SOURCE_DIRECT_ATS_SOURCE,
+    VERIFIED_KEY_SOURCE_SOURCE_REDIRECT_VERIFIED,
+    VERIFIED_KEY_SOURCE_EMBEDDED_OFFICIAL_DESTINATION,
+    VERIFIED_KEY_SOURCE_ACCEPTED_DIRECT_CANDIDATE,
+    VERIFIED_KEY_SOURCE_EXPLICIT_REQUISITION_ID,
+    VERIFIED_KEY_SOURCE_VERIFIED_REUSE,
+}
+
 TITLE_REPLACEMENTS = (
     (r"\bsr\.?\b", "senior"),
     (r"\bjr\.?\b", "junior"),
@@ -82,6 +106,28 @@ COMPANY_SUFFIXES = {
     "llc",
     "ltd",
 }
+
+
+def normalize_verified_key_source(value: object) -> str:
+    """Normalize a stored verified-key provenance label."""
+    return str(value or "").strip().casefold()
+
+
+def normalize_verified_key_trust(value: object) -> str:
+    """Normalize a stored verified-key trust state."""
+    return str(value or "").strip().casefold()
+
+
+def verified_key_metadata_is_trusted(
+    source: object,
+    trust: object,
+) -> bool:
+    """Return true only for explicitly trusted provenance metadata."""
+    return (
+        normalize_verified_key_trust(trust) == VERIFIED_KEY_TRUST_TRUSTED
+        and normalize_verified_key_source(source)
+        in TRUSTED_VERIFIED_KEY_SOURCES
+    )
 
 
 def normalize_verified_source(value: object) -> str:
@@ -207,6 +253,69 @@ def _path_match(pattern: str, url: str) -> str:
     return match.group(1) if match else ""
 
 
+def is_specific_job_posting_url(value: str | None) -> bool:
+    """Return true only when a URL appears to identify one posting."""
+    normalized_url = normalize_official_url(value)
+
+    if not normalized_url:
+        return False
+
+    parsed = urlsplit(normalized_url)
+    hostname = (parsed.hostname or "").casefold()
+    path = parsed.path or "/"
+    query = {
+        key.casefold(): query_value
+        for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
+        if query_value
+    }
+
+    if any(query.get(key) for key in JOB_ID_QUERY_PARAMETERS):
+        return True
+
+    if "greenhouse.io" in hostname:
+        return bool(re.search(r"/jobs/[0-9]+(?:/|$)", path))
+
+    if "lever.co" in hostname:
+        path_parts = [part for part in path.split("/") if part]
+        return len(path_parts) >= 2
+
+    if "ashbyhq.com" in hostname:
+        return bool(re.search(r"/(?:job|jobs)/[^/]+(?:/|$)", path))
+
+    if "smartrecruiters.com" in hostname:
+        path_parts = [part for part in path.split("/") if part]
+        return len(path_parts) >= 2
+
+    if "icims.com" in hostname:
+        return bool(re.search(r"/jobs/[0-9]+(?:/|$)", path))
+
+    if "workday" in hostname or "myworkdayjobs.com" in hostname:
+        return bool(re.search(r"/(?:job|jobs)/[^/]+/[^/]+(?:/|$)", path))
+
+    generic_paths = {
+        "",
+        "/",
+        "/career",
+        "/careers",
+        "/careers/jobs",
+        "/job",
+        "/jobs",
+        "/openings",
+    }
+
+    if path.casefold().rstrip("/") in generic_paths:
+        return False
+
+    path_parts = [part for part in path.split("/") if part]
+    if len(path_parts) < 2:
+        return False
+
+    return bool(
+        re.search(r"[0-9]", path_parts[-1])
+        or re.search(r"\b(req|job|jr|id)[-_]?[0-9a-z]+", path_parts[-1], re.I)
+    )
+
+
 def verified_posting_key_from_url(value: str | None) -> str:
     """Create a source-independent key from verified official URL evidence."""
     normalized_url = normalize_official_url(value)
@@ -228,17 +337,17 @@ def verified_posting_key_from_url(value: str | None) -> str:
 
     if "lever.co" in hostname:
         job_id = _path_match(r"/([^/?#]+)$", normalized_url)
-        if job_id:
+        if job_id and is_specific_job_posting_url(normalized_url):
             return f"lever:{job_id}"
 
     if "ashbyhq.com" in hostname:
-        job_id = _path_match(r"/(?:job/)?([^/?#]+)$", normalized_url)
+        job_id = _path_match(r"/(?:job|jobs)/([^/?#]+)$", normalized_url)
         if job_id:
             return f"ashby:{job_id}"
 
     if "smartrecruiters.com" in hostname:
         job_id = _path_match(r"/(?:[^/?#]+/)?([^/?#]+)$", normalized_url)
-        if job_id:
+        if job_id and is_specific_job_posting_url(normalized_url):
             return f"smartrecruiters:{job_id}"
 
     if "icims.com" in hostname:
@@ -258,6 +367,9 @@ def verified_posting_key_from_url(value: str | None) -> str:
     for key in JOB_ID_QUERY_PARAMETERS:
         if query.get(key):
             return f"{hostname}:{key}:{query[key]}"
+
+    if not is_specific_job_posting_url(normalized_url):
+        return ""
 
     return f"official-url:{normalized_url}"
 

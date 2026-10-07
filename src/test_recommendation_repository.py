@@ -35,7 +35,11 @@ from src.job_title_filter import (
     excluded_job_title_reason,
     is_excluded_job_title,
 )
-from src.verified_posting_identity import description_hash
+from src.verified_posting_identity import (
+    VERIFIED_KEY_SOURCE_OFFICIAL_FOUND_VERIFIED,
+    VERIFIED_KEY_TRUST_TRUSTED,
+    description_hash,
+)
 
 
 def seed_job(
@@ -344,8 +348,25 @@ def seed_verified_attempt(
     matched_prior_record_key: str | None = None,
     matched_prior_source: str | None = None,
     reused_description: bool = False,
+    trusted_verified_key: bool = True,
 ) -> None:
     initialize_job_eligibility_table()
+    verified_key_source = (
+        VERIFIED_KEY_SOURCE_OFFICIAL_FOUND_VERIFIED
+        if verified_posting_key and trusted_verified_key
+        else None
+    )
+    verified_key_verified_at = (
+        datetime.now(timezone.utc)
+        if verified_key_source
+        else None
+    )
+    verified_key_confidence = 1.0 if verified_key_source else None
+    verified_key_trust = (
+        VERIFIED_KEY_TRUST_TRUSTED
+        if verified_key_source
+        else None
+    )
 
     with database.get_connection() as connection:
         connection.execute(
@@ -369,6 +390,10 @@ def seed_verified_attempt(
                 official_resolved_company,
                 official_resolved_location,
                 verified_posting_key,
+                verified_posting_key_source,
+                verified_posting_key_verified_at,
+                verified_posting_key_confidence,
+                verified_posting_key_trust,
                 description_hash,
                 description_source,
                 posting_status,
@@ -382,7 +407,7 @@ def seed_verified_attempt(
                 ?, NULL, ?, 'FOUND_VERIFIED', 'greenhouse', 1.0,
                 'identity accepted', 'Senior Data Engineer',
                 'Robots and Pencils', 'Remote only, United States',
-                ?, ?, 'official', 'unknown', ?, ?, ?, 1
+                ?, ?, ?, ?, ?, ?, 'official', 'unknown', ?, ?, ?, 1
             )
             """,
             [
@@ -393,6 +418,10 @@ def seed_verified_attempt(
                 len((description or "").split()),
                 official_job_url,
                 verified_posting_key,
+                verified_key_source,
+                verified_key_verified_at,
+                verified_key_confidence,
+                verified_key_trust,
                 description_hash_value
                 or description_hash(description),
                 matched_prior_record_key,
@@ -1263,6 +1292,172 @@ def test_verified_score_reuse_requires_same_description_hash() -> None:
             "verified_posting"
         )
         assert jobs["wellfound-changed"]["ai_score"] is None
+
+    with_temp_review_database(scenario)
+
+
+def test_untrusted_verified_key_does_not_share_status() -> None:
+    def scenario() -> None:
+        seed_resume_profile()
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+        verified_key = "greenhouse:123"
+        official_url = "https://boards.greenhouse.io/example/jobs/123"
+
+        seed_review_job(
+            record_key="legacy-linkedin",
+            title="Senior Data Engineer",
+            source="linkedin",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+            application_status="applied",
+        )
+        seed_review_job(
+            record_key="legacy-wellfound",
+            title="Sr. Data Engineer",
+            source="wellfound",
+            description=full_description,
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=222-sr-data-engineer"
+            ),
+        )
+        seed_verified_attempt(
+            record_key="legacy-linkedin",
+            source="linkedin",
+            verified_posting_key=verified_key,
+            official_job_url=official_url,
+            description=full_description,
+            trusted_verified_key=False,
+        )
+        seed_verified_attempt(
+            record_key="legacy-wellfound",
+            source="wellfound",
+            verified_posting_key=verified_key,
+            official_job_url=official_url,
+            description=full_description,
+            trusted_verified_key=False,
+        )
+
+        jobs = {
+            job["record_key"]: job
+            for job in load_all_jobs(resume_hash="resume-1")
+        }
+
+        assert jobs["legacy-linkedin"]["application_status"] == "applied"
+        assert jobs["legacy-wellfound"]["application_status"] == "new"
+
+    with_temp_review_database(scenario)
+
+
+def test_untrusted_verified_key_does_not_reuse_ai_score() -> None:
+    def scenario() -> None:
+        seed_resume_profile()
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+        verified_key = "greenhouse:123"
+        official_url = "https://boards.greenhouse.io/example/jobs/123"
+
+        seed_review_job(
+            record_key="legacy-linkedin",
+            title="Senior Data Engineer",
+            source="linkedin",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+        )
+        seed_review_job(
+            record_key="legacy-wellfound",
+            title="Sr. Data Engineer",
+            source="wellfound",
+            description=full_description,
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=222-sr-data-engineer"
+            ),
+        )
+        seed_verified_attempt(
+            record_key="legacy-linkedin",
+            source="linkedin",
+            verified_posting_key=verified_key,
+            official_job_url=official_url,
+            description=full_description,
+            trusted_verified_key=False,
+        )
+        seed_verified_attempt(
+            record_key="legacy-wellfound",
+            source="wellfound",
+            verified_posting_key=verified_key,
+            official_job_url=official_url,
+            description=full_description,
+            trusted_verified_key=False,
+        )
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO resume_job_scores (
+                    resume_hash,
+                    record_key,
+                    overall_score,
+                    recommendation,
+                    title_fit,
+                    skills_fit,
+                    experience_fit,
+                    seniority_fit,
+                    industry_fit,
+                    location_fit,
+                    confidence,
+                    matching_strengths,
+                    hard_requirements_missing,
+                    preferred_qualifications_missing,
+                    risk_factors,
+                    summary,
+                    description_word_count,
+                    description_complete,
+                    model_name,
+                    prompt_version
+                )
+                VALUES (
+                    'resume-1',
+                    'legacy-linkedin',
+                    91,
+                    'apply',
+                    90,
+                    92,
+                    91,
+                    90,
+                    80,
+                    100,
+                    'high',
+                    '[]',
+                    '[]',
+                    '[]',
+                    '[]',
+                    'Strong fit.',
+                    120,
+                    true,
+                    'model-1',
+                    ?
+                )
+                """,
+                [MATCHER_PROMPT_VERSION],
+            )
+
+        jobs = {
+            job["record_key"]: job
+            for job in load_all_jobs(resume_hash="resume-1")
+        }
+
+        assert "legacy-linkedin" in jobs
+        assert jobs["legacy-wellfound"]["ai_score"] is None
 
     with_temp_review_database(scenario)
 
@@ -2317,6 +2512,8 @@ def main() -> None:
     test_verified_posting_key_shares_applied_status_across_sources()
     test_verified_posting_key_shares_removed_status_across_sources()
     test_verified_score_reuse_requires_same_description_hash()
+    test_untrusted_verified_key_does_not_share_status()
+    test_untrusted_verified_key_does_not_reuse_ai_score()
     test_different_verified_keys_do_not_share_status_or_score()
     test_different_verified_keys_do_not_share_removed_status()
     test_unscreened_eligibility_candidates_skip_hard_gaps_and_aggregators()

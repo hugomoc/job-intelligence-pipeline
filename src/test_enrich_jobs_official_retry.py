@@ -31,7 +31,11 @@ from src.enrichment.official_job_resolver import (
 from src.enrichment.job_identity import JobIdentityValidation
 from src.ui.job_links import select_job_open_target
 from src.ui.daily_workflow_service import automatic_enrichment_limit
-from src.verified_posting_identity import description_hash
+from src.verified_posting_identity import (
+    VERIFIED_KEY_SOURCE_OFFICIAL_FOUND_VERIFIED,
+    VERIFIED_KEY_TRUST_TRUSTED,
+    description_hash,
+)
 
 
 LENSA_MONZO_URL = (
@@ -200,8 +204,19 @@ def insert_attempt(
     official_resolved_title: str | None = None,
     official_resolved_company: str | None = None,
     official_resolved_location: str | None = None,
+    trusted_verified_key: bool = True,
 ) -> None:
     timestamp = attempted_at or datetime.now(timezone.utc)
+    verified_key_source = (
+        VERIFIED_KEY_SOURCE_OFFICIAL_FOUND_VERIFIED
+        if verified_posting_key and trusted_verified_key
+        else None
+    )
+    verified_key_trust = (
+        VERIFIED_KEY_TRUST_TRUSTED
+        if verified_posting_key and trusted_verified_key
+        else None
+    )
 
     with database.get_connection() as connection:
         connection.execute(
@@ -226,9 +241,17 @@ def insert_attempt(
                 official_resolved_company,
                 official_resolved_location,
                 verified_posting_key,
+                verified_posting_key_source,
+                verified_posting_key_verified_at,
+                verified_posting_key_confidence,
+                verified_posting_key_trust,
                 description_hash
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?
+            )
             """,
             [
                 record_key,
@@ -250,6 +273,10 @@ def insert_attempt(
                 official_resolved_company,
                 official_resolved_location,
                 verified_posting_key,
+                verified_key_source,
+                timestamp if verified_key_source else None,
+                1.0 if verified_key_source else None,
+                verified_key_trust,
                 description_hash_value,
             ],
         )
@@ -1844,6 +1871,54 @@ def test_authoritative_key_requires_verified_official_status() -> None:
         ) == ""
 
 
+def test_trusted_stored_key_is_authoritative() -> None:
+    assert authoritative_verified_key_for_job(
+        {
+            "verified_posting_key": "greenhouse:123",
+            "verified_posting_key_source": (
+                VERIFIED_KEY_SOURCE_OFFICIAL_FOUND_VERIFIED
+            ),
+            "verified_posting_key_trust": VERIFIED_KEY_TRUST_TRUSTED,
+            "official_job_url": (
+                "https://boards.greenhouse.io/example/jobs/123"
+            ),
+            "official_url_status": OFFICIAL_FOUND_VERIFIED,
+        }
+    ) == "greenhouse:123"
+
+
+def test_legacy_stored_key_without_evidence_is_not_authoritative() -> None:
+    assert authoritative_verified_key_for_job(
+        {
+            "verified_posting_key": "greenhouse:123",
+        }
+    ) == ""
+
+
+def test_legacy_stored_key_can_be_reestablished_from_official_evidence() -> None:
+    assert authoritative_verified_key_for_job(
+        {
+            "verified_posting_key": "greenhouse:123",
+            "official_job_url": (
+                "https://boards.greenhouse.io/example/jobs/123"
+            ),
+            "official_url_status": OFFICIAL_FOUND_VERIFIED,
+        }
+    ) == "greenhouse:123"
+
+
+def test_conflicting_legacy_key_is_not_authoritative() -> None:
+    assert authoritative_verified_key_for_job(
+        {
+            "verified_posting_key": "greenhouse:111",
+            "official_job_url": (
+                "https://boards.greenhouse.io/example/jobs/222"
+            ),
+            "official_url_status": OFFICIAL_FOUND_VERIFIED,
+        }
+    ) == ""
+
+
 def test_authoritative_key_requires_accepted_resolved_candidate() -> None:
     official_url = "https://boards.greenhouse.io/example/jobs/111"
 
@@ -1854,6 +1929,13 @@ def test_authoritative_key_requires_accepted_resolved_candidate() -> None:
             "identity_confidence": 0.91,
         }
     ) == "greenhouse:111"
+    assert authoritative_verified_key_for_job(
+        {
+            "resolved_candidate_url": official_url,
+            "previous_status": "enriched",
+            "identity_confidence": None,
+        }
+    ) == ""
     assert authoritative_verified_key_for_job(
         {
             "resolved_candidate_url": official_url,
@@ -1870,6 +1952,85 @@ def test_direct_ats_source_apply_url_is_authoritative() -> None:
             "apply_url": "https://boards.greenhouse.io/example/jobs/111",
         }
     ) == "greenhouse:111"
+
+
+def test_legacy_untrusted_key_does_not_seed_offline_reuse() -> None:
+    def scenario() -> None:
+        verified_key = "greenhouse:123"
+        official_url = "https://boards.greenhouse.io/example/jobs/123"
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+
+        insert_raw_job(
+            "legacy-linkedin",
+            source="linkedin",
+            title="Senior Data Engineer",
+            company_name="Example Co",
+            location="Remote US",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+        )
+        insert_attempt(
+            "legacy-linkedin",
+            source="linkedin",
+            status="enriched",
+            official_status=OFFICIAL_FOUND_VERIFIED,
+            official_url=official_url,
+            verified_posting_key=verified_key,
+            description_hash_value=description_hash(full_description),
+            official_resolved_title="Senior Data Engineer",
+            official_resolved_company="Example Co",
+            official_resolved_location="Remote US",
+            trusted_verified_key=False,
+        )
+        insert_raw_job(
+            "direct-greenhouse",
+            source="greenhouse",
+            title="Senior Data Engineer",
+            company_name="Example Co",
+            location="Remote US",
+            description="short alert summary",
+            apply_url=official_url,
+        )
+
+        jobs = load_jobs_to_enrich(
+            limit=100,
+            minimum_words=80,
+            source=None,
+            retry_failed=False,
+            force=False,
+        )
+
+        assert "direct-greenhouse" in {
+            job["record_key"]
+            for job in jobs
+        }
+
+        with database.get_connection() as connection:
+            raw = connection.execute(
+                """
+                SELECT description
+                FROM raw_jobs
+                WHERE record_key = 'direct-greenhouse'
+                """
+            ).fetchone()
+            attempt = connection.execute(
+                """
+                SELECT verified_posting_key
+                FROM job_enrichment_attempts
+                WHERE record_key = 'direct-greenhouse'
+                """
+            ).fetchone()
+
+        assert raw is not None
+        assert raw[0] == "short alert summary"
+        assert attempt is None
+
+    with_temp_database(scenario)
 
 
 def main() -> None:
@@ -1906,8 +2067,13 @@ def main() -> None:
     test_source_redirect_to_same_key_verifies_known_candidate()
     test_source_redirect_to_different_key_overrides_fuzzy_candidate()
     test_authoritative_key_requires_verified_official_status()
+    test_trusted_stored_key_is_authoritative()
+    test_legacy_stored_key_without_evidence_is_not_authoritative()
+    test_legacy_stored_key_can_be_reestablished_from_official_evidence()
+    test_conflicting_legacy_key_is_not_authoritative()
     test_authoritative_key_requires_accepted_resolved_candidate()
     test_direct_ats_source_apply_url_is_authoritative()
+    test_legacy_untrusted_key_does_not_seed_offline_reuse()
     print("Official enrichment retry tests passed.")
 
 
