@@ -32,6 +32,14 @@ from src.ui.job_recommendation_service import (
 )
 from src.ui.job_links import select_job_open_target
 from src.ui.job_pipeline_state import derive_job_pipeline_state
+from src.ui.job_visibility import (
+    REVIEW_BUCKET_LOW_FIT,
+    REVIEW_BUCKET_NEEDS_REVIEW,
+    REVIEW_BUCKET_RECOMMENDED,
+    REVIEW_FILTER_OPTIONS,
+    count_job_review_buckets,
+    filter_jobs_by_review_filter,
+)
 from src.ui.pagination import PAGE_SIZE_OPTIONS, paginate_items
 
 
@@ -852,9 +860,21 @@ with jobs_tab:
             ],
         )
 
-    extra_filter_cols = st.columns([2, 2, 2])
+    extra_filter_cols = st.columns([1.4, 2, 2, 2])
 
     with extra_filter_cols[0]:
+        review_visibility_filter = st.selectbox(
+            "Review view",
+            options=list(REVIEW_FILTER_OPTIONS),
+            index=0,
+            help=(
+                "Recommended hides completed high-confidence low-fit jobs. "
+                "All keeps every reviewable job. Low fit shows the hidden "
+                "completed AI rejections."
+            ),
+        )
+
+    with extra_filter_cols[1]:
         recommendation_filter = st.selectbox(
             "Recommendation",
             options=[
@@ -866,13 +886,13 @@ with jobs_tab:
             ],
         )
 
-    with extra_filter_cols[1]:
+    with extra_filter_cols[2]:
         fit_priority_filter = st.selectbox(
             "Fit / priority",
             options=FIT_PRIORITY_OPTIONS,
         )
 
-    with extra_filter_cols[2]:
+    with extra_filter_cols[3]:
         description_state_filter = st.selectbox(
             "Description",
             options=[
@@ -996,6 +1016,15 @@ with jobs_tab:
         in selected_title_categories
     ]
 
+    pre_review_visibility_jobs = filtered_jobs
+    review_bucket_counts = count_job_review_buckets(
+        pre_review_visibility_jobs
+    )
+    filtered_jobs = filter_jobs_by_review_filter(
+        pre_review_visibility_jobs,
+        review_visibility_filter,
+    )
+
     visible_applied_count = sum(
         1
         for job in all_jobs
@@ -1044,6 +1073,7 @@ with jobs_tab:
         start_date.isoformat() if start_date else None,
         end_date.isoformat() if end_date else None,
         scored_filter,
+        review_visibility_filter,
         recommendation_filter,
         fit_priority_filter,
         description_state_filter,
@@ -1124,6 +1154,10 @@ with jobs_tab:
         f"{page.total_items} jobs match filters. "
         f"{page_range_label}. {page_label}. "
         f"{len(all_jobs)} total reviewable jobs. "
+        f"Review buckets before Review view filter: "
+        f"Recommended {review_bucket_counts[REVIEW_BUCKET_RECOMMENDED]}, "
+        f"Needs review {review_bucket_counts[REVIEW_BUCKET_NEEDS_REVIEW]}, "
+        f"Low fit {review_bucket_counts[REVIEW_BUCKET_LOW_FIT]}. "
         f"AI-scored: {ai_scored_count}. "
         f"Needs enrichment: {needs_enrichment_count}. "
         f"Full JD: {full_jd_count}. Partial JD: {partial_jd_count}. "

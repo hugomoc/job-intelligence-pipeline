@@ -28,7 +28,10 @@ from src.job_title_filter import (
     EXCLUDED_TITLE_SQL_REGEX,
     classify_job_title,
 )
-from src.ui.job_visibility import filter_user_reviewable_jobs
+from src.ui.job_visibility import (
+    classify_job_review_bucket,
+    filter_user_reviewable_jobs,
+)
 from src.verified_posting_identity import (
     TRUSTED_VERIFIED_KEY_SOURCES,
     VERIFIED_KEY_TRUST_TRUSTED,
@@ -1962,10 +1965,15 @@ def load_all_jobs(
     )
 
     for job in jobs:
+        job["has_current_complete_ai_assessment"] = (
+            has_current_complete_ai_score(job)
+        )
+
         priority = derive_fit_priority(job)
         job["fit_priority_label"] = priority.label
         job["fit_priority_source"] = priority.source
         job["fit_priority_reason"] = priority.reason
+        job["job_review_bucket"] = classify_job_review_bucket(job)
 
         enrichment_priority = calculate_enrichment_priority(job)
         job["enrichment_priority_score"] = enrichment_priority.score
