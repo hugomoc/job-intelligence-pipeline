@@ -4,6 +4,8 @@ The location checks run offline. The mailbox inspection at the end is skipped
 when Yahoo credentials are unavailable.
 """
 
+import os
+
 from src.connectors.yahoo_imap import read_messages
 from src.parsers.indeed import LOCATION_PATTERN, parse_indeed_email
 
@@ -144,7 +146,12 @@ def inspect_mailbox() -> None:
 def main() -> None:
     check_location_pattern()
     check_sample_email()
-    inspect_mailbox()
+
+    if os.getenv("RUN_LIVE_EMAIL_TESTS") == "1":
+        inspect_mailbox()
+        return
+
+    print("Skipping live Yahoo mailbox inspection.")
 
 
 if __name__ == "__main__":

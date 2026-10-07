@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: .
+      PYTHONDONTWRITEBYTECODE: "1"
+      RUN_LIVE_EMAIL_TESTS: "0"
+      JOB_INTELLIGENCE_DB_PATH: ${{ runner.temp }}/jobs.duckdb
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Compile Python files
+        run: python -m compileall -q src scripts streamlit_app.py
+
+      - name: Run deterministic offline tests
+        run: python scripts/run_ci_tests.py
+
+      - name: Parse dbt project
+        working-directory: job_intelligence_dbt
+        env:
+          DBT_PROFILES_DIR: .
+          JOB_INTELLIGENCE_DB_PATH: ${{ runner.temp }}/jobs.duckdb
+        run: dbt parse

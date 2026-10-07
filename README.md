@@ -1,5 +1,7 @@
 # Job Intelligence Pipeline
 
+[![CI](https://github.com/hugomoc/job-intelligence-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/hugomoc/job-intelligence-pipeline/actions/workflows/ci.yml)
+
 AI-powered job intelligence pipeline that ingests job-alert emails, enriches job postings, scores resume fit, and serves recommendations through Streamlit and dbt analytics.
 
 This project is designed as a daily job-search cockpit: open the UI, ingest new job-alert emails, enrich descriptions when possible, AI-score unscored jobs, review ranked opportunities, and track whether each job is new, applied, or removed.
@@ -221,10 +223,19 @@ full description unless `--verbose` is passed.
 
 ## Tests and Checks
 
+GitHub Actions runs the deterministic offline test suite on pushes and pull
+requests to `main`.
+
 Compile Python files:
 
 ```bash
-python -m compileall src streamlit_app.py
+python -m compileall -q src scripts streamlit_app.py
+```
+
+Run the same offline CI test list locally:
+
+```bash
+python scripts/run_ci_tests.py
 ```
 
 Run dbt validation:

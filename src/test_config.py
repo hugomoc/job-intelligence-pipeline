@@ -7,9 +7,13 @@ def main() -> None:
 
     print("Enabled sources:")
     for source in sources:
+        assert source.get("source_id")
+        assert source.get("source_name")
+        assert source.get("mailbox_folder")
+
         print(
             f"- {source['source_name']} "
-            f"({source['ingestion_method']})"
+            f"({source['mailbox_folder']})"
         )
 
     print("\nDefaults:")

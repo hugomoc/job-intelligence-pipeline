@@ -1,3 +1,5 @@
+import os
+
 from src.connectors.yahoo_imap import read_messages
 from src.parsers.glassdoor import parse_glassdoor_email
 
@@ -84,6 +86,14 @@ Review 9 new matches
 
 
 def main() -> None:
+    test_parse_glassdoor_email_with_extra_job_link()
+    test_parse_glassdoor_super_match_email()
+
+    if os.getenv("RUN_LIVE_EMAIL_TESTS") != "1":
+        print("Glassdoor parser offline tests passed.")
+        print("Skipping live Yahoo mailbox inspection.")
+        return
+
     messages = read_messages(
         folder_name=GLASSDOOR_FOLDER,
         limit=1,
