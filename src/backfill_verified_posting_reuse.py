@@ -1,9 +1,9 @@
-"""Backfill verified cross-source reuse without external network calls.
+"""Backfill strictly verified cross-source reuse without network calls.
 
-This command intentionally does not run source fetches, official search, or AI
-scoring. It invokes the enrichment loader's Stage 1 local reuse so existing
-records can copy verified descriptions from historical duplicates when the same
-verified_posting_key can be assigned safely.
+Offline backfill is intentionally conservative. It reuses descriptions only
+when the unresolved record already carries authoritative official evidence,
+such as the same verified_posting_key or the same official ATS URL. Fuzzy
+title/company/location matches are reported as needing online verification.
 """
 
 from __future__ import annotations
@@ -75,11 +75,30 @@ def main() -> None:
         resume_hash=args.resume_hash,
     )
     after = reused_description_count()
+    ambiguous = sum(
+        1
+        for job in queue_jobs
+        if job.get("known_official_candidate_status") == "ambiguous"
+    )
+    requires_online_verification = sum(
+        1
+        for job in queue_jobs
+        if job.get("known_official_candidate_status")
+        == "single_candidate_needs_verification"
+    )
+    candidates_found = ambiguous + requires_online_verification
 
-    print("Verified local reuse backfill complete.")
+    print("Strict verified local reuse backfill complete.")
     print(f"Descriptions reused before: {before}")
     print(f"Descriptions reused after: {after}")
-    print(f"New descriptions reused: {after - before}")
+    print(f"Verified offline: {after - before}")
+    print(f"Candidates found: {candidates_found}")
+    print(f"Ambiguous candidates: {ambiguous}")
+    print(
+        "Requires online verification: "
+        f"{requires_online_verification}"
+    )
+    print(f"Reused successfully: {after - before}")
     print(f"Remaining external enrichment candidates: {len(queue_jobs)}")
 
 

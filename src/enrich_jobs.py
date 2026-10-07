@@ -452,11 +452,38 @@ def load_verified_reuse_candidates(
     ]
 
 
-def find_verified_reuse_candidate(
+def authoritative_verified_key_for_job(
+    job: dict[str, Any],
+) -> str:
+    """Return verified identity from source-independent evidence only."""
+    explicit_key = str(job.get("verified_posting_key") or "").strip()
+
+    if explicit_key:
+        return explicit_key
+
+    for url_field in (
+        "official_job_url",
+        "resolved_candidate_url",
+        "apply_url",
+    ):
+        value = str(job.get(url_field) or "").strip()
+
+        if not value or not is_known_official_or_ats_url(value):
+            continue
+
+        key = verified_posting_key_from_url(value)
+
+        if key:
+            return key
+
+    return ""
+
+
+def find_known_official_candidates(
     job: dict[str, Any],
     candidates: list[dict[str, Any]],
-) -> tuple[dict[str, Any], JobIdentityValidation] | None:
-    """Find a verified historical posting that safely matches this job."""
+) -> list[dict[str, Any]]:
+    """Find fuzzy candidate openings that still require verification."""
     job_candidate_key = candidate_duplicate_fingerprint(
         str(job.get("title") or ""),
         str(job.get("company_name") or ""),
@@ -464,8 +491,9 @@ def find_verified_reuse_candidate(
     )
 
     if not job_candidate_key.strip("|"):
-        return None
+        return []
 
+    matches: list[dict[str, Any]] = []
     for candidate in candidates:
         if candidate.get("record_key") == job.get("record_key"):
             continue
@@ -479,31 +507,79 @@ def find_verified_reuse_candidate(
         if candidate_key != job_candidate_key:
             continue
 
-        validation = validate_job_identity(
-            original_title=str(job.get("title") or ""),
-            original_company=str(job.get("company_name") or ""),
-            resolved_title=str(
-                candidate.get("official_resolved_title")
-                or candidate.get("title")
-                or ""
-            ),
-            resolved_company=str(
-                candidate.get("official_resolved_company")
-                or candidate.get("company_name")
-                or ""
-            ),
-            original_location=str(job.get("location") or ""),
-            resolved_location=str(
-                candidate.get("official_resolved_location")
-                or candidate.get("location")
-                or ""
-            ),
+        if not candidate.get("verified_posting_key"):
+            continue
+
+        if not candidate.get("official_job_url"):
+            continue
+
+        matches.append(candidate)
+
+    return matches
+
+
+def annotate_known_official_candidates(
+    jobs: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Annotate fuzzy matches as verification hints without mutating identity."""
+    counts = {
+        "candidates_found": 0,
+        "single_candidate_needs_verification": 0,
+        "ambiguous": 0,
+        "no_candidate": 0,
+    }
+
+    for job in jobs:
+        matches = find_known_official_candidates(
+            job=job,
+            candidates=candidates,
+        )
+        distinct_keys = sorted(
+            {
+                str(candidate.get("verified_posting_key") or "")
+                for candidate in matches
+                if candidate.get("verified_posting_key")
+            }
         )
 
-        if validation.accepted:
-            return candidate, validation
+        if not distinct_keys:
+            job["known_official_candidate_status"] = "no_candidate"
+            job["known_official_candidate_count"] = 0
+            counts["no_candidate"] += 1
+            continue
 
-    return None
+        counts["candidates_found"] += 1
+        job["known_official_candidate_count"] = len(distinct_keys)
+
+        if len(distinct_keys) > 1:
+            job["known_official_candidate_status"] = "ambiguous"
+            job["known_official_candidate_keys"] = distinct_keys
+            counts["ambiguous"] += 1
+            continue
+
+        selected_key = distinct_keys[0]
+        selected_candidate = next(
+            candidate
+            for candidate in matches
+            if candidate.get("verified_posting_key") == selected_key
+        )
+        job["known_official_candidate_status"] = (
+            "single_candidate_needs_verification"
+        )
+        job["known_official_candidate_key"] = selected_key
+        job["known_official_candidate_url"] = selected_candidate.get(
+            "official_job_url"
+        )
+        job["known_official_candidate_source"] = selected_candidate.get(
+            "source"
+        )
+        job["known_official_candidate_record_key"] = selected_candidate.get(
+            "record_key"
+        )
+        counts["single_candidate_needs_verification"] += 1
+
+    return counts
 
 
 def reuse_verified_description(
@@ -511,7 +587,16 @@ def reuse_verified_description(
     candidate: dict[str, Any],
     validation: JobIdentityValidation,
 ) -> None:
-    """Copy a verified description/official identity onto a source duplicate."""
+    """Copy a verified description after authoritative identity is confirmed."""
+    candidate_key = str(candidate.get("verified_posting_key") or "").strip()
+    job_key = authoritative_verified_key_for_job(job)
+
+    if not candidate_key or candidate_key != job_key:
+        raise ValueError(
+            "Verified description reuse requires matching authoritative "
+            "posting keys."
+        )
+
     description = str(candidate.get("description") or "")
     word_count = count_words(description)
     official_url = str(candidate.get("official_job_url") or "")
@@ -608,39 +693,101 @@ def reuse_verified_description(
     )
 
 
-def reuse_verified_descriptions_before_queue(
+def reuse_authoritative_verified_descriptions_before_queue(
     jobs: list[dict[str, Any]],
     minimum_words: int,
-) -> None:
-    """Apply verified local reuse before external enrichment is ranked."""
-    candidates = load_verified_reuse_candidates(
-        minimum_words=minimum_words,
-    )
+) -> int:
+    """Reuse descriptions only when the new record has authoritative identity."""
+    candidates = load_verified_reuse_candidates(minimum_words=minimum_words)
 
     if not candidates:
-        return
+        return 0
 
+    candidates_by_key: dict[str, list[dict[str, Any]]] = {}
+
+    for candidate in candidates:
+        key = str(candidate.get("verified_posting_key") or "").strip()
+
+        if not key:
+            continue
+
+        candidates_by_key.setdefault(key, []).append(candidate)
+
+    reused_count = 0
     for job in jobs:
         if int(job.get("current_word_count") or 0) >= minimum_words:
             continue
 
-        if job.get("verified_posting_key"):
+        authoritative_key = authoritative_verified_key_for_job(job)
+
+        if not authoritative_key:
             continue
 
-        match = find_verified_reuse_candidate(
-            job=job,
-            candidates=candidates,
+        matches = candidates_by_key.get(authoritative_key, [])
+
+        if not matches:
+            continue
+
+        candidate = matches[0]
+        validation = validate_job_identity(
+            original_title=str(job.get("title") or ""),
+            original_company=str(job.get("company_name") or ""),
+            resolved_title=str(
+                candidate.get("official_resolved_title")
+                or candidate.get("title")
+                or ""
+            ),
+            resolved_company=str(
+                candidate.get("official_resolved_company")
+                or candidate.get("company_name")
+                or ""
+            ),
+            original_location=str(job.get("location") or ""),
+            resolved_location=str(
+                candidate.get("official_resolved_location")
+                or candidate.get("location")
+                or ""
+            ),
         )
 
-        if not match:
+        if not validation.accepted:
             continue
 
-        candidate, validation = match
+        job["verified_posting_key"] = authoritative_key
         reuse_verified_description(
             job=job,
             candidate=candidate,
             validation=validation,
         )
+        reused_count += 1
+
+    return reused_count
+
+
+def prepare_verified_candidate_metadata_before_queue(
+    jobs: list[dict[str, Any]],
+    minimum_words: int,
+) -> dict[str, int]:
+    """Run offline authoritative reuse and fuzzy candidate annotation."""
+    candidates = load_verified_reuse_candidates(minimum_words=minimum_words)
+    stats = {
+        "offline_reused": reuse_authoritative_verified_descriptions_before_queue(
+            jobs=jobs,
+            minimum_words=minimum_words,
+        ),
+        "candidates_found": 0,
+        "single_candidate_needs_verification": 0,
+        "ambiguous": 0,
+        "no_candidate": 0,
+    }
+
+    stats.update(
+        annotate_known_official_candidates(
+            jobs=jobs,
+            candidates=candidates,
+        )
+    )
+    return stats
 
 
 def load_jobs_to_enrich(
@@ -851,7 +998,7 @@ def load_jobs_to_enrich(
         )
         job["description_state"] = description_state(job)
 
-    reuse_verified_descriptions_before_queue(
+    prepare_verified_candidate_metadata_before_queue(
         jobs=jobs,
         minimum_words=minimum_words,
     )
@@ -1378,6 +1525,79 @@ def existing_description_result(
     )
 
 
+def verify_known_official_candidate(
+    job: dict[str, Any],
+    client,
+) -> OfficialJobResolutionResult | None:
+    """Verify a single fuzzy candidate against its known official URL."""
+    if (
+        job.get("known_official_candidate_status")
+        != "single_candidate_needs_verification"
+    ):
+        return None
+
+    candidate_url = str(job.get("known_official_candidate_url") or "").strip()
+    candidate_key = str(job.get("known_official_candidate_key") or "").strip()
+
+    if not candidate_url or not candidate_key:
+        return None
+
+    result = fetch_job_description(
+        url=candidate_url,
+        client=client,
+    )
+
+    if result.status != "enriched":
+        return None
+
+    resolved_key = verified_posting_key_from_url(
+        result.final_url or candidate_url
+    )
+
+    if resolved_key != candidate_key:
+        return None
+
+    validation = validate_job_identity(
+        original_title=str(job.get("title") or ""),
+        original_company=str(job.get("company_name") or ""),
+        resolved_title=str(result.resolved_title or ""),
+        resolved_company=str(result.resolved_company or ""),
+        original_location=str(job.get("location") or ""),
+        resolved_location=str(result.resolved_location or ""),
+    )
+
+    if not validation.accepted:
+        return None
+
+    job["verified_posting_key"] = resolved_key
+    job["description_hash"] = description_hash(result.description)
+    job["description_source"] = "known_official_candidate"
+    job["matched_prior_record_key"] = job.get(
+        "known_official_candidate_record_key"
+    )
+    job["matched_prior_source"] = job.get("known_official_candidate_source")
+    job["reused_description"] = False
+
+    return OfficialJobResolutionResult(
+        status=OFFICIAL_FOUND_VERIFIED,
+        official_job_url=result.final_url or candidate_url,
+        official_url_source=str(
+            job.get("known_official_candidate_source")
+            or "known_official_candidate"
+        ),
+        official_url_resolved_at=datetime.now(timezone.utc),
+        official_url_confidence=validation.confidence,
+        official_url_validation_reason=(
+            "known official candidate verified independently"
+        ),
+        resolved_title=result.resolved_title,
+        resolved_company=result.resolved_company,
+        resolved_location=result.resolved_location,
+        description_result=result,
+        identity_validation=validation,
+    )
+
+
 def process_enrichment_job(
     job: dict[str, Any],
     client,
@@ -1429,7 +1649,32 @@ def process_enrichment_job(
                     "existing description."
                 )
 
+    known_candidate_resolution = verify_known_official_candidate(
+        job=job,
+        client=client,
+    )
+
+    if known_candidate_resolution is not None:
+        official_resolution = known_candidate_resolution
+        result = known_candidate_resolution.description_result or result
+        identity_validation = known_candidate_resolution.identity_validation
+        stored_status = result.status
+        stored_error = result.error_message
+        updated = update_job_description(
+            job=job,
+            result=result,
+        )
+
+        if not updated:
+            stored_status = "not_improved"
+            stored_error = (
+                "The verified official description was not longer than "
+                "the existing description."
+            )
+
     if (
+        official_resolution is None
+        and
         should_attempt_official_resolution(
             job=job,
             enrichment_result=source_result,

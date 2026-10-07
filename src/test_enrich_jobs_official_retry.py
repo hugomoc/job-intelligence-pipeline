@@ -1211,7 +1211,7 @@ def test_glassdoor_wrong_company_description_is_rejected() -> None:
     with_temp_database(scenario)
 
 
-def test_verified_historical_duplicate_reuses_description_before_queue() -> None:
+def test_fuzzy_historical_duplicate_does_not_reuse_before_verification() -> None:
     def scenario() -> None:
         verified_key = "greenhouse:123"
         official_url = "https://boards.greenhouse.io/robotsandpencils/jobs/123"
@@ -1264,10 +1264,22 @@ def test_verified_historical_duplicate_reuses_description_before_queue() -> None
             force=False,
         )
 
-        assert "wellfound-robots" not in [
+        selected_jobs_by_key = {
             job["record_key"]
             for job in jobs
-        ]
+        }
+
+        assert "wellfound-robots" in selected_jobs_by_key
+
+        selected = next(
+            job
+            for job in jobs
+            if job["record_key"] == "wellfound-robots"
+        )
+        assert selected["known_official_candidate_status"] == (
+            "single_candidate_needs_verification"
+        )
+        assert selected["known_official_candidate_key"] == verified_key
 
         with database.get_connection() as connection:
             raw = connection.execute(
@@ -1279,6 +1291,179 @@ def test_verified_historical_duplicate_reuses_description_before_queue() -> None
             ).fetchone()
             attempt = connection.execute(
                 """
+                SELECT verified_posting_key
+                FROM job_enrichment_attempts
+                WHERE record_key = 'wellfound-robots'
+                """
+            ).fetchone()
+
+        assert raw is not None
+        assert raw[0] == "short alert summary"
+        assert attempt is None
+
+    with_temp_database(scenario)
+
+
+def test_ambiguous_fuzzy_candidates_do_not_reuse_description() -> None:
+    def scenario() -> None:
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+
+        for record_key, verified_key, official_url in (
+            (
+                "linkedin-robots-111",
+                "greenhouse:111",
+                "https://boards.greenhouse.io/example/jobs/111",
+            ),
+            (
+                "linkedin-robots-222",
+                "greenhouse:222",
+                "https://boards.greenhouse.io/example/jobs/222",
+            ),
+        ):
+            insert_raw_job(
+                record_key,
+                source="linkedin",
+                title="Senior Data Engineer",
+                company_name="Example Co",
+                location="Remote US",
+                description=full_description,
+                apply_url=f"https://www.linkedin.com/jobs/view/{record_key}/",
+            )
+            insert_attempt(
+                record_key,
+                source="linkedin",
+                status="enriched",
+                official_status=OFFICIAL_FOUND_VERIFIED,
+                official_url=official_url,
+                verified_posting_key=verified_key,
+                description_hash_value=description_hash(full_description),
+                official_resolved_title="Senior Data Engineer",
+                official_resolved_company="Example Co",
+                official_resolved_location="Remote US",
+            )
+
+        insert_raw_job(
+            "wellfound-example",
+            source="wellfound",
+            title="Sr. Data Engineer",
+            company_name="Example Co",
+            location="United States (Remote)",
+            description="short alert summary",
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=999-sr-data-engineer"
+            ),
+        )
+
+        jobs = load_jobs_to_enrich(
+            limit=100,
+            minimum_words=80,
+            source=None,
+            retry_failed=False,
+            force=False,
+        )
+        selected = next(
+            job
+            for job in jobs
+            if job["record_key"] == "wellfound-example"
+        )
+
+        assert selected["known_official_candidate_status"] == "ambiguous"
+        assert selected["known_official_candidate_count"] == 2
+
+        with database.get_connection() as connection:
+            raw = connection.execute(
+                """
+                SELECT description
+                FROM raw_jobs
+                WHERE record_key = 'wellfound-example'
+                """
+            ).fetchone()
+            attempt = connection.execute(
+                """
+                SELECT verified_posting_key
+                FROM job_enrichment_attempts
+                WHERE record_key = 'wellfound-example'
+                """
+            ).fetchone()
+
+        assert raw is not None
+        assert raw[0] == "short alert summary"
+        assert attempt is None
+
+    with_temp_database(scenario)
+
+
+def test_authoritative_official_url_reuses_description_offline() -> None:
+    def scenario() -> None:
+        verified_key = "greenhouse:123"
+        official_url = "https://boards.greenhouse.io/robotsandpencils/jobs/123"
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+
+        insert_raw_job(
+            "linkedin-robots",
+            source="linkedin",
+            title="Senior Data Engineer",
+            company_name="Robots & Pencils",
+            location="United States (Remote)",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+        )
+        insert_attempt(
+            "linkedin-robots",
+            source="linkedin",
+            status="enriched",
+            official_status=OFFICIAL_FOUND_VERIFIED,
+            official_url=official_url,
+            verified_posting_key=verified_key,
+            description_hash_value=description_hash(full_description),
+            official_resolved_title="Senior Data Engineer",
+            official_resolved_company="Robots and Pencils",
+            official_resolved_location="Remote only, United States",
+        )
+        insert_raw_job(
+            "greenhouse-robots",
+            source="greenhouse",
+            title="Sr. Data Engineer",
+            company_name="Robots and Pencils",
+            location="Remote only, United States",
+            description="short alert summary",
+            apply_url=official_url,
+        )
+
+        jobs = load_jobs_to_enrich(
+            limit=100,
+            minimum_words=80,
+            source=None,
+            retry_failed=False,
+            force=False,
+        )
+
+        assert "greenhouse-robots" not in [
+            job["record_key"]
+            for job in jobs
+        ]
+
+        with database.get_connection() as connection:
+            raw = connection.execute(
+                """
+                SELECT description
+                FROM raw_jobs
+                WHERE record_key = 'greenhouse-robots'
+                """
+            ).fetchone()
+            attempt = connection.execute(
+                """
                 SELECT
                     verified_posting_key,
                     description_hash,
@@ -1286,7 +1471,7 @@ def test_verified_historical_duplicate_reuses_description_before_queue() -> None
                     matched_prior_source,
                     reused_description
                 FROM job_enrichment_attempts
-                WHERE record_key = 'wellfound-robots'
+                WHERE record_key = 'greenhouse-robots'
                 """
             ).fetchone()
 
@@ -1298,6 +1483,113 @@ def test_verified_historical_duplicate_reuses_description_before_queue() -> None
             "linkedin-robots",
             "linkedin",
             True,
+        )
+
+    with_temp_database(scenario)
+
+
+def test_known_official_candidate_verifies_before_broad_resolution() -> None:
+    def scenario() -> None:
+        verified_key = "greenhouse:123"
+        official_url = "https://boards.greenhouse.io/robotsandpencils/jobs/123"
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+
+        insert_raw_job(
+            "linkedin-robots",
+            source="linkedin",
+            title="Senior Data Engineer",
+            company_name="Robots & Pencils",
+            location="United States (Remote)",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+        )
+        insert_attempt(
+            "linkedin-robots",
+            source="linkedin",
+            status="enriched",
+            official_status=OFFICIAL_FOUND_VERIFIED,
+            official_url=official_url,
+            verified_posting_key=verified_key,
+            description_hash_value=description_hash(full_description),
+            official_resolved_title="Senior Data Engineer",
+            official_resolved_company="Robots and Pencils",
+            official_resolved_location="Remote only, United States",
+        )
+        insert_raw_job(
+            "wellfound-robots",
+            source="wellfound",
+            title="Sr. Data Engineer",
+            company_name="Robots and Pencils",
+            location="Remote only, United States",
+            description="short alert summary",
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=222-sr-data-engineer"
+            ),
+        )
+
+        jobs = load_jobs_to_enrich(
+            limit=100,
+            minimum_words=80,
+            source=None,
+            retry_failed=False,
+            force=False,
+        )
+        job = next(
+            job
+            for job in jobs
+            if job["record_key"] == "wellfound-robots"
+        )
+
+        assert job["known_official_candidate_status"] == (
+            "single_candidate_needs_verification"
+        )
+
+        with mock_client(
+            {
+                job["apply_url"]: httpx.Response(404),
+                official_url: httpx.Response(
+                    200,
+                    text=job_posting_html(
+                        title="Senior Data Engineer",
+                        company="Robots and Pencils",
+                        location="Remote only, United States",
+                        description=full_description,
+                    ),
+                    headers={"content-type": "text/html"},
+                ),
+            }
+        ) as client:
+            summary = process_enrichment_batch(
+                [job],
+                client,
+            )
+
+        assert summary.descriptions_updated == 1
+
+        with database.get_connection() as connection:
+            attempt = connection.execute(
+                """
+                SELECT
+                    verified_posting_key,
+                    official_job_url,
+                    reused_description,
+                    matched_prior_record_key
+                FROM job_enrichment_attempts
+                WHERE record_key = 'wellfound-robots'
+                """
+            ).fetchone()
+
+        assert attempt == (
+            verified_key,
+            official_url,
+            False,
+            "linkedin-robots",
         )
 
     with_temp_database(scenario)
@@ -1330,7 +1622,10 @@ def main() -> None:
     test_glassdoor_blocked_without_official_match_stays_unscored()
     test_glassdoor_failed_resolution_retries_after_cooldown()
     test_glassdoor_wrong_company_description_is_rejected()
-    test_verified_historical_duplicate_reuses_description_before_queue()
+    test_fuzzy_historical_duplicate_does_not_reuse_before_verification()
+    test_ambiguous_fuzzy_candidates_do_not_reuse_description()
+    test_authoritative_official_url_reuses_description_offline()
+    test_known_official_candidate_verifies_before_broad_resolution()
     print("Official enrichment retry tests passed.")
 
 

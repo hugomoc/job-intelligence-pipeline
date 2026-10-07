@@ -1267,6 +1267,164 @@ def test_verified_score_reuse_requires_same_description_hash() -> None:
     with_temp_review_database(scenario)
 
 
+def test_different_verified_keys_do_not_share_status_or_score() -> None:
+    def scenario() -> None:
+        seed_resume_profile()
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+
+        seed_review_job(
+            record_key="greenhouse-111",
+            title="Senior Data Engineer",
+            source="linkedin",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+            application_status="applied",
+        )
+        seed_review_job(
+            record_key="greenhouse-222",
+            title="Sr. Data Engineer",
+            source="wellfound",
+            description=full_description,
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=222-sr-data-engineer"
+            ),
+        )
+        seed_verified_attempt(
+            record_key="greenhouse-111",
+            source="linkedin",
+            verified_posting_key="greenhouse:111",
+            official_job_url="https://boards.greenhouse.io/example/jobs/111",
+            description=full_description,
+        )
+        seed_verified_attempt(
+            record_key="greenhouse-222",
+            source="wellfound",
+            verified_posting_key="greenhouse:222",
+            official_job_url="https://boards.greenhouse.io/example/jobs/222",
+            description=full_description,
+        )
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO resume_job_scores (
+                    resume_hash,
+                    record_key,
+                    overall_score,
+                    recommendation,
+                    title_fit,
+                    skills_fit,
+                    experience_fit,
+                    seniority_fit,
+                    industry_fit,
+                    location_fit,
+                    confidence,
+                    matching_strengths,
+                    hard_requirements_missing,
+                    preferred_qualifications_missing,
+                    risk_factors,
+                    summary,
+                    description_word_count,
+                    description_complete,
+                    model_name,
+                    prompt_version
+                )
+                VALUES (
+                    'resume-1',
+                    'greenhouse-111',
+                    91,
+                    'apply',
+                    90,
+                    92,
+                    91,
+                    90,
+                    80,
+                    100,
+                    'high',
+                    '[]',
+                    '[]',
+                    '[]',
+                    '[]',
+                    'Strong fit.',
+                    120,
+                    true,
+                    'model-1',
+                    ?
+                )
+                """,
+                [MATCHER_PROMPT_VERSION],
+            )
+
+        jobs = {
+            job["record_key"]: job
+            for job in load_all_jobs(resume_hash="resume-1")
+        }
+
+        assert jobs["greenhouse-222"]["application_status"] == "new"
+        assert jobs["greenhouse-222"]["ai_score"] is None
+
+    with_temp_review_database(scenario)
+
+
+def test_different_verified_keys_do_not_share_removed_status() -> None:
+    def scenario() -> None:
+        seed_resume_profile()
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+
+        seed_review_job(
+            record_key="greenhouse-111",
+            title="Senior Data Engineer",
+            source="linkedin",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+            application_status="removed",
+        )
+        seed_review_job(
+            record_key="greenhouse-222",
+            title="Sr. Data Engineer",
+            source="wellfound",
+            description=full_description,
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=222-sr-data-engineer"
+            ),
+        )
+        seed_verified_attempt(
+            record_key="greenhouse-111",
+            source="linkedin",
+            verified_posting_key="greenhouse:111",
+            official_job_url="https://boards.greenhouse.io/example/jobs/111",
+            description=full_description,
+        )
+        seed_verified_attempt(
+            record_key="greenhouse-222",
+            source="wellfound",
+            verified_posting_key="greenhouse:222",
+            official_job_url="https://boards.greenhouse.io/example/jobs/222",
+            description=full_description,
+        )
+
+        jobs = {
+            job["record_key"]: job
+            for job in load_all_jobs(resume_hash="resume-1")
+        }
+
+        assert jobs["greenhouse-222"]["application_status"] == "new"
+
+    with_temp_review_database(scenario)
+
+
 def test_unscreened_eligibility_candidates_skip_hard_gaps_and_aggregators() -> None:
     old_data_dir = database.DATA_DIR
     old_database_path = database.DATABASE_PATH
@@ -2159,6 +2317,8 @@ def main() -> None:
     test_verified_posting_key_shares_applied_status_across_sources()
     test_verified_posting_key_shares_removed_status_across_sources()
     test_verified_score_reuse_requires_same_description_hash()
+    test_different_verified_keys_do_not_share_status_or_score()
+    test_different_verified_keys_do_not_share_removed_status()
     test_unscreened_eligibility_candidates_skip_hard_gaps_and_aggregators()
     test_description_state_is_separate_from_fit()
     test_fit_priority_uses_current_complete_ai_score()
