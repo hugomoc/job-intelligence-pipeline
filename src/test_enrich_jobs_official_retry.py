@@ -12,6 +12,7 @@ from src import enrich_jobs
 from src.enrich_jobs import (
     DEFAULT_ENRICHMENT_LIMIT,
     EnrichmentProcessingResult,
+    authoritative_verified_key_for_job,
     initialize_enrichment_tables,
     load_jobs_to_enrich,
     needs_official_resolution,
@@ -1488,8 +1489,9 @@ def test_authoritative_official_url_reuses_description_offline() -> None:
     with_temp_database(scenario)
 
 
-def test_known_official_candidate_verifies_before_broad_resolution() -> None:
+def test_historical_candidate_page_alone_does_not_verify_source() -> None:
     def scenario() -> None:
+        original_resolve = enrich_jobs.resolve_official_job
         verified_key = "greenhouse:123"
         official_url = "https://boards.greenhouse.io/robotsandpencils/jobs/123"
         full_description = " ".join(
@@ -1550,9 +1552,132 @@ def test_known_official_candidate_verifies_before_broad_resolution() -> None:
             "single_candidate_needs_verification"
         )
 
+        def fake_resolve(job: dict, client: httpx.Client):
+            return OfficialJobResolutionResult(
+                status=OFFICIAL_NOT_FOUND,
+                official_job_url=None,
+                official_url_source=None,
+                official_url_resolved_at=datetime.now(timezone.utc),
+                official_url_confidence=None,
+                official_url_validation_reason="not found",
+                resolved_title=None,
+                resolved_company=None,
+                resolved_location=None,
+            )
+
+        enrich_jobs.resolve_official_job = fake_resolve
+
+        try:
+            with mock_client(
+                {
+                    job["apply_url"]: httpx.Response(404),
+                    official_url: httpx.Response(
+                        200,
+                        text=job_posting_html(
+                            title="Senior Data Engineer",
+                            company="Robots and Pencils",
+                            location="Remote only, United States",
+                            description=full_description,
+                        ),
+                        headers={"content-type": "text/html"},
+                    ),
+                }
+            ) as client:
+                summary = process_enrichment_batch(
+                    [job],
+                    client,
+                )
+        finally:
+            enrich_jobs.resolve_official_job = original_resolve
+
+        assert summary.descriptions_updated == 0
+
+        with database.get_connection() as connection:
+            attempt = connection.execute(
+                """
+                SELECT
+                    verified_posting_key,
+                    official_job_url,
+                    reused_description,
+                    matched_prior_record_key
+                FROM job_enrichment_attempts
+                WHERE record_key = 'wellfound-robots'
+                """
+            ).fetchone()
+
+        assert attempt == (
+            None,
+            None,
+            False,
+            None,
+        )
+
+    with_temp_database(scenario)
+
+
+def test_source_redirect_to_same_key_verifies_known_candidate() -> None:
+    def scenario() -> None:
+        verified_key = "greenhouse:123"
+        official_url = "https://boards.greenhouse.io/robotsandpencils/jobs/123"
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+
+        insert_raw_job(
+            "linkedin-robots",
+            source="linkedin",
+            title="Senior Data Engineer",
+            company_name="Robots & Pencils",
+            location="United States (Remote)",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+        )
+        insert_attempt(
+            "linkedin-robots",
+            source="linkedin",
+            status="enriched",
+            official_status=OFFICIAL_FOUND_VERIFIED,
+            official_url=official_url,
+            verified_posting_key=verified_key,
+            description_hash_value=description_hash(full_description),
+            official_resolved_title="Senior Data Engineer",
+            official_resolved_company="Robots and Pencils",
+            official_resolved_location="Remote only, United States",
+        )
+        insert_raw_job(
+            "wellfound-robots",
+            source="wellfound",
+            title="Sr. Data Engineer",
+            company_name="Robots and Pencils",
+            location="Remote only, United States",
+            description="short alert summary",
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=222-sr-data-engineer"
+            ),
+        )
+
+        job = next(
+            job
+            for job in load_jobs_to_enrich(
+                limit=100,
+                minimum_words=80,
+                source=None,
+                retry_failed=False,
+                force=False,
+            )
+            if job["record_key"] == "wellfound-robots"
+        )
+
         with mock_client(
             {
-                job["apply_url"]: httpx.Response(404),
+                job["apply_url"]: httpx.Response(
+                    302,
+                    headers={"location": official_url},
+                ),
                 official_url: httpx.Response(
                     200,
                     text=job_posting_html(
@@ -1595,6 +1720,158 @@ def test_known_official_candidate_verifies_before_broad_resolution() -> None:
     with_temp_database(scenario)
 
 
+def test_source_redirect_to_different_key_overrides_fuzzy_candidate() -> None:
+    def scenario() -> None:
+        historical_url = "https://boards.greenhouse.io/example/jobs/111"
+        new_url = "https://boards.greenhouse.io/example/jobs/222"
+        full_description = " ".join(
+            [
+                "Responsibilities include Python SQL Snowflake AWS data "
+                "pipelines and analytics engineering requirements."
+            ] * 20
+        )
+
+        insert_raw_job(
+            "linkedin-example",
+            source="linkedin",
+            title="Senior Data Engineer",
+            company_name="Example Co",
+            location="Remote US",
+            description=full_description,
+            apply_url="https://www.linkedin.com/jobs/view/111/",
+        )
+        insert_attempt(
+            "linkedin-example",
+            source="linkedin",
+            status="enriched",
+            official_status=OFFICIAL_FOUND_VERIFIED,
+            official_url=historical_url,
+            verified_posting_key="greenhouse:111",
+            description_hash_value=description_hash(full_description),
+            official_resolved_title="Senior Data Engineer",
+            official_resolved_company="Example Co",
+            official_resolved_location="Remote US",
+        )
+        insert_raw_job(
+            "wellfound-example",
+            source="wellfound",
+            title="Sr. Data Engineer",
+            company_name="Example Co",
+            location="United States (Remote)",
+            description="short alert summary",
+            apply_url=(
+                "https://wellfound.com/jobs?"
+                "job_listing_slug=222-sr-data-engineer"
+            ),
+        )
+
+        job = next(
+            job
+            for job in load_jobs_to_enrich(
+                limit=100,
+                minimum_words=80,
+                source=None,
+                retry_failed=False,
+                force=False,
+            )
+            if job["record_key"] == "wellfound-example"
+        )
+
+        with mock_client(
+            {
+                job["apply_url"]: httpx.Response(
+                    302,
+                    headers={"location": new_url},
+                ),
+                new_url: httpx.Response(
+                    200,
+                    text=job_posting_html(
+                        title="Senior Data Engineer",
+                        company="Example Co",
+                        location="Remote US",
+                        description=full_description,
+                    ),
+                    headers={"content-type": "text/html"},
+                ),
+            }
+        ) as client:
+            summary = process_enrichment_batch(
+                [job],
+                client,
+            )
+
+        assert summary.descriptions_updated == 1
+
+        with database.get_connection() as connection:
+            attempt = connection.execute(
+                """
+                SELECT
+                    verified_posting_key,
+                    official_job_url,
+                    reused_description,
+                    matched_prior_record_key
+                FROM job_enrichment_attempts
+                WHERE record_key = 'wellfound-example'
+                """
+            ).fetchone()
+
+        assert attempt == (
+            "greenhouse:222",
+            new_url,
+            False,
+            None,
+        )
+
+    with_temp_database(scenario)
+
+
+def test_authoritative_key_requires_verified_official_status() -> None:
+    official_url = "https://boards.greenhouse.io/example/jobs/111"
+
+    assert authoritative_verified_key_for_job(
+        {
+            "official_job_url": official_url,
+            "official_url_status": OFFICIAL_FOUND_VERIFIED,
+        }
+    ) == "greenhouse:111"
+
+    for status in (OFFICIAL_NOT_FOUND, OFFICIAL_BLOCKED, "AMBIGUOUS", None):
+        assert authoritative_verified_key_for_job(
+            {
+                "official_job_url": official_url,
+                "official_url_status": status,
+            }
+        ) == ""
+
+
+def test_authoritative_key_requires_accepted_resolved_candidate() -> None:
+    official_url = "https://boards.greenhouse.io/example/jobs/111"
+
+    assert authoritative_verified_key_for_job(
+        {
+            "resolved_candidate_url": official_url,
+            "previous_status": "enriched",
+            "identity_confidence": 0.91,
+        }
+    ) == "greenhouse:111"
+    assert authoritative_verified_key_for_job(
+        {
+            "resolved_candidate_url": official_url,
+            "previous_status": "resolution_rejected",
+            "identity_confidence": 0.91,
+        }
+    ) == ""
+
+
+def test_direct_ats_source_apply_url_is_authoritative() -> None:
+    assert authoritative_verified_key_for_job(
+        {
+            "source": "greenhouse",
+            "apply_url": "https://boards.greenhouse.io/example/jobs/111",
+        }
+    ) == "greenhouse:111"
+
+
 def main() -> None:
     test_previous_failed_lensa_attempt_with_null_official_status_is_selected()
     test_found_verified_is_not_selected_again_for_official_resolution()
@@ -1625,7 +1902,12 @@ def main() -> None:
     test_fuzzy_historical_duplicate_does_not_reuse_before_verification()
     test_ambiguous_fuzzy_candidates_do_not_reuse_description()
     test_authoritative_official_url_reuses_description_offline()
-    test_known_official_candidate_verifies_before_broad_resolution()
+    test_historical_candidate_page_alone_does_not_verify_source()
+    test_source_redirect_to_same_key_verifies_known_candidate()
+    test_source_redirect_to_different_key_overrides_fuzzy_candidate()
+    test_authoritative_key_requires_verified_official_status()
+    test_authoritative_key_requires_accepted_resolved_candidate()
+    test_direct_ats_source_apply_url_is_authoritative()
     print("Official enrichment retry tests passed.")
 
 

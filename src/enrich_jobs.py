@@ -44,6 +44,7 @@ from src.repositories.recommendation_repository import (
     calculate_enrichment_priority,
     description_has_quality_signals,
     description_state,
+    extract_embedded_destination_url,
     register_exact_posting_identity_function,
 )
 from src.verified_posting_identity import (
@@ -68,6 +69,21 @@ AGGREGATOR_SOURCES_REQUIRING_IDENTITY = {
     "lensa",
     "jobleads",
 }
+
+DIRECT_OFFICIAL_SOURCES = {
+    "ashby",
+    "greenhouse",
+    "icims",
+    "lever",
+    "smartrecruiters",
+    "workday",
+}
+
+KNOWN_CANDIDATE_MATCH_VERIFIED = "MATCH_VERIFIED"
+KNOWN_CANDIDATE_DIFFERENT_VERIFIED_POSTING = "DIFFERENT_VERIFIED_POSTING"
+KNOWN_CANDIDATE_UNVERIFIED = "UNVERIFIED"
+KNOWN_CANDIDATE_AMBIGUOUS = "AMBIGUOUS"
+KNOWN_CANDIDATE_NO_CANDIDATE = "NO_CANDIDATE"
 
 OFFICIAL_RETRY_COOLDOWN_DAYS = 7
 OFFICIAL_RETRY_STATUSES = {
@@ -99,6 +115,13 @@ class EnrichmentBatchSummary:
     stopped_for_time_budget: bool
     elapsed_seconds: float
     log_lines: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class KnownCandidateVerification:
+    state: str
+    verified_key: str | None = None
+    official_resolution: OfficialJobResolutionResult | None = None
 
 
 def initialize_enrichment_tables() -> None:
@@ -461,20 +484,102 @@ def authoritative_verified_key_for_job(
     if explicit_key:
         return explicit_key
 
-    for url_field in (
-        "official_job_url",
-        "resolved_candidate_url",
-        "apply_url",
+    official_status = str(
+        job.get("official_url_status") or ""
+    ).strip()
+    official_url = str(job.get("official_job_url") or "").strip()
+
+    if (
+        official_status == OFFICIAL_FOUND_VERIFIED
+        and official_url
+        and is_known_official_or_ats_url(official_url)
     ):
-        value = str(job.get(url_field) or "").strip()
-
-        if not value or not is_known_official_or_ats_url(value):
-            continue
-
-        key = verified_posting_key_from_url(value)
+        key = verified_posting_key_from_url(official_url)
 
         if key:
             return key
+
+    resolved_candidate_url = str(
+        job.get("resolved_candidate_url") or ""
+    ).strip()
+
+    if (
+        resolved_candidate_url
+        and is_known_official_or_ats_url(resolved_candidate_url)
+        and stored_candidate_identity_accepted(job)
+    ):
+        key = verified_posting_key_from_url(resolved_candidate_url)
+
+        if key:
+            return key
+
+    direct_key = direct_source_url_verified_key(job)
+
+    if direct_key:
+        return direct_key
+
+    return ""
+
+
+def stored_candidate_identity_accepted(
+    job: dict[str, Any],
+) -> bool:
+    """Return true for previously accepted direct-page enrichment attempts."""
+    if str(job.get("previous_status") or "").strip() != "enriched":
+        return False
+
+    confidence = job.get("identity_confidence")
+
+    if confidence is None:
+        return True
+
+    try:
+        return float(confidence) >= 0.78
+    except (TypeError, ValueError):
+        return False
+
+
+def direct_source_url_verified_key(
+    job: dict[str, Any],
+) -> str:
+    """Derive official identity from the source record's own URL evidence."""
+    apply_url = str(job.get("apply_url") or "").strip()
+    source = str(job.get("source") or "").strip().casefold()
+
+    embedded_destination = extract_embedded_destination_url(apply_url)
+
+    if (
+        embedded_destination
+        and is_known_official_or_ats_url(embedded_destination)
+    ):
+        return verified_posting_key_from_url(embedded_destination)
+
+    if not apply_url or not is_known_official_or_ats_url(apply_url):
+        return ""
+
+    if source in DIRECT_OFFICIAL_SOURCES:
+        return verified_posting_key_from_url(apply_url)
+
+    if not is_aggregator_job(job):
+        return verified_posting_key_from_url(apply_url)
+
+    return ""
+
+
+def source_result_verified_key(
+    job: dict[str, Any],
+    source_result: JobDescriptionResult,
+) -> str:
+    """Derive official identity from the new source fetch/redirect result."""
+    direct_key = direct_source_url_verified_key(job)
+
+    if direct_key:
+        return direct_key
+
+    final_url = str(source_result.final_url or "").strip()
+
+    if final_url and is_known_official_or_ats_url(final_url):
+        return verified_posting_key_from_url(final_url)
 
     return ""
 
@@ -912,6 +1017,10 @@ def load_jobs_to_enrich(
         attempts.attempt_count,
         attempts.last_attempted_at
             AS previous_attempted_at,
+        attempts.final_url
+            AS resolved_candidate_url,
+        attempts.identity_confidence,
+        attempts.identity_validation_reason,
         attempts.official_job_url,
         attempts.official_url_status,
         attempts.official_url_resolved_at,
@@ -1527,74 +1636,108 @@ def existing_description_result(
 
 def verify_known_official_candidate(
     job: dict[str, Any],
-    client,
-) -> OfficialJobResolutionResult | None:
-    """Verify a single fuzzy candidate against its known official URL."""
+    source_result: JobDescriptionResult,
+    identity_validation: JobIdentityValidation | None,
+) -> KnownCandidateVerification:
+    """Compare new source-derived identity with a fuzzy historical candidate."""
     if (
         job.get("known_official_candidate_status")
         != "single_candidate_needs_verification"
     ):
-        return None
+        return KnownCandidateVerification(
+            state=KNOWN_CANDIDATE_NO_CANDIDATE,
+        )
 
-    candidate_url = str(job.get("known_official_candidate_url") or "").strip()
     candidate_key = str(job.get("known_official_candidate_key") or "").strip()
 
-    if not candidate_url or not candidate_key:
-        return None
+    if not candidate_key:
+        return KnownCandidateVerification(
+            state=KNOWN_CANDIDATE_NO_CANDIDATE,
+        )
 
-    result = fetch_job_description(
-        url=candidate_url,
-        client=client,
+    source_key = source_result_verified_key(
+        job=job,
+        source_result=source_result,
     )
 
-    if result.status != "enriched":
-        return None
+    if not source_key:
+        return KnownCandidateVerification(
+            state=KNOWN_CANDIDATE_UNVERIFIED,
+        )
 
-    resolved_key = verified_posting_key_from_url(
-        result.final_url or candidate_url
+    source_identity_accepted = (
+        source_result.status == "enriched"
+        and identity_validation is not None
+        and identity_validation.accepted
     )
 
-    if resolved_key != candidate_key:
-        return None
+    if source_key != candidate_key:
+        job["verified_posting_key"] = source_key
+        job["description_source"] = "source_verified"
+        job["reused_description"] = False
 
-    validation = validate_job_identity(
-        original_title=str(job.get("title") or ""),
-        original_company=str(job.get("company_name") or ""),
-        resolved_title=str(result.resolved_title or ""),
-        resolved_company=str(result.resolved_company or ""),
-        original_location=str(job.get("location") or ""),
-        resolved_location=str(result.resolved_location or ""),
-    )
+        if not source_identity_accepted:
+            return KnownCandidateVerification(
+                state=KNOWN_CANDIDATE_DIFFERENT_VERIFIED_POSTING,
+                verified_key=source_key,
+            )
 
-    if not validation.accepted:
-        return None
+        official_resolution = OfficialJobResolutionResult(
+            status=OFFICIAL_FOUND_VERIFIED,
+            official_job_url=source_result.final_url or job["apply_url"],
+            official_url_source="source_redirect",
+            official_url_resolved_at=datetime.now(timezone.utc),
+            official_url_confidence=identity_validation.confidence,
+            official_url_validation_reason=(
+                "source resolved to a different verified posting"
+            ),
+            resolved_title=source_result.resolved_title,
+            resolved_company=source_result.resolved_company,
+            resolved_location=source_result.resolved_location,
+            description_result=source_result,
+            identity_validation=identity_validation,
+        )
+        return KnownCandidateVerification(
+            state=KNOWN_CANDIDATE_DIFFERENT_VERIFIED_POSTING,
+            verified_key=source_key,
+            official_resolution=official_resolution,
+        )
 
-    job["verified_posting_key"] = resolved_key
-    job["description_hash"] = description_hash(result.description)
-    job["description_source"] = "known_official_candidate"
+    job["verified_posting_key"] = source_key
+    job["description_hash"] = description_hash(source_result.description)
+    job["description_source"] = "source_verified_known_candidate"
     job["matched_prior_record_key"] = job.get(
         "known_official_candidate_record_key"
     )
     job["matched_prior_source"] = job.get("known_official_candidate_source")
     job["reused_description"] = False
 
-    return OfficialJobResolutionResult(
+    if not source_identity_accepted:
+        return KnownCandidateVerification(
+            state=KNOWN_CANDIDATE_MATCH_VERIFIED,
+            verified_key=source_key,
+        )
+
+    official_resolution = OfficialJobResolutionResult(
         status=OFFICIAL_FOUND_VERIFIED,
-        official_job_url=result.final_url or candidate_url,
-        official_url_source=str(
-            job.get("known_official_candidate_source")
-            or "known_official_candidate"
-        ),
+        official_job_url=source_result.final_url or job["apply_url"],
+        official_url_source="source_redirect",
         official_url_resolved_at=datetime.now(timezone.utc),
-        official_url_confidence=validation.confidence,
+        official_url_confidence=identity_validation.confidence,
         official_url_validation_reason=(
-            "known official candidate verified independently"
+            "new source record independently resolved to known official key"
         ),
-        resolved_title=result.resolved_title,
-        resolved_company=result.resolved_company,
-        resolved_location=result.resolved_location,
-        description_result=result,
-        identity_validation=validation,
+        resolved_title=source_result.resolved_title,
+        resolved_company=source_result.resolved_company,
+        resolved_location=source_result.resolved_location,
+        description_result=source_result,
+        identity_validation=identity_validation,
+    )
+
+    return KnownCandidateVerification(
+        state=KNOWN_CANDIDATE_MATCH_VERIFIED,
+        verified_key=source_key,
+        official_resolution=official_resolution,
     )
 
 
@@ -1649,15 +1792,16 @@ def process_enrichment_job(
                     "existing description."
                 )
 
-    known_candidate_resolution = verify_known_official_candidate(
+    known_candidate_verification = verify_known_official_candidate(
         job=job,
-        client=client,
+        source_result=source_result,
+        identity_validation=identity_validation,
     )
 
-    if known_candidate_resolution is not None:
-        official_resolution = known_candidate_resolution
-        result = known_candidate_resolution.description_result or result
-        identity_validation = known_candidate_resolution.identity_validation
+    if known_candidate_verification.official_resolution is not None:
+        official_resolution = known_candidate_verification.official_resolution
+        result = official_resolution.description_result or result
+        identity_validation = official_resolution.identity_validation
         stored_status = result.status
         stored_error = result.error_message
         updated = update_job_description(
