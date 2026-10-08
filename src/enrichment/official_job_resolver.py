@@ -43,6 +43,42 @@ OFFICIAL_NOT_FOUND = "OFFICIAL_NOT_FOUND"
 OFFICIAL_AMBIGUOUS = "AMBIGUOUS"
 OFFICIAL_BLOCKED = "BLOCKED"
 OFFICIAL_ERROR = "ERROR"
+OFFICIAL_SEARCH_DEFERRED = "SEARCH_DEFERRED"
+
+
+class SearchDeferredError(RuntimeError):
+    pass
+
+
+class PublicSearchCircuit:
+    """One run's public-search circuit; direct ATS discovery is independent."""
+    def __init__(self, threshold: int = 5):
+        self.threshold = threshold
+        self.calls = 0
+        self.errors = 0
+        self.consecutive_errors = 0
+        self.open = False
+        self.deferred = 0
+
+    def search(self, job, client):
+        if self.open:
+            self.deferred += 1
+            raise SearchDeferredError("public search deferred: provider circuit is open")
+        self.calls += 1
+        try:
+            candidates = search_candidates(job, client)
+        except Exception:
+            self.errors += 1
+            self.consecutive_errors += 1
+            self.open = self.consecutive_errors >= self.threshold
+            raise
+        self.consecutive_errors = 0
+        return candidates
+
+    def summary(self):
+        return {"opened": self.open, "calls_attempted": self.calls,
+                "errors": self.errors, "jobs_deferred": self.deferred}
+
 
 AGGREGATOR_SOURCES = {
     "bebee",
@@ -625,8 +661,9 @@ def resolve_from_candidates(
 def resolve_official_job(
     job: dict,
     client: httpx.Client,
+    search_circuit: PublicSearchCircuit | None = None,
 ) -> OfficialJobResolutionResult:
-    """Find and verify an official employer/ATS posting for an aggregator job."""
+    """Discover direct ATS postings before using the optional public-search circuit."""
     try:
         ats_candidates = discover_ats_candidates(
             job=job,
@@ -650,7 +687,16 @@ def resolve_official_job(
             return ats_result
 
     try:
-        candidates = search_candidates(job, client)
+        candidates = (search_circuit.search(job, client) if search_circuit
+                      else search_candidates(job, client))
+    except SearchDeferredError as error:
+        return OfficialJobResolutionResult(
+            status=OFFICIAL_SEARCH_DEFERRED, official_job_url=None,
+            official_url_source="search", official_url_resolved_at=now_utc(),
+            official_url_confidence=None, official_url_validation_reason=str(error),
+            resolved_title=None, resolved_company=None, resolved_location=None,
+            error_message=str(error),
+        )
     except PermissionError as error:
         return OfficialJobResolutionResult(
             status=OFFICIAL_BLOCKED,

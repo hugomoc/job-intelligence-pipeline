@@ -7,6 +7,9 @@ import unittest
 from unittest.mock import patch
 
 from src import drain_enrichment_backlog as drain
+from src import enrich_jobs, database
+from src.enrichment import official_job_resolver as resolver
+from src.enrichment.job_description import JobDescriptionResult
 
 
 def job(key, *, attempts=0, state='NEEDS_ENRICHMENT', previous=None):
@@ -23,6 +26,12 @@ def result(status='no_description', updated=False, official=None):
 
 
 class DrainTests(unittest.TestCase):
+    def setUp(self):
+        metadata = patch.object(drain, 'prepare_verified_candidate_metadata_before_queue',
+                                return_value={'offline_reused': 0})
+        metadata.start()
+        self.addCleanup(metadata.stop)
+
     def run_drain(self, inventory, **options):
         attempted = set()
         saved = []
@@ -102,22 +111,107 @@ class DrainTests(unittest.TestCase):
         self.assertEqual(report['remaining_never_attempted_needing_jd'], 5)
         self.assertEqual(report['stop_reason'], 'excessive rate limiting')
 
-    def test_official_resolver_outage_stops_after_five_persisted_errors(self):
+    def test_search_circuit_defers_sixth_job_but_source_ats_and_drain_continue(self):
+        circuit = resolver.PublicSearchCircuit()
+        source_result = JobDescriptionResult(
+            requested_url='https://example.com/job', final_url=None,
+            status='no_description', http_status=200, extraction_method=None,
+            description='', word_count=0, error_message=None)
+        inventory = [dict(job(str(i)), apply_url='https://example.com/job',
+                          source='linkedin', description='') for i in range(6)]
         saved = []
-        queue = [job(str(i)) for i in range(10)]
-        connection = unittest.mock.MagicMock()
-        connection.__enter__.return_value.execute.return_value.fetchone.return_value = None
+        manager = unittest.mock.MagicMock()
+        manager.__enter__.return_value.execute.return_value.fetchone.return_value = None
         def loader():
-            return [j for j in queue if j['record_key'] not in saved]
+            return [j for j in inventory if j['record_key'] not in saved]
         def processor(j, client):
+            outcome = drain.process_one(j, client, search_circuit=circuit)
             saved.append(j['record_key'])
-            return result(official=SimpleNamespace(status=drain.OFFICIAL_ERROR))
-        with patch.object(drain, 'get_connection', return_value=connection):
-            report = drain.drain(None, loader=loader, processor=processor,
+            return outcome
+        with patch.object(drain, 'get_connection', return_value=manager), \
+             patch.object(enrich_jobs, 'fetch_job_description', return_value=source_result) as source, \
+             patch.object(enrich_jobs, 'verify_known_official_candidate', return_value=SimpleNamespace(official_resolution=None)), \
+             patch.object(resolver, 'discover_ats_candidates', return_value=[]) as ats, \
+             patch.object(resolver, 'search_candidates', side_effect=TimeoutError('search timeout')) as search, \
+             patch.object(drain, 'save_enrichment_attempt') as persist:
+            report = drain.drain(None, loader=loader, processor=processor, search_circuit=circuit,
                                  emit=lambda text: None, sleeper=lambda seconds: None)
-        self.assertEqual(report['processed'], 5)
-        self.assertEqual(report['remaining_never_attempted_needing_jd'], 5)
-        self.assertIn('upstream unavailable', report['stop_reason'])
+        self.assertEqual(search.call_count, 5)
+        self.assertEqual(source.call_count, 6)
+        self.assertEqual(ats.call_count, 6)
+        self.assertEqual(report['processed'], 6)
+        self.assertIsNone(report['stop_reason'])
+        self.assertTrue(circuit.open)
+        self.assertEqual(circuit.summary(), {'opened': True, 'calls_attempted': 5, 'errors': 5, 'jobs_deferred': 1})
+        self.assertEqual(persist.call_args.kwargs['official_resolution'].status, resolver.OFFICIAL_SEARCH_DEFERRED)
+
+    def test_deferred_status_is_persisted_and_fresh_retry_circuit_searches(self):
+        with TemporaryDirectory() as directory, \
+             patch.object(database, 'DATA_DIR', Path(directory)), \
+             patch.object(database, 'DATABASE_PATH', Path(directory) / 'jobs.duckdb'):
+            enrich_jobs.initialize_enrichment_tables()
+            with database.get_connection() as c:
+                c.execute('CREATE TABLE job_matches(record_key VARCHAR,match_score INTEGER,is_recommended BOOLEAN,needs_review BOOLEAN)')
+                c.execute('CREATE TABLE resume_job_scores(record_key VARCHAR,overall_score INTEGER,description_complete BOOLEAN,scored_at TIMESTAMPTZ)')
+            circuit = resolver.PublicSearchCircuit()
+            circuit.open = True
+            j = dict(job('deferred'), apply_url='https://example.com/job',
+                     source='linkedin', description='')
+            with database.get_connection() as c:
+                c.execute("INSERT INTO raw_jobs(record_key,job_fingerprint,source,title,company_name,apply_url) VALUES ('deferred','fp','linkedin','Data Engineer','Example','https://example.com/job')")
+            source_result = JobDescriptionResult(
+                requested_url=j['apply_url'], final_url=None, status='no_description',
+                http_status=200, extraction_method=None, description='', word_count=0, error_message=None)
+            with patch.object(enrich_jobs, 'fetch_job_description', return_value=source_result), \
+                 patch.object(enrich_jobs, 'verify_known_official_candidate', return_value=SimpleNamespace(official_resolution=None)), \
+                 patch.object(resolver, 'discover_ats_candidates', return_value=[]), \
+                 patch.object(resolver, 'search_candidates', return_value=[]) as search:
+                drain.process_one(j, None, search_circuit=circuit)
+                search.assert_not_called()
+                with database.get_connection() as c:
+                    stored = c.execute('SELECT attempt_count,official_url_status FROM job_enrichment_attempts').fetchone()
+                self.assertEqual(stored, (1, resolver.OFFICIAL_SEARCH_DEFERRED))
+                self.assertEqual(drain.load_queue(), [])
+                retry = drain.load_queue(retry_official_search=True)
+                self.assertEqual(len(retry), 1)
+                drain.process_one(retry[0], None, search_circuit=resolver.PublicSearchCircuit())
+                self.assertEqual(search.call_count, 1)
+                self.assertEqual(drain.load_queue(retry_official_search=True), [])
+
+    def test_first_pass_queue_does_not_hide_new_records_behind_attempted_or_fuzzy_representative(self):
+        with TemporaryDirectory() as directory, \
+             patch.object(database, 'DATA_DIR', Path(directory)), \
+             patch.object(database, 'DATABASE_PATH', Path(directory) / 'jobs.duckdb'):
+            enrich_jobs.initialize_enrichment_tables()
+            with database.get_connection() as c:
+                c.execute('CREATE TABLE job_matches(record_key VARCHAR,match_score INTEGER,is_recommended BOOLEAN,needs_review BOOLEAN)')
+                c.execute('CREATE TABLE resume_job_scores(record_key VARCHAR,overall_score INTEGER,description_complete BOOLEAN,scored_at TIMESTAMPTZ)')
+                for key in ['old', 'new-a', 'new-b']:
+                    c.execute("INSERT INTO raw_jobs(record_key,job_fingerprint,source,title,company_name,apply_url) VALUES (?, 'same-fuzzy-fingerprint','linkedin','Data Engineer','Example', ?)",
+                              [key, 'https://www.linkedin.com/jobs/view/' + key])
+                c.execute("INSERT INTO job_enrichment_attempts(record_key,source,requested_url,status,description_word_count,official_url_status,official_url_source) VALUES ('old','linkedin','https://example.com/job','blocked',0,'SEARCH_DEFERRED','search')")
+            first_pass = drain.load_queue()
+            self.assertEqual({j['record_key'] for j in first_pass}, {'new-a', 'new-b'})
+            retry = drain.load_queue(retry_official_search=True)
+            self.assertEqual({j['record_key'] for j in retry}, {'old'})
+            self.assertTrue(all(j['attempt_count'] is None for j in first_pass))
+
+    def test_trusted_reuse_avoids_fetch_and_does_not_double_save(self):
+        with patch.object(drain, 'prepare_verified_candidate_metadata_before_queue', return_value={'offline_reused': 1}), \
+             patch.object(drain, 'existing_description_result', return_value=SimpleNamespace(word_count=100)), \
+             patch.object(drain, 'process_enrichment_job') as fetch, \
+             patch.object(drain, 'save_enrichment_attempt') as save:
+            outcome = drain.process_one(job('a'), None)
+        self.assertTrue(outcome.updated)
+        fetch.assert_not_called()
+        save.assert_not_called()
+
+    def test_same_fuzzy_fingerprint_does_not_propagate_failure(self):
+        inventory = [dict(job('a'), duplicate_fingerprint='similar'),
+                     dict(job('b'), duplicate_fingerprint='similar')]
+        report, _, saved = self.run_drain(inventory)
+        self.assertEqual(saved, ['a', 'b'])
+        self.assertEqual(report['processed'], 2)
 
     def test_processing_failure_is_persisted_as_real_failure(self):
         failed = result(status='fetch_error')

@@ -33,6 +33,7 @@ from src.enrichment.official_job_resolver import (
     OFFICIAL_ERROR,
     OFFICIAL_FOUND_VERIFIED,
     OFFICIAL_NOT_FOUND,
+    OFFICIAL_SEARCH_DEFERRED,
     OfficialJobResolutionResult,
     is_aggregator_job,
     resolve_official_job,
@@ -95,6 +96,7 @@ KNOWN_CANDIDATE_NO_CANDIDATE = "NO_CANDIDATE"
 
 OFFICIAL_RETRY_COOLDOWN_DAYS = 7
 OFFICIAL_RETRY_STATUSES = {
+    OFFICIAL_SEARCH_DEFERRED,
     OFFICIAL_AMBIGUOUS,
     OFFICIAL_BLOCKED,
     OFFICIAL_ERROR,
@@ -1040,6 +1042,9 @@ def load_jobs_to_enrich(
     retry_failed: bool,
     force: bool,
     resume_hash: str | None = None,
+    never_attempted_only: bool = False,
+    deduplicate: bool = True,
+    retry_official_search: bool = False,
 ) -> list[dict[str, Any]]:
     initialize_enrichment_tables()
 
@@ -1294,7 +1299,17 @@ def load_jobs_to_enrich(
             or ""
         )
 
-        if exact_key in selected_exact_keys:
+        if never_attempted_only and (job.get("previous_status") or int(job.get("attempt_count") or 0) > 0):
+            continue
+        transient_search = (
+            official_status_value(job) == OFFICIAL_SEARCH_DEFERRED
+            or (official_status_value(job) in {OFFICIAL_ERROR, OFFICIAL_BLOCKED}
+                and job.get("official_url_source") == "search")
+        )
+        if retry_official_search and not transient_search:
+            continue
+
+        if deduplicate and exact_key in selected_exact_keys:
             continue
 
         duplicate_key = str(
@@ -1302,7 +1317,7 @@ def load_jobs_to_enrich(
             or exact_key
         )
 
-        if duplicate_key in selected_duplicate_keys:
+        if deduplicate and duplicate_key in selected_duplicate_keys:
             continue
 
         if (
@@ -1325,6 +1340,8 @@ def load_jobs_to_enrich(
             job=job,
             force=force,
         )
+        if retry_official_search and transient_search:
+            needs_official = True
         job["needs_description_enrichment"] = needs_description
         job["needs_official_resolution"] = needs_official
 
@@ -2010,6 +2027,7 @@ def verify_known_official_candidate(
 def process_enrichment_job(
     job: dict[str, Any],
     client,
+    search_circuit=None,
 ) -> EnrichmentProcessingResult:
     """Fetch/validate a description, falling back to official pages if needed."""
     needs_description = bool(
@@ -2091,9 +2109,9 @@ def process_enrichment_job(
             identity_validation=identity_validation,
         )
     ):
+        options = {"search_circuit": search_circuit} if search_circuit is not None else {}
         official_resolution = resolve_official_job(
-            job=job,
-            client=client,
+            job=job, client=client, **options,
         )
 
         if (
