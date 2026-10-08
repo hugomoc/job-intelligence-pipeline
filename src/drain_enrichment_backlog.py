@@ -93,7 +93,8 @@ def write_report(path, report):
 
 def drain(client, *, batch_size=250, delay=0.5, max_jobs=None,
           emit=print, checkpoint=None, loader=load_queue, processor=process_one,
-          guard=None, sleeper=time.sleep, search_circuit=None, retry_official_search=False):
+          guard=None, sleeper=time.sleep, search_circuit=None, retry_official_search=False,
+          stop_on_search_unavailable=False):
     started = time.monotonic()
     guard = guard or RateLimitGuard()
     search_circuit = search_circuit or PublicSearchCircuit()
@@ -172,6 +173,9 @@ def drain(client, *, batch_size=250, delay=0.5, max_jobs=None,
                 limited_jobs = limited_jobs + 1 if is_limited else 0
                 emit(f"Saved: {status}; words={processed.result.word_count}; updated={processed.updated}")
                 persist()
+                if stop_on_search_unavailable and search_circuit.open:
+                    report['stop_reason'] = 'public search provider circuit opened; targeted retries remain retryable'
+                    break
                 if guard.stopped or limited_jobs >= 5:
                     report['stop_reason'] = 'excessive rate limiting'
                     break

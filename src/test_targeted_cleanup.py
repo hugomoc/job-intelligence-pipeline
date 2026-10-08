@@ -3,7 +3,9 @@ from datetime import datetime, timezone, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 import httpx
-from src.enrichment.official_job_resolver import search_candidates
+from src.enrichment.official_job_resolver import search_candidates, PublicSearchCircuit
+from src.drain_enrichment_backlog import drain
+from src import database
 from src.ui import daily_workflow_service as daily
 from src.targeted_enrichment import first_attempt, targeted_retry, select_targeted_retries
 from src.repositories.recommendation_repository import calculate_enrichment_priority
@@ -114,9 +116,25 @@ def test_public_search_page_health_and_challenge():
     assert not healthy and 'bot challenge' in probes[0]['error']
 
 
+def test_targeted_search_outage_stops_after_saved_attempt():
+    circuit=PublicSearchCircuit()
+    jobs=[job(record_key=str(i),attempt_count=1,previous_status='blocked') for i in range(10)]
+    saved=[]
+    def process(j,client):
+        saved.append(j['record_key'])
+        if len(saved)==5:circuit.open=True
+        return SimpleNamespace(updated=False,official_resolution=None,stored_status='blocked',
+                               result=SimpleNamespace(word_count=0,http_status=403),stored_error=None)
+    with patch('src.drain_enrichment_backlog.get_connection') as connection:
+        connection.return_value.__enter__.return_value.execute.return_value.fetchone.return_value=[1]
+        report=drain(None,loader=lambda:jobs,processor=process,search_circuit=circuit,
+                     retry_official_search=True,stop_on_search_unavailable=True,delay=0,emit=lambda s:None)
+    assert len(saved)==5 and report['processed']==5 and 'circuit opened' in report['stop_reason']
+
+
 def main():
     test_first_attempt_and_priority();test_daily_first_attempt_precedes_old_retries();test_targeted_retries();test_targeted_retry_repeats_source_before_official_fallback();test_review_filters()
-    test_current_cache_and_stale_scoring();test_quota_and_probe_safety();test_public_search_page_health_and_challenge()
+    test_current_cache_and_stale_scoring();test_quota_and_probe_safety();test_public_search_page_health_and_challenge();test_targeted_search_outage_stops_after_saved_attempt()
     print('Targeted cleanup regression tests passed.')
 
 if __name__=='__main__':main()

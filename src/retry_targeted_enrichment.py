@@ -81,7 +81,7 @@ def main():
             return initial.pop() if initial else loader()
         result=drain(client,batch_size=a.batch_size,delay=a.delay,checkpoint=a.report,
                      loader=queued_loader,guard=guard,search_circuit=PublicSearchCircuit(),
-                     retry_official_search=True,emit=lambda line:print(line,flush=True))
+                     retry_official_search=True,stop_on_search_unavailable=True,emit=lambda line:print(line,flush=True))
         result.update(targeted_postings=report['targeted_postings'],health_probes=probes)
         write_report(a.report,result)
 
