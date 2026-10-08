@@ -17,7 +17,7 @@ from src.enrich_jobs import (
     create_http_client, failed_processing_result, load_jobs_to_enrich,
     process_enrichment_job, save_enrichment_attempt, summarize_enrichment_queue,
 )
-from src.enrichment.official_job_resolver import OFFICIAL_FOUND_VERIFIED
+from src.enrichment.official_job_resolver import OFFICIAL_ERROR, OFFICIAL_FOUND_VERIFIED
 
 
 class RateLimitGuard:
@@ -89,6 +89,7 @@ def drain(client, *, batch_size=250, delay=0.5, max_jobs=None,
     emit(f"Never-attempted jobs needing a JD: {report['starting_never_attempted_needing_jd']}")
     seen = set()
     limited_jobs = 0
+    resolver_errors = 0
 
     def persist():
         report['elapsed_seconds'] = round(time.monotonic() - started, 2)
@@ -130,6 +131,7 @@ def drain(client, *, batch_size=250, delay=0.5, max_jobs=None,
                 batch_updated += int(processed.updated)
                 report['descriptions_updated'] += int(processed.updated)
                 official = processed.official_resolution
+                resolver_errors = resolver_errors + 1 if official and official.status == OFFICIAL_ERROR else 0
                 report['official_resolved'] += int(bool(official and official.status == OFFICIAL_FOUND_VERIFIED))
                 status = processed.stored_status
                 statuses[status] = statuses.get(status, 0) + 1
@@ -143,6 +145,9 @@ def drain(client, *, batch_size=250, delay=0.5, max_jobs=None,
                 persist()
                 if guard.stopped or limited_jobs >= 5:
                     report['stop_reason'] = 'excessive rate limiting'
+                    break
+                if resolver_errors >= 5:
+                    report['stop_reason'] = 'five consecutive official-resolver errors; upstream unavailable'
                     break
                 if delay:
                     sleeper(delay)

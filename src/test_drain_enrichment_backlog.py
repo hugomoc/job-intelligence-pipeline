@@ -102,6 +102,23 @@ class DrainTests(unittest.TestCase):
         self.assertEqual(report['remaining_never_attempted_needing_jd'], 5)
         self.assertEqual(report['stop_reason'], 'excessive rate limiting')
 
+    def test_official_resolver_outage_stops_after_five_persisted_errors(self):
+        saved = []
+        queue = [job(str(i)) for i in range(10)]
+        connection = unittest.mock.MagicMock()
+        connection.__enter__.return_value.execute.return_value.fetchone.return_value = None
+        def loader():
+            return [j for j in queue if j['record_key'] not in saved]
+        def processor(j, client):
+            saved.append(j['record_key'])
+            return result(official=SimpleNamespace(status=drain.OFFICIAL_ERROR))
+        with patch.object(drain, 'get_connection', return_value=connection):
+            report = drain.drain(None, loader=loader, processor=processor,
+                                 emit=lambda text: None, sleeper=lambda seconds: None)
+        self.assertEqual(report['processed'], 5)
+        self.assertEqual(report['remaining_never_attempted_needing_jd'], 5)
+        self.assertIn('upstream unavailable', report['stop_reason'])
+
     def test_processing_failure_is_persisted_as_real_failure(self):
         failed = result(status='fetch_error')
         with patch.object(drain, 'process_enrichment_job', side_effect=RuntimeError('offline')), \
