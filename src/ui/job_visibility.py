@@ -99,7 +99,8 @@ def classify_job_review_bucket(
     if not bool(job.get("has_current_complete_ai_assessment")):
         classification = classify_job_title(job.get("title"))
         if (classification.category == "FILTERED_OUT"
-                or classification.matched_pattern is None
+                or (classification.matched_pattern is None
+                    and job.get("admission_decision") != "include")
                 or job.get("critical_skill_gaps")):
             return REVIEW_BUCKET_LOW_FIT
         return REVIEW_BUCKET_NEEDS_REVIEW

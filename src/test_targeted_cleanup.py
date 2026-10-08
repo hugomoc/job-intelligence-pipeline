@@ -5,7 +5,7 @@ from unittest.mock import patch
 import httpx
 from src.enrichment.official_job_resolver import search_candidates, PublicSearchCircuit
 from src.drain_enrichment_backlog import drain
-from src import database
+from src import job_screening
 from src.ui import daily_workflow_service as daily
 from src.targeted_enrichment import first_attempt, targeted_retry, select_targeted_retries
 from src.repositories.recommendation_repository import calculate_enrichment_priority
@@ -80,6 +80,7 @@ def test_review_filters():
     assert not is_visible_for_review_filter(job(application_status='applied',has_current_complete_ai_assessment=False),'Recommended')
     assert not is_visible_for_review_filter(job(title='AI Trainer',has_current_complete_ai_assessment=False),'Needs review')
     assert is_visible_for_review_filter(job(title='AI Trainer',has_current_complete_ai_assessment=False),'Low fit')
+    assert is_visible_for_review_filter(job(title='Senior Insights Analyst',admission_decision='include',has_current_complete_ai_assessment=False),'Needs review')
 
 
 def test_current_cache_and_stale_scoring():
@@ -132,9 +133,20 @@ def test_targeted_search_outage_stops_after_saved_attempt():
     assert len(saved)==5 and report['processed']==5 and 'circuit opened' in report['stop_reason']
 
 
+def test_daily_ai_screening_requires_full_jd():
+    missing=job(description='SQL experience')
+    complete=job(record_key='full',description='Responsibilities SQL Python '+('experience '*100))
+    decision=SimpleNamespace(analysis=SimpleNamespace(decision='eligible',confidence='high'))
+    with patch.object(job_screening,'load_unscreened_job_eligibility_candidates',return_value=[missing,complete]), \
+         patch.object(job_screening,'evaluate_job_eligibility',return_value=decision) as evaluate, \
+         patch.object(job_screening,'save_job_eligibility_decision'):
+        summary=job_screening.screen_unscreened_jobs('resume',{'target_roles':['Data Engineer']},10,'model')
+    assert summary.screened==1 and evaluate.call_args.kwargs['job']['record_key']=='full'
+
+
 def main():
     test_first_attempt_and_priority();test_daily_first_attempt_precedes_old_retries();test_targeted_retries();test_targeted_retry_repeats_source_before_official_fallback();test_review_filters()
-    test_current_cache_and_stale_scoring();test_quota_and_probe_safety();test_public_search_page_health_and_challenge();test_targeted_search_outage_stops_after_saved_attempt()
+    test_current_cache_and_stale_scoring();test_quota_and_probe_safety();test_public_search_page_health_and_challenge();test_targeted_search_outage_stops_after_saved_attempt();test_daily_ai_screening_requires_full_jd()
     print('Targeted cleanup regression tests passed.')
 
 if __name__=='__main__':main()

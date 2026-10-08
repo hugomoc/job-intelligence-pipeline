@@ -19,6 +19,7 @@ from src.ai.resume_matcher import ResumeMatcherError
 from src.ai.resume_profiler import ResumeProfile
 from src.repositories.recommendation_repository import (
     load_unscreened_job_eligibility_candidates,
+    description_state,
     save_job_eligibility_decision,
 )
 
@@ -84,6 +85,12 @@ def screen_unscreened_jobs(
         limit=limit,
         prompt_version=ELIGIBILITY_PROMPT_VERSION,
     )
+
+    # JD resolution precedes every AI stage, including lightweight screening.
+    jobs = [job for job in jobs if description_state({
+        **job,
+        "raw_description_word_count": len((job.get("description") or "").split()),
+    }) == "FULL_JD"]
 
     screened = 0
     eligible = 0
