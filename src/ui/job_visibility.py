@@ -7,6 +7,7 @@ review cards until an employer/ATS URL has been verified.
 from __future__ import annotations
 
 from typing import Any
+from src.job_title_filter import classify_job_title
 
 from src.enrichment.official_job_resolver import (
     OFFICIAL_FOUND_VERIFIED,
@@ -52,11 +53,13 @@ REVIEW_BUCKET_NEEDS_REVIEW = "needs_review"
 REVIEW_BUCKET_LOW_FIT = "low_fit"
 
 REVIEW_FILTER_RECOMMENDED = "Recommended"
+REVIEW_FILTER_NEEDS_REVIEW = "Needs review"
 REVIEW_FILTER_ALL = "All"
 REVIEW_FILTER_LOW_FIT = "Low fit"
 
 REVIEW_FILTER_OPTIONS = (
     REVIEW_FILTER_RECOMMENDED,
+    REVIEW_FILTER_NEEDS_REVIEW,
     REVIEW_FILTER_ALL,
     REVIEW_FILTER_LOW_FIT,
 )
@@ -88,10 +91,17 @@ def classify_job_review_bucket(
         job.get("application_status") or "new"
     )
 
-    if application_status in {"applied", "removed"}:
+    if application_status in {"applied", "removed"} and bool(
+        job.get("has_current_complete_ai_assessment")
+    ):
         return REVIEW_BUCKET_RECOMMENDED
 
     if not bool(job.get("has_current_complete_ai_assessment")):
+        classification = classify_job_title(job.get("title"))
+        if (classification.category == "FILTERED_OUT"
+                or classification.matched_pattern is None
+                or job.get("critical_skill_gaps")):
+            return REVIEW_BUCKET_LOW_FIT
         return REVIEW_BUCKET_NEEDS_REVIEW
 
     score = _score_value(job.get("ai_score"))
@@ -150,10 +160,10 @@ def is_visible_for_review_filter(
     if review_filter == REVIEW_FILTER_LOW_FIT:
         return bucket == REVIEW_BUCKET_LOW_FIT
 
-    return bucket in {
-        REVIEW_BUCKET_RECOMMENDED,
-        REVIEW_BUCKET_NEEDS_REVIEW,
-    }
+    if review_filter == REVIEW_FILTER_NEEDS_REVIEW:
+        return bucket == REVIEW_BUCKET_NEEDS_REVIEW
+
+    return bucket == REVIEW_BUCKET_RECOMMENDED
 
 
 def filter_jobs_by_review_filter(

@@ -11,6 +11,10 @@ import contextlib
 import io
 from dataclasses import dataclass
 
+from src.targeted_enrichment import first_attempt, select_targeted_retries
+from src.drain_enrichment_backlog import RateLimitGuard
+from src.enrichment.official_job_resolver import PublicSearchCircuit
+
 from src.config_loader import load_searches, load_sources
 from src.database import (
     get_processed_email_count,
@@ -207,6 +211,7 @@ def run_description_enrichment(
 ) -> EnrichmentSummary:
     """Fetch richer descriptions for stored jobs without changing source rows."""
     try:
+        resume_hash = resume_hash or load_latest_resume_hash(get_model_name())
         queue_jobs = load_jobs_to_enrich(
             limit=max(
                 limit,
@@ -217,8 +222,12 @@ def run_description_enrichment(
             retry_failed=retry_failed,
             force=False,
             resume_hash=resume_hash,
+            deduplicate=False,
         )
-        jobs = queue_jobs[:limit]
+        fresh_jobs = [job for job in queue_jobs if first_attempt(job)]
+        retries = select_targeted_retries(queue_jobs) if retry_failed else []
+        # First attempts are completed independently of the historical retry cap.
+        jobs = fresh_jobs + retries[:max(0, limit - len(fresh_jobs))]
 
         queue_summary = summarize_enrichment_queue(queue_jobs)
         log_lines: list[str] = [
@@ -233,12 +242,16 @@ def run_description_enrichment(
             ),
         ]
 
+        guard = RateLimitGuard()
         with create_http_client() as client:
+            client.event_hooks.setdefault("response", []).append(guard.observe)
             batch_summary = process_enrichment_batch(
                 jobs=jobs,
                 client=client,
-                delay_seconds=0.0,
+                delay_seconds=0.5,
                 max_seconds=max_seconds,
+                search_circuit=PublicSearchCircuit(),
+                rate_limit_guard=guard,
             )
 
         log_lines.extend(batch_summary.log_lines)

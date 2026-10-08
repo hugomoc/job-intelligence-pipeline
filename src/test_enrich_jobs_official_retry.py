@@ -146,7 +146,9 @@ def create_supporting_tables() -> None:
                 record_key VARCHAR,
                 overall_score INTEGER,
                 description_complete BOOLEAN,
-                scored_at TIMESTAMPTZ
+                scored_at TIMESTAMPTZ,
+                resume_hash VARCHAR,
+                prompt_version VARCHAR
             )
             """
         )

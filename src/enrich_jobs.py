@@ -7,6 +7,9 @@ so failed/blocked pages can be retried intentionally.
 
 from __future__ import annotations
 
+from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
+from src.job_title_filter import classify_job_title
+
 import argparse
 import time
 from dataclasses import dataclass
@@ -1115,6 +1118,8 @@ def load_jobs_to_enrich(
         INNER JOIN jobs AS score_jobs
             ON scores.record_key = score_jobs.record_key
         WHERE scores.description_complete = true
+          AND (? IS NULL OR scores.resume_hash = ?)
+          AND coalesce(scores.prompt_version, 'v1') = ?
           AND scores.scored_at >= coalesce(
               score_jobs.description_updated_at,
               TIMESTAMPTZ '1970-01-01 00:00:00+00'
@@ -1227,7 +1232,7 @@ def load_jobs_to_enrich(
         jobs.title,
         jobs.company_name
     """,
-            [EXCLUDED_TITLE_SQL_REGEX],
+            [resume_hash, resume_hash, MATCHER_PROMPT_VERSION, EXCLUDED_TITLE_SQL_REGEX],
     )
 
         columns = [
@@ -1278,6 +1283,15 @@ def load_jobs_to_enrich(
 
     jobs.sort(
         key=lambda job: (
+            int(
+                job.get("application_status") == "new"
+                and job.get("title_classification") in {"STRONG_MATCH", "POSSIBLE_MATCH"}
+                and classify_job_title(job.get("title")).matched_pattern is not None
+                and not job.get("critical_skill_gaps")
+                and int(job.get("attempt_count") or 0) == 0
+                and not job.get("previous_status")
+                and job.get("description_state") != "FULL_JD"
+            ),
             job["enrichment_priority_score"],
             job.get("discovered_at") or datetime.min.replace(
                 tzinfo=timezone.utc
@@ -1432,6 +1446,8 @@ def process_enrichment_batch(
     delay_seconds: float = 0.0,
     max_seconds: float | None = None,
     emit=None,
+    search_circuit=None,
+    rate_limit_guard=None,
 ) -> EnrichmentBatchSummary:
     """Process a bounded batch and keep going after per-job failures."""
     totals = default_enrichment_totals()
@@ -1467,9 +1483,11 @@ def process_enrichment_batch(
         )
 
         try:
+            options = {"search_circuit": search_circuit} if search_circuit is not None else {}
             processed = process_enrichment_job(
                 job=job,
                 client=client,
+                **options,
             )
         except Exception as error:
             processed = failed_processing_result(
@@ -1513,6 +1531,10 @@ def process_enrichment_batch(
             f"words: {result.word_count}; "
             f"updated: {'yes' if processed.updated else 'no'}"
         )
+
+        if rate_limit_guard is not None and rate_limit_guard.stopped:
+            log("Stopping enrichment after excessive rate limiting; completed attempts are saved.")
+            break
 
         if (
             index < len(jobs)

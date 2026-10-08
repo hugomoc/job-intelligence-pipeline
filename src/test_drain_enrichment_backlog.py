@@ -152,7 +152,7 @@ class DrainTests(unittest.TestCase):
             enrich_jobs.initialize_enrichment_tables()
             with database.get_connection() as c:
                 c.execute('CREATE TABLE job_matches(record_key VARCHAR,match_score INTEGER,is_recommended BOOLEAN,needs_review BOOLEAN)')
-                c.execute('CREATE TABLE resume_job_scores(record_key VARCHAR,overall_score INTEGER,description_complete BOOLEAN,scored_at TIMESTAMPTZ)')
+                c.execute('CREATE TABLE resume_job_scores(record_key VARCHAR,overall_score INTEGER,description_complete BOOLEAN,scored_at TIMESTAMPTZ,resume_hash VARCHAR,prompt_version VARCHAR)')
             circuit = resolver.PublicSearchCircuit()
             circuit.open = True
             j = dict(job('deferred'), apply_url='https://example.com/job',
@@ -185,7 +185,7 @@ class DrainTests(unittest.TestCase):
             enrich_jobs.initialize_enrichment_tables()
             with database.get_connection() as c:
                 c.execute('CREATE TABLE job_matches(record_key VARCHAR,match_score INTEGER,is_recommended BOOLEAN,needs_review BOOLEAN)')
-                c.execute('CREATE TABLE resume_job_scores(record_key VARCHAR,overall_score INTEGER,description_complete BOOLEAN,scored_at TIMESTAMPTZ)')
+                c.execute('CREATE TABLE resume_job_scores(record_key VARCHAR,overall_score INTEGER,description_complete BOOLEAN,scored_at TIMESTAMPTZ,resume_hash VARCHAR,prompt_version VARCHAR)')
                 for key in ['old', 'new-a', 'new-b']:
                     c.execute("INSERT INTO raw_jobs(record_key,job_fingerprint,source,title,company_name,apply_url) VALUES (?, 'same-fuzzy-fingerprint','linkedin','Data Engineer','Example', ?)",
                               [key, 'https://www.linkedin.com/jobs/view/' + key])

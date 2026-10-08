@@ -766,7 +766,11 @@ def calculate_enrichment_priority(
         score -= 35
         reasons.append("critical gap penalty")
 
-    if job.get("admission_decision") == "exclude":
+    if job.get("admission_decision") == "exclude" and (
+        desc_state == "FULL_JD"
+        or title_classification == "FILTERED_OUT"
+        or job.get("critical_skill_gaps")
+    ):
         score -= 25
         reasons.append("pre-screen exclude penalty")
 

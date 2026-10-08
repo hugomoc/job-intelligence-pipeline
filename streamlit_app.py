@@ -868,9 +868,10 @@ with jobs_tab:
             options=list(REVIEW_FILTER_OPTIONS),
             index=0,
             help=(
-                "Recommended hides completed high-confidence low-fit jobs. "
-                "All keeps every reviewable job. Low fit shows the hidden "
-                "completed AI rejections."
+                "Recommended shows current scored jobs worth considering. "
+                "Needs review shows jobs awaiting a description or score. "
+                "Low fit keeps completed AI rejections available. "
+                "All shows every reviewable job."
             ),
         )
 

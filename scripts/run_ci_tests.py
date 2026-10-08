@@ -29,6 +29,7 @@ CI_TESTS = [
     "src/test_glassdoor_parser.py",
     "src/test_indeed_parser.py",
     "src/test_job_admission.py",
+    "src/test_targeted_cleanup.py",
     "src/test_job_description_enrichment.py",
     "src/test_job_eligibility.py",
     "src/test_job_identity.py",

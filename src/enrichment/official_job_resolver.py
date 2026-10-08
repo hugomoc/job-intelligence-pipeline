@@ -368,6 +368,11 @@ def search_candidates(
     if response.status_code >= 400:
         raise RuntimeError(f"search failed with HTTP {response.status_code}")
 
+    if any(marker in response.text.lower() for marker in (
+        'id="challenge-form"', 'class="anomaly-modal', 'bots use duckduckgo too'
+    )):
+        raise PermissionError("public search returned a bot challenge")
+
     return extract_search_result_candidates(
         response.text,
         company_name=company,
