@@ -24,6 +24,7 @@ CI_TESTS = [
     "src/test_builtin_parser.py",
     "src/test_config.py",
     "src/test_daily_workflow_service.py",
+    "src/test_drain_enrichment_backlog.py",
     "src/test_enrich_jobs_official_retry.py",
     "src/test_glassdoor_parser.py",
     "src/test_indeed_parser.py",
