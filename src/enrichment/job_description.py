@@ -416,6 +416,19 @@ def extract_json_ld_job_metadata(
                 "location": location_text(node.get("jobLocation")) or None,
                 "job_id": str(identifier.get("value")) if isinstance(identifier, dict) and identifier.get("value") else None,
             }
+            requirements = node.get("applicantLocationRequirements")
+            if isinstance(requirements, dict):
+                requirements = [requirements]
+            if not isinstance(requirements, list):
+                requirements = []
+            countries = [location_text(item) for item in requirements]
+            countries = [country for country in countries if country]
+            remote = str(node.get("jobLocationType") or "").upper() == "TELECOMMUTE"
+            extra_location = ("Remote" if remote else "")
+            if countries:
+                extra_location += (" - " if extra_location else "") + ", ".join(countries)
+            if extra_location:
+                metadata["location"] = "; ".join(filter(None, [metadata["location"], extra_location]))
             for key in ("title", "company", "location", "job_id"):
                 metadata[key + "_source"] = "jobposting_json_ld" if metadata[key] else None
             return metadata

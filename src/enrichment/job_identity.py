@@ -62,6 +62,8 @@ class JobIdentityValidation:
     company_similarity: float | None
     occupation_match: bool | None
     reason: str
+    location_compatibility: str = "unknown"
+    location_reason: str = "authoritative location unavailable"
 
 
 def normalize_company_name(value: str | None) -> str:
@@ -120,6 +122,83 @@ def primary_occupation(title: str | None) -> str | None:
     return None
 
 
+AUTHORITATIVE_LOCATION_SOURCES = {
+    "jobposting_json_ld", "greenhouse_remix_jobPost", "workday_posting_api",
+}
+US_REGIONS = dict(pair.split(":") for pair in (
+    "AL:alabama|AK:alaska|AZ:arizona|AR:arkansas|CA:california|CO:colorado|CT:connecticut|"
+    "DE:delaware|DC:district of columbia|FL:florida|GA:georgia|HI:hawaii|ID:idaho|IL:illinois|"
+    "IN:indiana|IA:iowa|KS:kansas|KY:kentucky|LA:louisiana|ME:maine|MD:maryland|MA:massachusetts|"
+    "MI:michigan|MN:minnesota|MS:mississippi|MO:missouri|MT:montana|NE:nebraska|NV:nevada|"
+    "NH:new hampshire|NJ:new jersey|NM:new mexico|NY:new york|NC:north carolina|ND:north dakota|"
+    "OH:ohio|OK:oklahoma|OR:oregon|PA:pennsylvania|RI:rhode island|SC:south carolina|"
+    "SD:south dakota|TN:tennessee|TX:texas|UT:utah|VT:vermont|VA:virginia|WA:washington|"
+    "WV:west virginia|WI:wisconsin|WY:wyoming"
+).split("|"))
+
+
+def location_compatibility(original, resolved, source):
+    """Veto explicit geography conflicts only with independently sourced evidence.
+
+    Bare Remote is never interpreted as US. URL slugs and discovery candidates
+    are never authoritative inputs. Unknown geography does not lower scores.
+    """
+    if source not in AUTHORITATIVE_LOCATION_SOURCES or not resolved:
+        return "unknown", "authoritative resolved location unavailable"
+    if not original:
+        return "unknown", "original posting geography unavailable"
+
+    def geography(text):
+        raw = str(text)
+        normalized = re.sub(r"[^a-z0-9]+", " ", raw.casefold()).strip()
+        countries = set()
+        for code, pattern in {
+            "US": r"\b(united states(?: of america)?|usa|us|u s a?)\b",
+            "GB": r"\b(united kingdom|great britain|gb|uk|u k)\b",
+            "CA": r"\b(canada)\b", "AU": r"\b(australia)\b",
+        }.items():
+            if re.search(pattern, normalized):
+                countries.add(code)
+        regions = set()
+        for code, name in US_REGIONS.items():
+            # Two-letter regions must be comma-delimited, avoiding ordinary words.
+            if re.search(r"(?:^|,)\s*" + code + r"(?:\s*(?:[,;/)]|$))", raw) or re.search(r"\b" + name + r"\b", normalized):
+                regions.add(code)
+        if regions:
+            countries.add("US")
+        remote = bool(re.search(r"\bremote\b", normalized))
+        return countries, regions, remote, normalized
+
+    oc, os, remote_original, original_text = geography(original)
+    rc, rs, remote_resolved, resolved_text = geography(resolved)
+    if oc and rc and not oc.intersection(rc):
+        return "mismatch", "authoritative country conflicts with original posting geography"
+    if remote_original and not oc:
+        if rc == {"US"} and remote_resolved:
+            return "compatible", "remote posting with authoritative US remote scope"
+        return "unknown", "original Remote has no country scope; geographic identity unproven"
+    if oc and rc and oc.intersection(rc) and remote_resolved:
+        return "compatible", "remote scope includes original posting country"
+    if os and rs and not os.intersection(rs):
+        return "mismatch", "authoritative US state conflicts with original posting geography"
+    if os and rs and os.intersection(rs):
+        def cities(text, regions):
+            aliases = "|".join(re.escape(value) for code in regions for value in (code.lower(), US_REGIONS[code]))
+            return {match.group(1).strip().casefold() for match in re.finditer(
+                r"(?:^|[;,])\s*([^,;]+),\s*(?:" + aliases + r")\b", str(text), re.I
+            )}
+        original_cities = cities(original, os)
+        resolved_cities = cities(resolved, rs)
+        if original_cities and resolved_cities:
+            if original_cities.intersection(resolved_cities):
+                return "compatible", "matching authoritative city and state"
+            return "mismatch", "authoritative city conflicts with original posting geography"
+        return "unknown", "same state; city identity not established"
+    if oc and rc and oc.intersection(rc):
+        return "compatible", "authoritative country includes original posting country"
+    return "unknown", "insufficient geographic scope to establish compatibility"
+
+
 def validate_job_identity(
     original_title: str | None,
     original_company: str | None,
@@ -127,8 +206,11 @@ def validate_job_identity(
     resolved_company: str | None,
     original_location: str | None = None,
     resolved_location: str | None = None,
+    resolved_location_source: str | None = None,
 ) -> JobIdentityValidation:
-    del original_location, resolved_location
+    location_status, location_reason = location_compatibility(
+        original_location, resolved_location, resolved_location_source
+    )
 
     normalized_original_title = normalize_job_title(original_title)
     normalized_resolved_title = normalize_job_title(resolved_title)
@@ -199,6 +281,10 @@ def validate_job_identity(
             and "primary occupation mismatch" not in reasons
         )
 
+    if location_status == "mismatch":
+        accepted = False
+        reasons.append("location mismatch: " + location_reason)
+
     if accepted:
         reason = "identity accepted"
     else:
@@ -219,4 +305,6 @@ def validate_job_identity(
         ),
         occupation_match=occupation_match,
         reason=reason,
+        location_compatibility=location_status,
+        location_reason=location_reason,
     )

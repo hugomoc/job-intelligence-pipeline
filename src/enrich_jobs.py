@@ -28,6 +28,7 @@ from src.enrichment.job_description import (
 )
 from src.enrichment.job_identity import (
     JobIdentityValidation,
+    location_compatibility,
     validate_job_identity,
 )
 from src.enrichment.official_job_resolver import (
@@ -308,14 +309,20 @@ def validate_enrichment_identity(
     job: dict[str, Any],
     result: JobDescriptionResult,
 ) -> JobIdentityValidation:
+    location_status, location_reason = location_compatibility(
+        job.get("location"), result.resolved_location, result.resolved_location_source
+    )
     if not requires_identity_validation(job, result):
         return JobIdentityValidation(
-            accepted=True,
+            accepted=location_status != "mismatch",
             confidence=1.0,
             title_similarity=None,
             company_similarity=None,
             occupation_match=None,
-            reason="identity validation not required for this source",
+            reason=("location mismatch: " + location_reason if location_status == "mismatch"
+                    else "identity validation not required for this source"),
+            location_compatibility=location_status,
+            location_reason=location_reason,
         )
 
     if not result.resolved_title and not result.resolved_company:
@@ -335,6 +342,7 @@ def validate_enrichment_identity(
         resolved_company=result.resolved_company,
         original_location=job.get("location"),
         resolved_location=result.resolved_location,
+        resolved_location_source=result.resolved_location_source,
     )
 
 

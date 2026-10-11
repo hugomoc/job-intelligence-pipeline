@@ -35,6 +35,7 @@ CI_TESTS = [
     "src/test_job_description_enrichment.py",
     "src/test_job_eligibility.py",
     "src/test_job_identity.py",
+    "src/test_location_identity.py",
     "src/test_job_pipeline_state.py",
     "src/test_job_review_visibility.py",
     "src/test_job_title_filter.py",

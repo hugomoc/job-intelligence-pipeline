@@ -578,6 +578,7 @@ def validate_candidate_result(
         resolved_title=result.resolved_title or candidate.title,
         resolved_company=result.resolved_company or candidate.company,
         resolved_location=result.resolved_location or candidate.location,
+        resolved_location_source=result.resolved_location_source,
     )
 
     if not validation.accepted:
@@ -697,6 +698,7 @@ def resolve_from_candidates(
                     resolved_title=result.resolved_title or candidate.title,
                     resolved_company=result.resolved_company or candidate.company,
                     resolved_location=result.resolved_location or candidate.location,
+                    resolved_location_source=result.resolved_location_source,
                 )
                 last_rejection_reason = validation.reason
                 job["candidate_validation_trace"][-1]["reason"] = validation.reason
