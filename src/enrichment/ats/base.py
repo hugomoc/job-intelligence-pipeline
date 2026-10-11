@@ -24,6 +24,8 @@ ATS_REQUEST_TIMEOUT = 20
 
 @dataclass(frozen=True)
 class OfficialJobCandidate:
+    """Discovery/ranking hints only; fields are not fetched identity evidence."""
+
     url: str
     label: str
     source: str

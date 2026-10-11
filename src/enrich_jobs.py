@@ -905,7 +905,6 @@ def reuse_verified_description(
     )
     job["official_resolved_company"] = (
         candidate.get("official_resolved_company")
-        or candidate.get("company_name")
     )
     job["official_resolved_location"] = (
         candidate.get("official_resolved_location")
@@ -995,7 +994,6 @@ def reuse_authoritative_verified_descriptions_before_queue(
             ),
             resolved_company=str(
                 candidate.get("official_resolved_company")
-                or candidate.get("company_name")
                 or ""
             ),
             original_location=str(job.get("location") or ""),

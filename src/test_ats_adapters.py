@@ -305,59 +305,23 @@ def test_resolver_uses_ats_before_generic_search() -> None:
     assert resolution.official_url_source == "icims"
 
 
-def test_resolver_uses_ats_listing_metadata_when_detail_lacks_identity() -> None:
-    original_ats = official_job_resolver.discover_ats_candidates
+def test_resolver_rejects_discovery_metadata_when_detail_lacks_identity() -> None:
     detail_url = "https://job-boards.greenhouse.io/monzo/jobs/8013699"
-    description_html = (
-        "<html><body><main>"
-        f"{DESCRIPTION}"
-        "</main></body></html>"
+    candidate = OfficialJobCandidate(
+        url=detail_url, label="Staff Analytics Engineer | Monzo", source="greenhouse",
+        title="Staff Analytics Engineer", company="Monzo", location="Remote (UK)", job_id="8013699",
     )
-
-    def greenhouse_candidate(job: dict, client: httpx.Client):
-        return [
-            OfficialJobCandidate(
-                url=detail_url,
-                label="Staff Analytics Engineer | Monzo | Cardiff, London or Remote (UK)",
-                source="greenhouse",
-                title="Staff Analytics Engineer",
-                company="Monzo",
-                location="Cardiff, London or Remote (UK)",
-                job_id="8013699",
-            )
-        ]
-
-    official_job_resolver.discover_ats_candidates = greenhouse_candidate
-
-    try:
-        with mock_client(
-            {
-                detail_url: httpx.Response(
-                    200,
-                    text=description_html,
-                    headers={"content-type": "text/html"},
-                ),
-            },
-            fail_on_search=True,
-        ) as client:
-            resolution = resolve_official_job(
-                {
-                    "source": "lensa",
-                    "title": "Staff Analytics Engineer",
-                    "company_name": "Monzo",
-                    "location": "Remote",
-                    "apply_url": "https://lensa.com/generic-alert",
-                },
-                client,
-            )
-    finally:
-        official_job_resolver.discover_ats_candidates = original_ats
-
-    assert resolution.status == OFFICIAL_FOUND_VERIFIED
-    assert resolution.official_job_url == detail_url
-    assert resolution.official_url_source == "greenhouse"
-    assert resolution.resolved_title == "Staff Analytics Engineer"
-    assert resolution.resolved_company == "Monzo"
+    with mock_client({detail_url: httpx.Response(
+        200, text=f"<main>{DESCRIPTION}</main>", headers={"content-type": "text/html"},
+    )}, fail_on_search=True) as client:
+        resolution = official_job_resolver.resolve_from_candidates(
+            {"title": "Staff Analytics Engineer", "company_name": "Monzo", "location": "Remote"},
+            client, [candidate], source="greenhouse",
+        )
+    assert resolution.status == OFFICIAL_NOT_FOUND
+    assert resolution.official_job_url is None
+    assert resolution.resolved_title is None
+    assert resolution.resolved_company is None
 
 
 def test_resolver_falls_back_to_generic_when_ats_has_no_match() -> None:
@@ -595,7 +559,7 @@ def main() -> None:
     test_icims_parses_listing_and_supports_dynamic_description_fallback()
     test_workday_parses_mock_search_results_and_limits_results()
     test_resolver_uses_ats_before_generic_search()
-    test_resolver_uses_ats_listing_metadata_when_detail_lacks_identity()
+    test_resolver_rejects_discovery_metadata_when_detail_lacks_identity()
     test_resolver_falls_back_to_generic_when_ats_has_no_match()
     test_resolver_continues_when_ats_adapter_errors()
     test_multiple_ats_results_can_be_ambiguous()

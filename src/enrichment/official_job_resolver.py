@@ -117,20 +117,15 @@ AGGREGATOR_DOMAINS = {
     "lensa.com",
 }
 
-KNOWN_ATS_HOST_PARTS = {
+# Domains controlled by each ATS. Matches require a hostname label boundary.
+KNOWN_ATS_DOMAINS = {
     "ashbyhq.com": "ashby",
-    "boards.greenhouse.io": "greenhouse",
-    "careers-": "icims",
     "greenhouse.io": "greenhouse",
     "icims.com": "icims",
-    "jobs.ashbyhq.com": "ashby",
-    "jobs.lever.co": "lever",
-    "jobs.smartrecruiters.com": "smartrecruiters",
     "lever.co": "lever",
-    "myworkdayjobs.com": "workday",
     "smartrecruiters.com": "smartrecruiters",
-    "wd1.myworkdaysite.com": "workday",
-    "wd3.myworkdaysite.com": "workday",
+    "myworkdayjobs.com": "workday",
+    "myworkdaysite.com": "workday",
     "workdayjobs.com": "workday",
 }
 
@@ -188,11 +183,9 @@ def hostname(value: str | None) -> str:
         return ""
 
     try:
-        parsed = urlparse(value)
+        return (urlparse(value).hostname or "").casefold().removeprefix("www.").rstrip(".")
     except ValueError:
         return ""
-
-    return parsed.netloc.casefold().removeprefix("www.")
 
 
 def is_aggregator_domain(url: str | None) -> bool:
@@ -266,8 +259,9 @@ def should_attempt_official_resolution(
 def ats_type_for_url(url: str) -> str | None:
     host = hostname(url)
 
-    for host_part, ats_type in KNOWN_ATS_HOST_PARTS.items():
-        if host_part in host:
+    host = host.rstrip(".")
+    for domain, ats_type in KNOWN_ATS_DOMAINS.items():
+        if host == domain or host.endswith("." + domain):
             return ats_type
 
     return None
@@ -571,13 +565,15 @@ def validate_candidate_result(
     if result.status != "enriched":
         return None
 
+    # Candidate fields are discovery/ranking hints, including expected-company
+    # values supplied by ATS adapters. Only fetched posting metadata is evidence.
     validation = validate_job_identity(
         original_title=job.get("title"),
         original_company=job.get("company_name"),
         original_location=job.get("location"),
-        resolved_title=result.resolved_title or candidate.title,
-        resolved_company=result.resolved_company or candidate.company,
-        resolved_location=result.resolved_location or candidate.location,
+        resolved_title=result.resolved_title,
+        resolved_company=result.resolved_company,
+        resolved_location=result.resolved_location,
         resolved_location_source=result.resolved_location_source,
     )
 
@@ -621,8 +617,8 @@ def choose_verified_candidate(
                     "to choose safely"
                 ),
                 resolved_title=best.result.resolved_title,
-                resolved_company=best.result.resolved_company or best.candidate.company,
-                resolved_location=best.result.resolved_location or best.candidate.location,
+                resolved_company=best.result.resolved_company,
+                resolved_location=best.result.resolved_location,
             )
 
     return OfficialJobResolutionResult(
@@ -632,9 +628,9 @@ def choose_verified_candidate(
         official_url_resolved_at=now_utc(),
         official_url_confidence=best.validation.confidence,
         official_url_validation_reason=best.validation.reason,
-        resolved_title=best.result.resolved_title or best.candidate.title,
-        resolved_company=best.result.resolved_company or best.candidate.company,
-        resolved_location=best.result.resolved_location or best.candidate.location,
+        resolved_title=best.result.resolved_title,
+        resolved_company=best.result.resolved_company,
+        resolved_location=best.result.resolved_location,
         description_result=best.result,
         identity_validation=best.validation,
     )
@@ -695,9 +691,9 @@ def resolve_from_candidates(
                     original_title=job.get("title"),
                     original_company=job.get("company_name"),
                     original_location=job.get("location"),
-                    resolved_title=result.resolved_title or candidate.title,
-                    resolved_company=result.resolved_company or candidate.company,
-                    resolved_location=result.resolved_location or candidate.location,
+                    resolved_title=result.resolved_title,
+                    resolved_company=result.resolved_company,
+                    resolved_location=result.resolved_location,
                     resolved_location_source=result.resolved_location_source,
                 )
                 last_rejection_reason = validation.reason
