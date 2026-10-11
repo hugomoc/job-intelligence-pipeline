@@ -421,13 +421,24 @@ def search_candidates(job: dict, client: httpx.Client) -> list[OfficialJobCandid
         candidates = duckduckgo_candidates(job, client)
     else:
         try:
-            response = serper_search(f'"{title}" "{company}" careers jobs', client)
+            query = f'{company} {title} jobs'
+            job["public_search_trace"]["query"] = query
+            response = serper_search(query, client)
         except PublicSearchError as error:
             job["public_search_trace"]["error_category"] = error.category
             raise
         candidates = [OfficialJobCandidate(url=url, label="", source=ats_type_for_url(url) or "search")
                       for url in response.urls if looks_like_official_or_ats_url(url, company)][:MAX_SEARCH_RESULTS]
-        job["public_search_trace"].update(healthy=True, search_results=response.result_count)
+        audit = []
+        for hit in response.untrusted_results:
+            url = hit["url"]
+            eligible = looks_like_official_or_ats_url(url, company)
+            audit.append({"title": hit["title"], "domain": hostname(url), "url": url,
+                          "candidate": eligible,
+                          "discovery_reason": "candidate-only; requires fetched posting identity" if eligible
+                          else "non-official/non-ATS domain or no employer careers/job path"})
+        job["public_search_trace"].update(healthy=True, search_results=response.result_count,
+                                          organic_results=audit)
     job["public_search_trace"]["candidates"] = len(candidates)
     return candidates
 
@@ -674,9 +685,11 @@ def resolve_from_candidates(
 
         job["candidate_validation_trace"].append({"url": candidate.url,
             "accepted": verified is not None, "fetch_status": result.status,
-            "reason": verified.validation.reason if verified else "fetched posting did not pass existing identity validation"})
+            "reason": verified.validation.reason if verified else "fetched posting did not pass existing identity validation",
+            "http_status": result.http_status, "word_count": result.word_count,
+            "resolved_title": result.resolved_title, "resolved_company": result.resolved_company})
         if verified is None:
-            if result.resolved_title or result.resolved_company:
+            if result.status == "enriched" or result.resolved_title or result.resolved_company:
                 validation = validate_job_identity(
                     original_title=job.get("title"),
                     original_company=job.get("company_name"),

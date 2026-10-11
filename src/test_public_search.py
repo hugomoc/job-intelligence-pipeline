@@ -38,12 +38,18 @@ class SearchTests(unittest.TestCase):
             request = self.requests[0]
             self.assertEqual(request.url.host, 'google.serper.dev')
             self.assertEqual(request.headers['x-api-key'], 'mock-secret')
-            self.assertEqual(json.loads(request.content)['q'], '"Senior Analytics Engineer" "Seismic" careers jobs')
+            self.assertEqual(json.loads(request.content)['q'], 'Seismic Senior Analytics Engineer jobs')
             self.assertNotIn('x-api-key', client.headers)
+            self.assertEqual(lensa_job().get('verified_posting_key'), None)
             self.assertIsNone(candidates[0].title)
             self.assertIsNone(candidates[0].company)
             self.assertEqual(candidates[0].label, '')
             self.assertNotIn('official_job_url', lensa_job())
+            trace_job=lensa_job()
+            resolver.search_candidates(trace_job,client)
+            self.assertEqual(trace_job['public_search_trace']['query'], 'Seismic Senior Analytics Engineer jobs')
+            self.assertEqual(trace_job['public_search_trace']['organic_results'][0]['title'], 'Senior Analytics Engineer')
+            self.assertTrue(trace_job['public_search_trace']['organic_results'][0]['candidate'])
         with patch.dict(os.environ, {'SERPER_API_KEY': ''}):
             self.assertEqual(selected_provider(), 'duckduckgo')
 

@@ -17,6 +17,8 @@ class PublicSearchError(RuntimeError):
 class SearchResponse:
     urls: tuple[str, ...]
     result_count: int
+    # Audit-only metadata, never passed to posting identity validation.
+    untrusted_results: tuple[dict, ...] = ()
 
 
 def selected_provider():
@@ -79,4 +81,6 @@ def serper_search(query, client):
     # Intentionally discard title, snippet, company and other identity hints.
     urls = tuple(dict.fromkeys(row["link"] for row in organic
                              if isinstance(row, dict) and isinstance(row.get("link"), str)))
-    return SearchResponse(urls, len(organic))
+    audit = tuple({"url": row.get("link", ""), "title": row.get("title", "")}
+                  for row in organic if isinstance(row, dict))
+    return SearchResponse(urls, len(organic), audit)

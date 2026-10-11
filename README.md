@@ -310,8 +310,9 @@ python -m src.retry_targeted_enrichment --require-serper --max-jobs 20 --batch-s
 ```
 
 These commands validate 25 distinct postings in total; they do not score jobs
-or drain the remaining queue. Review both reports before a larger pass. Reports
-contain per-posting candidate decisions and per-provider request/response,
+or drain the remaining queue. Review both reports before a larger pass. Serper queries use unquoted company and title terms plus `jobs`, so alert-title
+decorations do not force an exact phrase match. Reports
+contain the exact query, organic result titles/domains/URLs (audit only), per-posting candidate decisions and per-provider request/response,
 no-result, error, verified-resolution and FULL_JD recovery metrics, including
 health-probe queries. They never contain the API key or raw provider error bodies.
 Completed attempts persist individually; `--exclude-report` prevents repeating
