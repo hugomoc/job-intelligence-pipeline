@@ -30,6 +30,7 @@ CI_TESTS = [
     "src/test_indeed_parser.py",
     "src/test_job_admission.py",
     "src/test_targeted_cleanup.py",
+    "src/test_public_search.py",
     "src/test_job_description_enrichment.py",
     "src/test_job_eligibility.py",
     "src/test_job_identity.py",
@@ -105,6 +106,7 @@ def run_test(test_path: str) -> None:
     environment["PYTHONPATH"] = str(REPO_ROOT)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["RUN_LIVE_EMAIL_TESTS"] = "0"
+    environment["SERPER_API_KEY"] = ""  # Offline legacy fixtures must not use local .env credentials.
 
     subprocess.run(
         [sys.executable, test_path],

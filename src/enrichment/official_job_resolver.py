@@ -17,6 +17,9 @@ from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from src.enrichment.public_search import (
+    PublicSearchError, selected_provider, serper_search, metric,
+)
 from src.browser.playwright_client import PlaywrightClient
 from src.enrichment.ats import (
     OfficialJobCandidate,
@@ -51,28 +54,44 @@ class SearchDeferredError(RuntimeError):
 
 
 class PublicSearchCircuit:
-    """One run's public-search circuit; direct ATS discovery is independent."""
+    """Independent provider circuits; direct ATS discovery is unaffected."""
     def __init__(self, threshold: int = 5):
         self.threshold = threshold
+        self.states = {}
         self.calls = 0
         self.errors = 0
-        self.consecutive_errors = 0
-        self.open = False
         self.deferred = 0
 
+    def state(self, provider=None):
+        return self.states.setdefault(provider or selected_provider(),
+                                     {"open": False, "consecutive_errors": 0, "calls": 0, "errors": 0})
+
+    @property
+    def open(self):
+        return self.state()["open"]
+
+    @open.setter
+    def open(self, value):
+        self.state()["open"] = value
+
     def search(self, job, client):
-        if self.open:
+        provider = selected_provider()
+        state = self.state(provider)
+        if state["open"]:
             self.deferred += 1
-            raise SearchDeferredError("public search deferred: provider circuit is open")
+            raise SearchDeferredError(f"{provider} public search deferred: provider circuit is open")
         self.calls += 1
+        state["calls"] += 1
         try:
             candidates = search_candidates(job, client)
-        except Exception:
+        except Exception as error:
             self.errors += 1
-            self.consecutive_errors += 1
-            self.open = self.consecutive_errors >= self.threshold
+            state["errors"] += 1
+            state["consecutive_errors"] += 1
+            state["open"] = (getattr(error, "stop_provider", False)
+                             or state["consecutive_errors"] >= self.threshold)
             raise
-        self.consecutive_errors = 0
+        state["consecutive_errors"] = 0
         return candidates
 
     def summary(self):
@@ -347,7 +366,7 @@ def extract_search_result_candidates(
     return candidates
 
 
-def search_candidates(
+def duckduckgo_candidates(
     job: dict,
     client: httpx.Client,
 ) -> list[OfficialJobCandidate]:
@@ -360,6 +379,7 @@ def search_candidates(
     query = quote_plus(f'"{title}" "{company}" careers jobs')
     search_url = f"https://duckduckgo.com/html/?q={query}"
 
+    metric(client, "duckduckgo", "search_requests")
     response = client.get(search_url)
 
     if response.status_code in {401, 403, 429}:
@@ -373,10 +393,43 @@ def search_candidates(
     )):
         raise PermissionError("public search returned a bot challenge")
 
+    metric(client, "duckduckgo", "successful_responses")
+    if "no-results" in response.text:
+        metric(client, "duckduckgo", "no_result_searches")
+    job["public_search_trace"] = {"provider": "duckduckgo", "healthy": bool(
+        BeautifulSoup(response.text, "html.parser").select(".result__a, .no-results, .no-results__message"))}
     return extract_search_result_candidates(
         response.text,
         company_name=company,
     )
+
+
+def search_candidates(job: dict, client: httpx.Client) -> list[OfficialJobCandidate]:
+    """Select Serper when configured; legacy DuckDuckGo remains optional.
+
+    Search metadata is discovery-only. In particular, Serper cannot fill in
+    missing posting title/company on a fetched page during identity validation.
+    """
+    provider = selected_provider()
+    job["public_search_trace"] = {"provider": provider, "healthy": False,
+                                  "candidates": 0}
+    title = str(job.get("title") or "").strip()
+    company = str(job.get("company_name") or "").strip()
+    if not title or not company:
+        return []
+    if provider == "duckduckgo":
+        candidates = duckduckgo_candidates(job, client)
+    else:
+        try:
+            response = serper_search(f'"{title}" "{company}" careers jobs', client)
+        except PublicSearchError as error:
+            job["public_search_trace"]["error_category"] = error.category
+            raise
+        candidates = [OfficialJobCandidate(url=url, label="", source=ats_type_for_url(url) or "search")
+                      for url in response.urls if looks_like_official_or_ats_url(url, company)][:MAX_SEARCH_RESULTS]
+        job["public_search_trace"].update(healthy=True, search_results=response.result_count)
+    job["public_search_trace"]["candidates"] = len(candidates)
+    return candidates
 
 
 async def fetch_dynamic_job_description_async(
@@ -581,6 +634,7 @@ def resolve_from_candidates(
     candidates: Iterable[OfficialJobCandidate],
     source: str,
 ) -> OfficialJobResolutionResult:
+    job.setdefault("candidate_validation_trace", [])
     ranked = ranked_candidates(
         job,
         candidates,
@@ -607,6 +661,8 @@ def resolve_from_candidates(
         result = fetch_candidate_description(candidate, client)
 
         if result.status == "blocked":
+            job["candidate_validation_trace"].append({"url": candidate.url, "accepted": False,
+                "fetch_status": result.status, "reason": "identity not evaluated: posting fetch blocked"})
             blocked_count += 1
             continue
 
@@ -616,6 +672,9 @@ def resolve_from_candidates(
             result=result,
         )
 
+        job["candidate_validation_trace"].append({"url": candidate.url,
+            "accepted": verified is not None, "fetch_status": result.status,
+            "reason": verified.validation.reason if verified else "fetched posting did not pass existing identity validation"})
         if verified is None:
             if result.resolved_title or result.resolved_company:
                 validation = validate_job_identity(
@@ -627,12 +686,22 @@ def resolve_from_candidates(
                     resolved_location=result.resolved_location or candidate.location,
                 )
                 last_rejection_reason = validation.reason
+                job["candidate_validation_trace"][-1]["reason"] = validation.reason
             continue
 
         verified_jobs.append(verified)
 
     if verified_jobs:
-        return choose_verified_candidate(verified_jobs)
+        chosen = choose_verified_candidate(verified_jobs)
+        trace = job.get("public_search_trace", {})
+        if trace.get("provider") and chosen.status == OFFICIAL_FOUND_VERIFIED:
+            metric(client, trace["provider"], "verified_official_resolutions")
+            from src.repositories.recommendation_repository import description_state
+            description = chosen.description_result
+            if description and description_state({"description": description.description,
+                    "raw_description_word_count": description.word_count}) == "FULL_JD":
+                metric(client, trace["provider"], "descriptions_recovered")
+        return chosen
 
     if blocked_count == len(ranked):
         return OfficialJobResolutionResult(
