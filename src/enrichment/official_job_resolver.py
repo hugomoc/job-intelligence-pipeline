@@ -43,6 +43,7 @@ from src.resolvers.job_matching import (
 
 OFFICIAL_FOUND_VERIFIED = "FOUND_VERIFIED"
 OFFICIAL_NOT_FOUND = "OFFICIAL_NOT_FOUND"
+OFFICIAL_INSUFFICIENT_IDENTITY = "INSUFFICIENT_IDENTITY"
 OFFICIAL_AMBIGUOUS = "AMBIGUOUS"
 OFFICIAL_BLOCKED = "BLOCKED"
 OFFICIAL_ERROR = "ERROR"
@@ -567,6 +568,7 @@ def validate_candidate_result(
 
     # Candidate fields are discovery/ranking hints, including expected-company
     # values supplied by ATS adapters. Only fetched posting metadata is evidence.
+    from src.enrich_jobs import trusted_identity_proof
     validation = validate_job_identity(
         original_title=job.get("title"),
         original_company=job.get("company_name"),
@@ -575,6 +577,7 @@ def validate_candidate_result(
         resolved_company=result.resolved_company,
         resolved_location=result.resolved_location,
         resolved_location_source=result.resolved_location_source,
+        **trusted_identity_proof(job, result),
     )
 
     if not validation.accepted:
@@ -687,6 +690,7 @@ def resolve_from_candidates(
             "resolved_title": result.resolved_title, "resolved_company": result.resolved_company})
         if verified is None:
             if result.status == "enriched" or result.resolved_title or result.resolved_company:
+                from src.enrich_jobs import trusted_identity_proof
                 validation = validate_job_identity(
                     original_title=job.get("title"),
                     original_company=job.get("company_name"),
@@ -695,6 +699,7 @@ def resolve_from_candidates(
                     resolved_company=result.resolved_company,
                     resolved_location=result.resolved_location,
                     resolved_location_source=result.resolved_location_source,
+                    **trusted_identity_proof(job, result),
                 )
                 last_rejection_reason = validation.reason
                 job["candidate_validation_trace"][-1]["reason"] = validation.reason
@@ -728,7 +733,10 @@ def resolve_from_candidates(
         )
 
     return OfficialJobResolutionResult(
-        status=OFFICIAL_NOT_FOUND,
+        status=(OFFICIAL_INSUFFICIENT_IDENTITY if last_rejection_reason
+                and "independent same-posting proof unavailable" in last_rejection_reason
+                and "resolved title missing" not in last_rejection_reason
+                else OFFICIAL_NOT_FOUND),
         official_job_url=None,
         official_url_source=source,
         official_url_resolved_at=now_utc(),

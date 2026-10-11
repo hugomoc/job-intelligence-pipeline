@@ -30,8 +30,8 @@ class LocationTests(unittest.TestCase):
         self.assertEqual(r.resolved_location,'Remote - GB');self.assertEqual(r.resolved_location_source,'jobposting_json_ld')
         self.assertFalse(self.validation('US (Remote)',r.resolved_location).accepted)
         self.assertEqual(self.validation('Remote',r.resolved_location).location_compatibility,'unknown')
-        self.assertFalse(validate_enrichment_identity({'source':'linkedin','location':'United States'},r).accepted)
-        self.assertTrue(validate_enrichment_identity({'source':'linkedin','location':'Remote'},r).accepted)
+        self.assertFalse(validate_enrichment_identity({'source':'linkedin','location':'United States','title':'Data Engineer','company_name':'Example'},r).accepted)
+        self.assertTrue(validate_enrichment_identity({'source':'linkedin','location':'Remote','title':'Data Engineer','company_name':'Example'},r).accepted)
 
     def test_title_company_thresholds_unchanged(self):
         v=validate_job_identity('Data Engineer','Example','Software Engineer','Other','Remote','Remote - US','jobposting_json_ld')

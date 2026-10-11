@@ -70,7 +70,7 @@ def test_company_mismatch_rejects_matching_title() -> None:
     assert "company mismatch" in validation.reason
 
 
-def test_missing_company_requires_extremely_strong_title() -> None:
+def test_missing_company_requires_independent_posting_proof() -> None:
     accepted = validate_job_identity(
         original_title="Principal Data Engineer, Analytics",
         original_company="DriveWealth",
@@ -84,7 +84,7 @@ def test_missing_company_requires_extremely_strong_title() -> None:
         resolved_company=None,
     )
 
-    assert accepted.accepted
+    assert not accepted.accepted
     assert not rejected.accepted
 
 
@@ -95,7 +95,7 @@ def main() -> None:
     test_abbreviated_seniority_is_accepted()
     test_occupation_mismatch_rejects_even_when_company_matches()
     test_company_mismatch_rejects_matching_title()
-    test_missing_company_requires_extremely_strong_title()
+    test_missing_company_requires_independent_posting_proof()
     print("Job identity tests passed.")
 
 

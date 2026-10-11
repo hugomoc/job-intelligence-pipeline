@@ -207,6 +207,8 @@ def validate_job_identity(
     original_location: str | None = None,
     resolved_location: str | None = None,
     resolved_location_source: str | None = None,
+    trusted_original_posting_key: str | None = None,
+    resolved_posting_key: str | None = None,
 ) -> JobIdentityValidation:
     location_status, location_reason = location_compatibility(
         original_location, resolved_location, resolved_location_source
@@ -270,23 +272,31 @@ def validate_job_identity(
             and "title mismatch" not in reasons
         )
     else:
+        exact_posting_proof = bool(
+            trusted_original_posting_key
+            and resolved_posting_key
+            and trusted_original_posting_key == resolved_posting_key
+        )
         confidence = (
-            (title_similarity or 0.0) * 0.90
+            (title_similarity or 0.0) * (0.75 if exact_posting_proof else 0.45)
             + (0.10 if occupation_match is not False else 0.0)
         )
         accepted = (
-            confidence >= ACCEPT_WITHOUT_COMPANY_THRESHOLD
+            exact_posting_proof
             and title_similarity is not None
             and title_similarity >= ACCEPT_WITHOUT_COMPANY_THRESHOLD
             and "primary occupation mismatch" not in reasons
         )
+        if not exact_posting_proof:
+            reasons.append("independent same-posting proof unavailable")
 
     if location_status == "mismatch":
         accepted = False
         reasons.append("location mismatch: " + location_reason)
 
     if accepted:
-        reason = "identity accepted"
+        reason = ("identity accepted" if company_available else
+                  "identity accepted with trusted exact posting proof; company unavailable")
     else:
         reason = "; ".join(reasons) or "identity confidence below threshold"
 
