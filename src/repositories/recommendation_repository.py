@@ -455,6 +455,17 @@ def exact_posting_identity(
 
 def register_exact_posting_identity_function(connection) -> None:
     """Expose exact_posting_identity to DuckDB queries on this connection."""
+    from src.job_domains import posting_key_can_be_trusted, is_third_party_url
+    try:
+        connection.create_function("posting_url_is_third_party", is_third_party_url,
+            [str], bool, null_handling="special")
+    except Exception:
+        pass
+    try:
+        connection.create_function("posting_key_can_be_trusted", posting_key_can_be_trusted,
+            [str], bool, null_handling="special")
+    except Exception:
+        pass
     try:
         connection.create_function(
             "exact_posting_identity",
@@ -1528,7 +1539,7 @@ def load_all_jobs(
                           attempts.verified_posting_key_source,
                           ''
                       )
-                  ) IN ({trusted_verified_key_sources})
+                  ) IN ({trusted_verified_key_sources}) AND posting_key_can_be_trusted(attempts.verified_posting_key) AND NOT posting_url_is_third_party(attempts.official_job_url)
             ),
 
             latest_eligibility AS (
@@ -1646,7 +1657,7 @@ def load_all_jobs(
                           attempts.verified_posting_key_source,
                           ''
                       )
-                  ) IN ({trusted_verified_key_sources})
+                  ) IN ({trusted_verified_key_sources}) AND posting_key_can_be_trusted(attempts.verified_posting_key) AND NOT posting_url_is_third_party(attempts.official_job_url)
                   AND attempts.description_hash IS NOT NULL
                   AND TRIM(attempts.description_hash) <> ''
             )
@@ -1872,7 +1883,7 @@ def load_all_jobs(
                        enrichment_attempts.verified_posting_key_source,
                        ''
                    )
-               ) IN ({trusted_verified_key_sources})
+               ) IN ({trusted_verified_key_sources}) AND posting_key_can_be_trusted(enrichment_attempts.verified_posting_key) AND NOT posting_url_is_third_party(enrichment_attempts.official_job_url)
             LEFT JOIN verified_scores
                 ON enrichment_attempts.verified_posting_key =
                    verified_scores.verified_posting_key
@@ -1890,7 +1901,7 @@ def load_all_jobs(
                        enrichment_attempts.verified_posting_key_source,
                        ''
                    )
-               ) IN ({trusted_verified_key_sources})
+               ) IN ({trusted_verified_key_sources}) AND posting_key_can_be_trusted(enrichment_attempts.verified_posting_key) AND NOT posting_url_is_third_party(enrichment_attempts.official_job_url)
             WHERE lower(coalesce(jobs.source, '')) NOT IN (
                   {excluded_job_sources}
               )
@@ -1917,6 +1928,10 @@ def load_all_jobs(
         rows = cursor.fetchall()
 
     jobs = [dict(zip(columns, row)) for row in rows]
+    from src.actionability import attach_cached
+    with get_connection() as connection:
+        attach_cached(jobs, connection)
+
 
     for job in jobs:
         if not job.get("title_classification"):
@@ -2270,7 +2285,7 @@ def load_candidate_jobs(
                           scored_attempts.verified_posting_key_source,
                           ''
                       )
-                  ) IN ({trusted_verified_key_sources})
+                  ) IN ({trusted_verified_key_sources}) AND posting_key_can_be_trusted(scored_attempts.verified_posting_key) AND NOT posting_url_is_third_party(scored_attempts.official_job_url)
                   AND lower(
                       coalesce(
                           current_attempts.verified_posting_key_trust,
@@ -2282,7 +2297,7 @@ def load_candidate_jobs(
                           current_attempts.verified_posting_key_source,
                           ''
                       )
-                  ) IN ({trusted_verified_key_sources})
+                  ) IN ({trusted_verified_key_sources}) AND posting_key_can_be_trusted(current_attempts.verified_posting_key) AND NOT posting_url_is_third_party(current_attempts.official_job_url)
                   AND scored_attempts.description_hash IS NOT NULL
                   AND TRIM(scored_attempts.description_hash) <> ''
                   AND scores.scored_at >= coalesce(

@@ -563,6 +563,10 @@ def stored_verified_key_is_trusted(
     job: dict[str, Any],
 ) -> bool:
     """Return true only for persisted keys with explicit trusted provenance."""
+    from src.job_domains import is_third_party_url, posting_key_can_be_trusted
+    key = str(job.get("verified_posting_key") or "")
+    if is_third_party_url(job.get("official_job_url")) or (key and not posting_key_can_be_trusted(key)):
+        return False
     return verified_key_metadata_is_trusted(
         job.get("verified_posting_key_source"),
         job.get("verified_posting_key_trust"),
@@ -587,7 +591,10 @@ def authoritative_verified_key_for_job(
     job: dict[str, Any],
 ) -> str:
     """Return verified identity from source-independent evidence only."""
+    from src.job_domains import is_third_party_url, posting_key_can_be_trusted
     explicit_key = str(job.get("verified_posting_key") or "").strip()
+    if is_third_party_url(job.get("official_job_url")) or (explicit_key and not posting_key_can_be_trusted(explicit_key)):
+        return ""
 
     if explicit_key and stored_verified_key_is_trusted(job):
         official_url = str(job.get("official_job_url") or "").strip()

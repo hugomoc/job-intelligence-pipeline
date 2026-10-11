@@ -32,6 +32,15 @@ def has_verified_non_aggregator_official_url(
 def is_user_reviewable_job(
     job: dict[str, Any],
 ) -> bool:
+    if str(job.get("application_status") or "new").lower() in {"applied", "removed"}:
+        return True
+    from src.job_domains import BUILT_IN_DOMAINS, is_domain_in
+    if job.get("official_url_status") == OFFICIAL_FOUND_VERIFIED and is_domain_in(job.get("official_job_url"), BUILT_IN_DOMAINS):
+        return True  # Legacy diagnostic card; never employer evidence or ACTIVE.
+    if str(job.get("source") or "").lower() == "builtin":
+        from src.repositories.recommendation_repository import has_current_complete_ai_score
+        if has_current_complete_ai_score(job):
+            return True  # Existing scored diagnostic record; gate still requires ACTIVE.
     if not is_aggregator_job(job):
         return True
 
@@ -79,7 +88,7 @@ def _score_value(value: Any) -> int | None:
         return None
 
 
-def classify_job_review_bucket(
+def classify_job_fit_bucket(
     job: dict[str, Any],
 ) -> str:
     """Classify how a reviewable job should appear in the UI workflow.
@@ -132,6 +141,15 @@ def classify_job_review_bucket(
         return REVIEW_BUCKET_LOW_FIT
 
     return REVIEW_BUCKET_RECOMMENDED
+
+
+def classify_job_review_bucket(job):
+    """Apply current actionability only to otherwise recommended NEW jobs."""
+    fit = classify_job_fit_bucket(job)
+    if str(job.get("application_status") or "new").lower() != "new" or fit != REVIEW_BUCKET_RECOMMENDED:
+        return fit
+    from src.actionability import effective_status
+    return REVIEW_BUCKET_RECOMMENDED if effective_status(job) == "ACTIVE" else REVIEW_BUCKET_NEEDS_REVIEW
 
 
 def count_job_review_buckets(

@@ -1,4 +1,8 @@
 defaults:
+  actionability:
+    candidate_country: United States
+    ttl_hours: 24
+    batch_size: 25
   recommendation_threshold: 50
 
   employment_types:

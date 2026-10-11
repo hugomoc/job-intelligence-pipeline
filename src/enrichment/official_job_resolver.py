@@ -100,7 +100,10 @@ class PublicSearchCircuit:
                 "errors": self.errors, "jobs_deferred": self.deferred}
 
 
+from src.job_domains import THIRD_PARTY_DOMAINS
+
 AGGREGATOR_SOURCES = {
+    "builtin",
     "bebee",
     "glassdoor",
     "jobleads",
@@ -109,14 +112,7 @@ AGGREGATOR_SOURCES = {
     "lensa",
 }
 
-AGGREGATOR_DOMAINS = {
-    "bebee.com",
-    "glassdoor.com",
-    "jobleads.com",
-    "joblookup.com",
-    "jobright.ai",
-    "lensa.com",
-}
+AGGREGATOR_DOMAINS = THIRD_PARTY_DOMAINS
 
 # Domains controlled by each ATS. Matches require a hostname label boundary.
 KNOWN_ATS_DOMAINS = {
