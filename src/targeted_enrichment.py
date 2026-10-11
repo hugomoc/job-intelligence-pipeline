@@ -21,7 +21,7 @@ def first_attempt(job):
 
 
 def targeted_retry(job):
-    transient = job.get('official_url_status') == 'SEARCH_DEFERRED' or (
+    transient = job.get('official_url_status') in {'SEARCH_DEFERRED', 'INSUFFICIENT_IDENTITY'} or (
         job.get('official_url_status') in {'ERROR', 'BLOCKED'}
         and job.get('official_url_source') == 'search')
     return relevant_missing_jd(job) and transient

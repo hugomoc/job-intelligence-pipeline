@@ -33,7 +33,7 @@ class RateLimitGuard:
     def observe(self, response):
         limited = response.status_code == 429
         host = getattr(getattr(response, "request", None), "url", None)
-        if host is not None and host.host.endswith("duckduckgo.com"):
+        if host is not None and (host.host.endswith("duckduckgo.com") or host.host == "google.serper.dev"):
             # Public-search throttling opens its own circuit, not the global one.
             return
         self.total += int(limited)
@@ -193,7 +193,7 @@ def drain(client, *, batch_size=250, delay=0.5, max_jobs=None,
             if retry_official_search:
                 queue = [job for job in queue if job['record_key'] not in seen]
             if max_jobs is not None and report['processed'] >= max_jobs:
-                report['stop_reason'] = 'max_jobs reached' if pending_jobs(queue) else None
+                report['stop_reason'] = 'max_jobs reached' if candidates(queue) else None
                 break
         report['remaining'] = summarize_enrichment_queue(queue)
         report['remaining_never_attempted_needing_jd'] = len(pending_jobs(queue))

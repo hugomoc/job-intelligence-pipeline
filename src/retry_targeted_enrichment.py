@@ -8,8 +8,10 @@ from src.enrich_jobs import load_jobs_to_enrich, create_http_client
 from src.ai.resume_profiler import get_model_name
 from src.score_backlog import load_latest_resume_hash
 from src.targeted_enrichment import select_targeted_retries
+from src.repositories.recommendation_repository import description_state
 from src.enrichment.official_job_resolver import search_candidates, PublicSearchCircuit
-from src.drain_enrichment_backlog import drain, RateLimitGuard, write_report
+from src.drain_enrichment_backlog import drain, RateLimitGuard, write_report, process_one
+from src.enrichment.public_search import selected_provider, provider_metrics
 
 
 def load_targeted_queue(resume_hash):
@@ -43,9 +45,10 @@ def probe_search(jobs, client, search=search_candidates):
             page.clear()
             try:
                 candidates=search(job,client)
-                healthy=bool(candidates) or bool(page.get('valid_results_page'))
+                trace=job.get('public_search_trace', {})
+                healthy=bool(candidates) or bool(trace.get('healthy')) or bool(page.get('valid_results_page'))
                 probes.append(dict(record_key=job['record_key'],healthy=healthy,
-                                   candidates=len(candidates),**page))
+                                   candidates=len(candidates),provider=selected_provider(),**page))
                 if not healthy:return False,probes
             except Exception as error:
                 probes.append(dict(record_key=job['record_key'],healthy=False,error=str(error)))
@@ -59,30 +62,68 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--report',type=Path,required=True);p.add_argument('--batch-size',type=int,default=100)
     p.add_argument('--delay',type=float,default=0.75);p.add_argument('--resume-hash')
+    p.add_argument('--max-jobs',type=int, help='Hard bound on completed attempts, for staged live validation.')
+    p.add_argument('--exclude-report',type=Path,help='Skip records already attempted in an earlier staged report.')
+    p.add_argument('--require-serper',action='store_true',help='Refuse live retries unless SERPER_API_KEY selects Serper.')
     a=p.parse_args()
-    if a.batch_size<1 or a.delay<0:p.error('Invalid batch size/delay')
+    if a.require_serper and selected_provider()!='serper':
+        p.error('Serper is required but SERPER_API_KEY is not configured; no attempts changed')
+    if a.batch_size<1 or a.delay<0 or (a.max_jobs is not None and a.max_jobs<1):p.error('Invalid batch size/delay')
     rh=a.resume_hash or load_latest_resume_hash(get_model_name())
     if not rh:p.error('No cached resume')
-    loader=lambda:load_targeted_queue(rh)
+    excluded=set()
+    if a.exclude_report:
+        excluded={j['record_key'] for j in json.loads(a.exclude_report.read_text()).get('jobs',[])}
+    latest_targeted_count = [0]
+    def loader():
+        current = load_targeted_queue(rh)
+        latest_targeted_count[0] = len(current)
+        return [j for j in current if j['record_key'] not in excluded]
     jobs=loader()
     report=dict(resume_hash=rh,targeted_postings=len(jobs),processed=0,
                 descriptions_updated=0,official_resolved=0)
     print(f'Targeted exact postings: {len(jobs)}',flush=True)
     guard=RateLimitGuard()
+    circuit=PublicSearchCircuit()
+    per_job=[]
     with create_http_client() as client:
         client.event_hooks.setdefault('response',[]).append(guard.observe)
         healthy,probes=probe_search(jobs,client)
         report['health_probes']=probes
+        report['provider_metrics']=provider_metrics(client)
         if not healthy:
             report['stop_reason']='public search unavailable or probe inconclusive; no retry attempts changed' if jobs else 'targeted queue empty'
             write_report(a.report,report);print(json.dumps(report),flush=True);return
         initial = [jobs]
         def queued_loader():
             return initial.pop() if initial else loader()
-        result=drain(client,batch_size=a.batch_size,delay=a.delay,checkpoint=a.report,
-                     loader=queued_loader,guard=guard,search_circuit=PublicSearchCircuit(),
+        def audited_processor(job, client):
+            job.pop('public_search_trace', None)
+            job.pop('candidate_validation_trace', None)
+            processed=process_one(job,client,search_circuit=circuit)
+            official=processed.official_resolution
+            trace=job.get('public_search_trace', {})
+            per_job.append(dict(record_key=job['record_key'],title=job['title'],
+                company=job['company_name'],serper_called=trace.get('provider')=='serper',
+                search_candidates=trace.get('candidates',0),search=trace,
+                chosen_candidate_url=official.official_job_url if official else None,
+                identity_validation=official.official_url_validation_reason if official else
+                    (processed.identity_validation.reason if processed.identity_validation else None),
+                candidate_validation=job.get('candidate_validation_trace',[]),
+                official_status=official.status if official else None,
+                jd_recovered=bool(processed.updated and description_state({
+                    'description':processed.result.description,
+                    'raw_description_word_count':processed.result.word_count})=='FULL_JD'),
+                words=processed.result.word_count,stored_status=processed.stored_status))
+            write_report(a.report,dict(report,processed=len(per_job),jobs=per_job,provider_metrics=provider_metrics(client)))
+            return processed
+        result=drain(client,batch_size=a.batch_size,delay=a.delay,checkpoint=None,
+                     max_jobs=a.max_jobs,processor=audited_processor,
+                     loader=queued_loader,guard=guard,search_circuit=circuit,
                      retry_official_search=True,stop_on_search_unavailable=True,emit=lambda line:print(line,flush=True))
-        result.update(targeted_postings=report['targeted_postings'],health_probes=probes)
+        result.update(targeted_postings=report['targeted_postings'],health_probes=probes,
+                      jobs=per_job,provider_metrics=provider_metrics(client),
+                      remaining_targeted_queue=latest_targeted_count[0],provider_circuits=circuit.states)
         write_report(a.report,result)
 
 if __name__=='__main__':main()

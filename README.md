@@ -286,3 +286,35 @@ This keeps API keys, local email-derived data, resumes, and generated artifacts 
 - Add description-quality scoring before AI resume matching.
 - Add a dedicated review queue for jobs that need manual description capture.
 - Add dashboard metrics for daily new jobs, scored jobs, applied jobs, and removed jobs.
+
+
+### Official job discovery: Serper
+
+Configure `SERPER_API_KEY` locally in `.env` (never commit its value). Public
+search selects Serper when the key is configured; DuckDuckGo is the legacy
+fallback when it is absent. A Serper failure does not automatically switch to
+DuckDuckGo. Each provider has its own circuit. Auth/configuration and exhausted
+quota stop that provider immediately; 429/network/server failures remain
+retryable and open its circuit only after repeated failures.
+
+Source URLs, trusted verified reuse, and direct ATS discovery still precede
+public search. Results discover URLs only: Serper titles/snippets do not supply
+posting identity. Existing fetched-page identity, exact/verified posting keys,
+provenance, status and JD/AI cache rules remain authoritative.
+
+Use bounded validation before a larger retry pass:
+
+```sh
+python -m src.retry_targeted_enrichment --require-serper --max-jobs 5 --batch-size 5 --delay 0.75 --report data/serper-live-5.json
+python -m src.retry_targeted_enrichment --require-serper --max-jobs 20 --batch-size 20 --delay 0.75 --exclude-report data/serper-live-5.json --report data/serper-live-next-20.json
+```
+
+These commands validate 25 distinct postings in total; they do not score jobs
+or drain the remaining queue. Review both reports before a larger pass. Serper queries use unquoted company and title terms plus `jobs`, so alert-title
+decorations do not force an exact phrase match. Reports
+contain the exact query, organic result titles/domains/URLs (audit only), per-posting candidate decisions and per-provider request/response,
+no-result, error, verified-resolution and FULL_JD recovery metrics, including
+health-probe queries. They never contain the API key or raw provider error bodies.
+Completed attempts persist individually; `--exclude-report` prevents repeating
+records from an earlier staged test. Search failures retain retryable resolution
+statuses, and good FULL_JDs/current scores remain excluded from targeted retries.

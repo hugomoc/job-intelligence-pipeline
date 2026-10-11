@@ -28,6 +28,7 @@ from src.enrichment.job_description import (
 )
 from src.enrichment.job_identity import (
     JobIdentityValidation,
+    location_compatibility,
     validate_job_identity,
 )
 from src.enrichment.official_job_resolver import (
@@ -37,6 +38,7 @@ from src.enrichment.official_job_resolver import (
     OFFICIAL_FOUND_VERIFIED,
     OFFICIAL_NOT_FOUND,
     OFFICIAL_SEARCH_DEFERRED,
+    OFFICIAL_INSUFFICIENT_IDENTITY,
     OfficialJobResolutionResult,
     is_aggregator_job,
     resolve_official_job,
@@ -99,6 +101,7 @@ KNOWN_CANDIDATE_NO_CANDIDATE = "NO_CANDIDATE"
 
 OFFICIAL_RETRY_COOLDOWN_DAYS = 7
 OFFICIAL_RETRY_STATUSES = {
+    OFFICIAL_INSUFFICIENT_IDENTITY,
     OFFICIAL_SEARCH_DEFERRED,
     OFFICIAL_AMBIGUOUS,
     OFFICIAL_BLOCKED,
@@ -304,18 +307,49 @@ def requires_identity_validation(
     )
 
 
+def trusted_original_identity_key(job):
+    """Never bootstrap missing-company proof from an old title-only acceptance."""
+    direct = direct_source_url_verified_key(job)
+    if direct:
+        return direct
+    if not stored_verified_key_is_trusted(job):
+        return None
+    source = str(job.get("verified_posting_key_source") or "")
+    independently_bound_sources = {
+        "direct_ats_source", "source_redirect_verified", "embedded_official_destination",
+        "explicit_requisition_id",
+    }
+    if source not in independently_bound_sources and not job.get("official_resolved_company"):
+        return None
+    return authoritative_verified_key_for_job(job) or None
+
+
+def trusted_identity_proof(job, result):
+    """Compare an independent original identity with the fetched posting key."""
+    return dict(trusted_original_posting_key=trusted_original_identity_key(job),
+                resolved_posting_key=verified_posting_key_from_url(result.final_url) or None)
+
+
 def validate_enrichment_identity(
     job: dict[str, Any],
     result: JobDescriptionResult,
 ) -> JobIdentityValidation:
-    if not requires_identity_validation(job, result):
+    location_status, location_reason = location_compatibility(
+        job.get("location"), result.resolved_location, result.resolved_location_source
+    )
+    if (not requires_identity_validation(job, result)
+            and not is_known_official_or_ats_url(result.final_url or "")
+            and not result.resolved_title and not result.resolved_company):
         return JobIdentityValidation(
-            accepted=True,
+            accepted=location_status != "mismatch",
             confidence=1.0,
             title_similarity=None,
             company_similarity=None,
             occupation_match=None,
-            reason="identity validation not required for this source",
+            reason=("location mismatch: " + location_reason if location_status == "mismatch"
+                    else "identity validation not required for this source"),
+            location_compatibility=location_status,
+            location_reason=location_reason,
         )
 
     if not result.resolved_title and not result.resolved_company:
@@ -335,6 +369,8 @@ def validate_enrichment_identity(
         resolved_company=result.resolved_company,
         original_location=job.get("location"),
         resolved_location=result.resolved_location,
+        resolved_location_source=result.resolved_location_source,
+        **trusted_identity_proof(job, result),
     )
 
 
@@ -897,7 +933,6 @@ def reuse_verified_description(
     )
     job["official_resolved_company"] = (
         candidate.get("official_resolved_company")
-        or candidate.get("company_name")
     )
     job["official_resolved_location"] = (
         candidate.get("official_resolved_location")
@@ -987,9 +1022,10 @@ def reuse_authoritative_verified_descriptions_before_queue(
             ),
             resolved_company=str(
                 candidate.get("official_resolved_company")
-                or candidate.get("company_name")
                 or ""
             ),
+            trusted_original_posting_key=trusted_original_identity_key(job),
+            resolved_posting_key=str(candidate.get("verified_posting_key") or ""),
             original_location=str(job.get("location") or ""),
             resolved_location=str(
                 candidate.get("official_resolved_location")
@@ -1316,7 +1352,7 @@ def load_jobs_to_enrich(
         if never_attempted_only and (job.get("previous_status") or int(job.get("attempt_count") or 0) > 0):
             continue
         transient_search = (
-            official_status_value(job) == OFFICIAL_SEARCH_DEFERRED
+            official_status_value(job) in {OFFICIAL_SEARCH_DEFERRED, OFFICIAL_INSUFFICIENT_IDENTITY}
             or (official_status_value(job) in {OFFICIAL_ERROR, OFFICIAL_BLOCKED}
                 and job.get("official_url_source") == "search")
         )
@@ -1959,6 +1995,12 @@ def verify_known_official_candidate(
         return KnownCandidateVerification(
             state=KNOWN_CANDIDATE_NO_CANDIDATE,
         )
+
+    if not source_result.resolved_company:
+        proof = trusted_identity_proof(job, source_result)
+        if not (proof["trusted_original_posting_key"] and
+                proof["trusted_original_posting_key"] == proof["resolved_posting_key"]):
+            return KnownCandidateVerification(state=KNOWN_CANDIDATE_UNVERIFIED)
 
     source_key = source_result_verified_key(
         job=job,
