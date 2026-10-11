@@ -1,4 +1,6 @@
 from __future__ import annotations
+from datetime import datetime, timezone
+from src.actionability import Settings
 
 from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
 from src.repositories.recommendation_repository import (
@@ -19,6 +21,16 @@ from src.ui.job_visibility import (
 
 def complete_ai_job(**overrides) -> dict:
     job = {
+        "official_job_url": "https://job-boards.greenhouse.io/example/jobs/123",
+        "official_url_status": "FOUND_VERIFIED",
+        "verified_posting_key": "greenhouse:123",
+        "verified_posting_key_source": "official_found_verified",
+        "verified_posting_key_trust": "trusted",
+        "actionability_status": "ACTIVE",
+        "actionability_checked_at": datetime.now(timezone.utc).isoformat(),
+        "actionability_posting_key": "greenhouse:123",
+        "actionability_official_url": "https://job-boards.greenhouse.io/example/jobs/123",
+        "actionability_candidate_context": Settings().context,
         "title": "Senior Analytics Engineer",
         "application_status": "new",
         "ai_score": 72,

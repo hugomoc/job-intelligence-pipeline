@@ -7,6 +7,8 @@ official employer/ATS posting has been verified.
 
 from __future__ import annotations
 
+from src.job_domains import is_third_party_url
+
 import hashlib
 import re
 import unicodedata
@@ -318,6 +320,8 @@ def is_specific_job_posting_url(value: str | None) -> bool:
 
 def verified_posting_key_from_url(value: str | None) -> str:
     """Create a source-independent key from verified official URL evidence."""
+    if is_third_party_url(value):
+        return ""
     normalized_url = normalize_official_url(value)
     if not normalized_url:
         return ""
@@ -376,6 +380,8 @@ def verified_posting_key_from_url(value: str | None) -> str:
 
 def is_known_official_or_ats_url(value: str | None) -> bool:
     """Return true for URLs that can safely produce verified posting keys."""
+    if is_third_party_url(value):
+        return False
     normalized_url = normalize_official_url(value)
     if not normalized_url:
         return False

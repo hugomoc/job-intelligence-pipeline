@@ -38,7 +38,20 @@ def select_job_open_target(job: dict[str, Any]) -> JobOpenTarget:
     official_url = str(job.get("official_job_url") or "").strip()
     official_status = str(job.get("official_url_status") or "").strip()
 
+    from src.job_domains import is_third_party_url
+    if official_url and is_third_party_url(official_url):
+        return JobOpenTarget("Inspect third-party listing", official_url,
+            "Third-party listing; not verified employer/ATS evidence. Current actionability is unknown.")
+
     if has_verified_non_aggregator_official_url(job):
+        from src.actionability import effective_status
+        status = effective_status(job)
+        if status != "ACTIVE":
+            return JobOpenTarget(
+                label="Open official job" if status == "UNKNOWN" else "Inspect posting (" + status.lower().replace("_", " ") + ")",
+                url=official_url,
+                note="Current actionability is unconfirmed." if status == "UNKNOWN" else "Posting is not currently actionable for a new application.",
+            )
         return JobOpenTarget(
             label="Open official job",
             url=official_url,

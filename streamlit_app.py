@@ -236,6 +236,8 @@ def render_job_listing(job: dict) -> None:
         "new",
     )
     pipeline_state = derive_job_pipeline_state(job)
+    from src.actionability import effective_status
+    current_actionability = effective_status(job)
 
     with st.container(border=True):
         header_left, header_right = st.columns([4, 1])
@@ -287,6 +289,11 @@ def render_job_listing(job: dict) -> None:
                     f"{job.get('application_status_source') or 'another source'}"
                 )
 
+            if job.get("has_current_complete_ai_assessment"):
+                st.caption({"ACTIVE": "Active", "INACTIVE": "Inactive / posting closed",
+                    "LOCATION_MISMATCH": "Location mismatch", "UNKNOWN": "Current status unknown"}[current_actionability])
+                if job.get("actionability_reason"):
+                    st.caption(job["actionability_reason"])
             open_target = select_job_open_target(job)
             if open_target.url:
                 st.link_button(open_target.label, open_target.url)
@@ -575,6 +582,9 @@ if clear_view_clicked:
 if show_saved_jobs_clicked:
     st.session_state["show_saved_jobs"] = True
 
+actionability_requested = False
+check_current_postings_clicked = st.sidebar.button("Check current postings")
+
 uploaded_file = st.file_uploader(
     "Upload a resume",
     type=["pdf", "docx"],
@@ -603,6 +613,7 @@ if uploaded_file and st.button("Score jobs", type="primary"):
             st.write("dbt build: " + ("run" if result.dbt_was_run else "not needed"))
             status.update(label="Processing complete", state="complete")
 
+        actionability_requested = True
         st.session_state["resume_hash"] = result.resume_hash
         st.session_state["show_saved_jobs"] = True
         render_scoring_backlog_status(
@@ -714,6 +725,7 @@ if score_backlog_clicked or (
                 limit=int(daily_score_limit),
                 minimum_rule_score=int(daily_minimum_rule_score),
             )
+            actionability_requested = True
             st.session_state["resume_hash"] = backlog_result.resume_hash
             st.write(f"Already cached job scores: {backlog_result.already_scored}")
             st.write(f"Jobs selected for scoring: {backlog_result.candidates_selected}")
@@ -747,6 +759,8 @@ jobs_tab, operations_tab = st.tabs(
 with jobs_tab:
     st.subheader("Jobs")
 
+    if check_current_postings_clicked:
+        st.session_state["show_saved_jobs"] = True
     if not st.session_state["show_saved_jobs"]:
         st.info(
             "Start with the sidebar daily run controls, upload a resume, "
@@ -757,6 +771,17 @@ with jobs_tab:
         all_jobs = load_all_jobs(
             resume_hash=st.session_state.get("resume_hash")
         )
+        # Network checks require a completed scoring workflow or explicit refresh.
+        from src.actionability import refresh_daily
+        if actionability_requested or check_current_postings_clicked:
+            try:
+                with st.spinner("Checking current posting actionability…"):
+                    actionability_metrics = refresh_daily(all_jobs)
+                st.caption("Current posting checks: " + "; ".join(
+                    f"{key}: {value}" for key, value in actionability_metrics.items()))
+            except Exception:
+                st.warning("Current posting checks could not complete. Unchecked jobs remain in Needs review.")
+
 
     job_dates = [
         job_date
@@ -868,7 +893,7 @@ with jobs_tab:
             options=list(REVIEW_FILTER_OPTIONS),
             index=0,
             help=(
-                "Recommended shows current scored jobs worth considering. "
+                "Recommended shows current scored, actionable jobs worth considering. "
                 "Needs review shows jobs awaiting a description or score. "
                 "Low fit keeps completed AI rejections available. "
                 "All shows every reviewable job."
