@@ -90,6 +90,11 @@ class JobDescriptionResult:
     resolved_title: str | None = None
     resolved_company: str | None = None
     resolved_location: str | None = None
+    resolved_job_id: str | None = None
+    resolved_title_source: str | None = None
+    resolved_company_source: str | None = None
+    resolved_location_source: str | None = None
+    resolved_job_id_source: str | None = None
 
 
 def create_http_client(
@@ -404,19 +409,60 @@ def extract_json_ld_job_metadata(
             if not is_job_posting_type(node.get("@type")):
                 continue
 
-            return {
+            identifier = node.get("identifier")
+            metadata = {
                 "title": html_fragment_to_text(node.get("title")) or None,
-                "company": organization_name(
-                    node.get("hiringOrganization")
-                ),
-                "location": location_text(node.get("jobLocation")),
+                "company": organization_name(node.get("hiringOrganization")) or None,
+                "location": location_text(node.get("jobLocation")) or None,
+                "job_id": str(identifier.get("value")) if isinstance(identifier, dict) and identifier.get("value") else None,
             }
+            for key in ("title", "company", "location", "job_id"):
+                metadata[key + "_source"] = "jobposting_json_ld" if metadata[key] else None
+            return metadata
 
-    return {
-        "title": None,
-        "company": None,
-        "location": None,
-    }
+    return {}
+
+
+def extract_ats_metadata(soup: BeautifulSoup, url: str) -> dict:
+    """Read posting-owned metadata only; never receives expected job fields."""
+    metadata = extract_json_ld_job_metadata(soup)
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    greenhouse = host in {"job-boards.greenhouse.io", "boards.greenhouse.io"}
+    posting_match = re.fullmatch(r"/([^/]+)/jobs/(\d+)/?", parsed.path)
+    if greenhouse and posting_match:
+        for script in soup.find_all("script"):
+            text = script.get_text()
+            marker = "window.__remixContext = "
+            if marker not in text:
+                continue
+            try:
+                payload = json.JSONDecoder().raw_decode(text.split(marker, 1)[1])[0]
+                loaders = payload["state"]["loaderData"]
+                post = loaders.get("routes/$url_token_.jobs_.$job_post_id", {}).get("jobPost", {})
+                # Bind embedded metadata to this specific public posting URL.
+                public_url = post.get("public_url", "")
+                if urlparse(public_url).path.rstrip("/") != parsed.path.rstrip("/"):
+                    continue
+                values = {"title": post.get("title"), "company": post.get("company_name"),
+                          "location": post.get("job_post_location"), "job_id": posting_match.group(2)}
+                for key, value in values.items():
+                    if isinstance(value, dict):
+                        value = value.get("name")
+                    if isinstance(value, str) and value.strip() and not metadata.get(key):
+                        metadata[key] = value.strip()
+                        metadata[key + "_source"] = "greenhouse_posting_url" if key == "job_id" else "greenhouse_remix_jobPost"
+            except (ValueError, KeyError, TypeError, AttributeError):
+                continue
+    if (host.endswith(".myworkdayjobs.com") or host.endswith(".myworkdaysite.com")) and "/job/" in parsed.path:
+        # An explicit employer statement in the posting is independent evidence.
+        # Do not infer an employer name from a tenant slug or expected company.
+        description = extract_json_ld_description(soup)
+        match = re.search(r"(?:^|[.\n])\s*([A-Z][A-Za-z0-9&' -]{1,70}?) is an Equal Opportunity Employer\b", description)
+        if match and not metadata.get("company"):
+            metadata["company"] = match.group(1).strip()
+            metadata["company_source"] = "workday_jobposting_employer_statement"
+    return metadata
 
 
 def extract_json_ld_description(
@@ -560,7 +606,7 @@ def extract_job_description_from_html(
         html_text,
         "html.parser",
     )
-    metadata = extract_json_ld_job_metadata(soup)
+    metadata = extract_ats_metadata(soup, final_url or requested_url)
 
     if appears_to_be_block_page(soup):
         return JobDescriptionResult(
@@ -578,6 +624,11 @@ def extract_job_description_from_html(
             resolved_title=metadata.get("title"),
             resolved_company=metadata.get("company"),
             resolved_location=metadata.get("location"),
+            resolved_job_id=metadata.get("job_id"),
+            resolved_title_source=metadata.get("title_source"),
+            resolved_company_source=metadata.get("company_source"),
+            resolved_location_source=metadata.get("location_source"),
+            resolved_job_id_source=metadata.get("job_id_source"),
         )
 
     description = (
@@ -638,6 +689,11 @@ def extract_job_description_from_html(
             resolved_title=metadata.get("title"),
             resolved_company=metadata.get("company"),
             resolved_location=metadata.get("location"),
+            resolved_job_id=metadata.get("job_id"),
+            resolved_title_source=metadata.get("title_source"),
+            resolved_company_source=metadata.get("company_source"),
+            resolved_location_source=metadata.get("location_source"),
+            resolved_job_id_source=metadata.get("job_id_source"),
         )
 
     return JobDescriptionResult(
@@ -654,6 +710,11 @@ def extract_job_description_from_html(
         resolved_title=metadata.get("title"),
         resolved_company=metadata.get("company"),
         resolved_location=metadata.get("location"),
+        resolved_job_id=metadata.get("job_id"),
+        resolved_title_source=metadata.get("title_source"),
+        resolved_company_source=metadata.get("company_source"),
+        resolved_location_source=metadata.get("location_source"),
+        resolved_job_id_source=metadata.get("job_id_source"),
     )
 
 
