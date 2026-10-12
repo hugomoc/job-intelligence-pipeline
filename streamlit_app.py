@@ -42,6 +42,26 @@ from src.ui.job_visibility import (
 )
 from src.ui.pagination import PAGE_SIZE_OPTIONS, paginate_items
 
+from src.ui.jobs_snapshot import (
+    invalidate_data, jobs_snapshot, display_snapshot, scoring_snapshot,
+    patch_status, actionability_saved, operation_snapshot,
+)
+
+
+def refresh_jobs_view():
+    invalidate_data(st.session_state, "explicit refresh")
+    st.session_state["show_saved_jobs"] = True
+
+
+def change_application_status(record_key, status):
+    try:
+        patch_status(st.session_state, record_key, status, update_application_status)
+    except Exception:
+        # On an uncertain persistence error, reconstruct once rather than leave
+        # potentially stale status in the view. No network check is requested.
+        invalidate_data(st.session_state, "status persistence error")
+        st.session_state["status_change_error"] = "Could not update application status. Please retry."
+
 
 STATUS_LABELS = {
     "apply": "APPLY",
@@ -193,10 +213,8 @@ def render_scoring_backlog_status(
     resume_hash: str | None,
     minimum_rule_score: int,
 ):
-    backlog_status = load_scoring_backlog_status(
-        resume_hash=resume_hash,
-        minimum_rule_score=minimum_rule_score,
-    )
+    backlog_status = scoring_snapshot(st.session_state, resume_hash, minimum_rule_score,
+        load_scoring_backlog_status)
 
     with placeholder.container():
         if backlog_status.resume_hash is None:
@@ -302,26 +320,16 @@ def render_job_listing(job: dict) -> None:
                 st.caption(open_target.note)
 
             if application_status == "new":
-                if st.button(
-                    "Mark applied",
-                    key=f"apply-{record_key}",
-                    type="primary",
-                ):
-                    update_application_status(
-                        record_key=record_key,
-                        status="applied",
-                    )
-                    st.rerun()
-
-                if st.button(
-                    "Mark removed",
-                    key=f"remove-{record_key}",
-                ):
-                    update_application_status(
-                        record_key=record_key,
-                        status="removed",
-                    )
-                    st.rerun()
+                st.button(
+                    "Mark applied", key=f"apply-{record_key}", type="primary",
+                    on_click=change_application_status,
+                    args=(record_key, "applied"),
+                )
+                st.button(
+                    "Mark removed", key=f"remove-{record_key}",
+                    on_click=change_application_status,
+                    args=(record_key, "removed"),
+                )
 
         if job.get("posted_age_text"):
             st.caption(f"Posted: {job['posted_age_text']}")
@@ -510,6 +518,9 @@ st.set_page_config(
 
 st.title("Job Intelligence")
 
+if st.session_state.get("status_change_error"):
+    st.error(st.session_state.pop("status_change_error"))
+
 if "show_saved_jobs" not in st.session_state:
     st.session_state["show_saved_jobs"] = False
 
@@ -570,6 +581,7 @@ run_daily_clicked = st.sidebar.button(
 show_saved_jobs_clicked = st.sidebar.button(
     "Show saved jobs",
 )
+st.sidebar.button("Refresh saved jobs", on_click=refresh_jobs_view)
 clear_view_clicked = st.sidebar.button(
     "Clear view",
 )
@@ -613,6 +625,8 @@ if uploaded_file and st.button("Score jobs", type="primary"):
             st.write("dbt build: " + ("run" if result.dbt_was_run else "not needed"))
             status.update(label="Processing complete", state="complete")
 
+        if result.successful_score_count or st.session_state.get("resume_hash") != result.resume_hash:
+            invalidate_data(st.session_state, "scoring/resume changed")
         actionability_requested = True
         st.session_state["resume_hash"] = result.resume_hash
         st.session_state["show_saved_jobs"] = True
@@ -626,9 +640,11 @@ if uploaded_file and st.button("Score jobs", type="primary"):
         st.error("The resume could not be read. Please upload a readable PDF or DOCX.")
 
     except JobRecommendationServiceError:
+        invalidate_data(st.session_state, "scoring workflow error; possible partial writes")
         st.error("The scoring workflow could not be completed. Please try again later.")
 
     except Exception:
+        invalidate_data(st.session_state, "scoring error; possible partial writes")
         st.error("Something went wrong while processing the resume.")
 
 ingestion_succeeded = True
@@ -640,6 +656,8 @@ if run_ingestion_clicked or run_daily_clicked:
     try:
         with st.status("Reading email folders...", expanded=True) as status:
             ingestion_result = run_email_ingestion()
+            if ingestion_result.inserted_jobs:
+                invalidate_data(st.session_state, "ingestion changed jobs")
             st.write(f"New jobs inserted: {ingestion_result.inserted_jobs}")
             st.write(f"Duplicate jobs skipped: {ingestion_result.duplicate_jobs}")
             st.write(f"Previously processed emails skipped: {ingestion_result.skipped_emails}")
@@ -660,6 +678,7 @@ if run_ingestion_clicked or run_daily_clicked:
             )
 
     except DailyWorkflowError:
+        invalidate_data(st.session_state, "pipeline workflow error; possible partial writes")
         st.error("Email ingestion could not be completed. Please try again later.")
 
 if enrich_descriptions_clicked or (run_daily_clicked and ingestion_succeeded):
@@ -672,6 +691,8 @@ if enrich_descriptions_clicked or (run_daily_clicked and ingestion_succeeded):
                 minimum_words=80,
                 resume_hash=st.session_state.get("resume_hash"),
             )
+            if enrichment_result.jobs_processed:
+                invalidate_data(st.session_state, "enrichment changed metadata")
             st.write(f"Jobs selected: {enrichment_result.jobs_selected}")
             st.write(f"Jobs processed: {enrichment_result.jobs_processed}")
             st.write(
@@ -711,6 +732,7 @@ if enrich_descriptions_clicked or (run_daily_clicked and ingestion_succeeded):
             )
 
     except DailyWorkflowError:
+        invalidate_data(st.session_state, "pipeline workflow error; possible partial writes")
         st.error("Job descriptions could not be enriched. Please try again later.")
 
 if score_backlog_clicked or (
@@ -725,6 +747,9 @@ if score_backlog_clicked or (
                 limit=int(daily_score_limit),
                 minimum_rule_score=int(daily_minimum_rule_score),
             )
+            if (backlog_result.scores_saved or getattr(backlog_result, "enrichment_jobs_processed", 0)
+                    or st.session_state.get("resume_hash") != backlog_result.resume_hash):
+                invalidate_data(st.session_state, "scoring/enrichment/resume changed")
             actionability_requested = True
             st.session_state["resume_hash"] = backlog_result.resume_hash
             st.write(f"Already cached job scores: {backlog_result.already_scored}")
@@ -747,6 +772,7 @@ if score_backlog_clicked or (
             )
 
     except DailyWorkflowError:
+        invalidate_data(st.session_state, "pipeline workflow error; possible partial writes")
         st.error("Unscored jobs could not be scored. Please try again later.")
 
 jobs_tab, operations_tab = st.tabs(
@@ -768,18 +794,22 @@ with jobs_tab:
         )
         all_jobs = []
     else:
-        all_jobs = load_all_jobs(
-            resume_hash=st.session_state.get("resume_hash")
-        )
+        jobs_snapshot(st.session_state, st.session_state.get("resume_hash"),
+            lambda **kwargs: load_all_jobs(**kwargs, for_session_snapshot=True))
+        all_jobs = display_snapshot(st.session_state)
         # Network checks require a completed scoring workflow or explicit refresh.
         from src.actionability import refresh_daily
         if actionability_requested or check_current_postings_clicked:
             try:
                 with st.spinner("Checking current posting actionability…"):
                     actionability_metrics = refresh_daily(all_jobs)
+                if actionability_metrics["checks"]:
+                    actionability_saved(st.session_state)
+                    all_jobs = display_snapshot(st.session_state)
                 st.caption("Current posting checks: " + "; ".join(
                     f"{key}: {value}" for key, value in actionability_metrics.items()))
             except Exception:
+                invalidate_data(st.session_state, "actionability error; possible partial writes")
                 st.warning("Current posting checks could not complete. Unchecked jobs remain in Needs review.")
 
 
@@ -1199,40 +1229,45 @@ with jobs_tab:
         render_job_listing(job)
 
 with operations_tab:
-    st.subheader("Pipeline Status")
+    if not st.session_state["show_saved_jobs"]:
+        st.info("Choose Show saved jobs to load pipeline diagnostics.")
+    else:
+        st.subheader("Pipeline Status")
 
-    operation_metrics = load_pipeline_operation_metrics(
-        resume_hash=st.session_state.get("resume_hash"),
-        minimum_rule_score=int(daily_minimum_rule_score),
-    )
+        current_backlog = scoring_snapshot(st.session_state,
+            st.session_state.get("resume_hash"), int(daily_minimum_rule_score),
+            load_scoring_backlog_status)
+        operation_metrics = operation_snapshot(st.session_state,
+            st.session_state.get("resume_hash"), int(daily_minimum_rule_score),
+            all_jobs, current_backlog, load_pipeline_operation_metrics)
 
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("Raw jobs", operation_metrics["raw_jobs"])
-    metric_cols[1].metric("Exact postings", operation_metrics["exact_postings"])
-    metric_cols[2].metric("Reviewable jobs", operation_metrics["reviewable_jobs"])
-    metric_cols[3].metric("AI-score eligible", operation_metrics["ai_score_eligible"])
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("Raw jobs", operation_metrics["raw_jobs"])
+        metric_cols[1].metric("Exact postings", operation_metrics["exact_postings"])
+        metric_cols[2].metric("Reviewable jobs", operation_metrics["reviewable_jobs"])
+        metric_cols[3].metric("AI-score eligible", operation_metrics["ai_score_eligible"])
 
-    status_cols = st.columns(4)
-    status_cols[0].metric("New", operation_metrics["new_jobs"])
-    status_cols[1].metric("Applied", operation_metrics["applied_jobs"])
-    status_cols[2].metric("Removed", operation_metrics["removed_jobs"])
-    status_cols[3].metric("AI-scored", operation_metrics["ai_scored"])
+        status_cols = st.columns(4)
+        status_cols[0].metric("New", operation_metrics["new_jobs"])
+        status_cols[1].metric("Applied", operation_metrics["applied_jobs"])
+        status_cols[2].metric("Removed", operation_metrics["removed_jobs"])
+        status_cols[3].metric("AI-scored", operation_metrics["ai_scored"])
 
-    description_cols = st.columns(4)
-    description_cols[0].metric("Needs enrichment", operation_metrics["needs_enrichment"])
-    description_cols[1].metric("Full JD", operation_metrics["full_jd"])
-    description_cols[2].metric("Partial JD", operation_metrics["partial_jd"])
-    description_cols[3].metric("Rejected enrichment", operation_metrics["rejected_enrichment"])
+        description_cols = st.columns(4)
+        description_cols[0].metric("Needs enrichment", operation_metrics["needs_enrichment"])
+        description_cols[1].metric("Full JD", operation_metrics["full_jd"])
+        description_cols[2].metric("Partial JD", operation_metrics["partial_jd"])
+        description_cols[3].metric("Rejected enrichment", operation_metrics["rejected_enrichment"])
 
-    attempts = operation_metrics["enrichment_attempts"]
-    attempt_cols = st.columns(5)
-    attempt_cols[0].metric("Attempts", sum(attempts.values()))
-    attempt_cols[1].metric("Successes", attempts.get("enriched", 0))
-    attempt_cols[2].metric("Blocked", attempts.get("blocked", 0))
-    attempt_cols[3].metric("No description", attempts.get("no_description", 0))
-    attempt_cols[4].metric("Fetch errors", attempts.get("fetch_error", 0))
+        attempts = operation_metrics["enrichment_attempts"]
+        attempt_cols = st.columns(5)
+        attempt_cols[0].metric("Attempts", sum(attempts.values()))
+        attempt_cols[1].metric("Successes", attempts.get("enriched", 0))
+        attempt_cols[2].metric("Blocked", attempts.get("blocked", 0))
+        attempt_cols[3].metric("No description", attempts.get("no_description", 0))
+        attempt_cols[4].metric("Fetch errors", attempts.get("fetch_error", 0))
 
-    st.caption(
-        "Use the sidebar daily run controls to ingest email folders "
-        "and score only jobs that do not already have a current AI score."
-    )
+        st.caption(
+            "Use the sidebar daily run controls to ingest email folders "
+            "and score only jobs that do not already have a current AI score."
+        )

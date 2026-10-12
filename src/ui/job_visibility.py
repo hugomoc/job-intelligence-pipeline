@@ -143,18 +143,20 @@ def classify_job_fit_bucket(
     return REVIEW_BUCKET_RECOMMENDED
 
 
-def classify_job_review_bucket(job):
+def classify_job_review_bucket(job, actionability_config=None, now=None):
     """Apply current actionability only to otherwise recommended NEW jobs."""
     fit = classify_job_fit_bucket(job)
     if str(job.get("application_status") or "new").lower() != "new" or fit != REVIEW_BUCKET_RECOMMENDED:
         return fit
     from src.actionability import effective_status
-    return REVIEW_BUCKET_RECOMMENDED if effective_status(job) == "ACTIVE" else REVIEW_BUCKET_NEEDS_REVIEW
+    return REVIEW_BUCKET_RECOMMENDED if effective_status(job, config=actionability_config, now=now) == "ACTIVE" else REVIEW_BUCKET_NEEDS_REVIEW
 
 
 def count_job_review_buckets(
     jobs: list[dict[str, Any]],
 ) -> dict[str, int]:
+    from src.actionability import settings, now_utc
+    config, now = settings(), now_utc()
     counts = {
         REVIEW_BUCKET_RECOMMENDED: 0,
         REVIEW_BUCKET_NEEDS_REVIEW: 0,
@@ -162,7 +164,7 @@ def count_job_review_buckets(
     }
 
     for job in jobs:
-        counts[classify_job_review_bucket(job)] += 1
+        counts[classify_job_review_bucket(job, actionability_config=config, now=now)] += 1
 
     return counts
 
@@ -170,11 +172,12 @@ def count_job_review_buckets(
 def is_visible_for_review_filter(
     job: dict[str, Any],
     review_filter: str,
+    actionability_config=None, now=None,
 ) -> bool:
     if review_filter == REVIEW_FILTER_ALL:
         return True
 
-    bucket = classify_job_review_bucket(job)
+    bucket = classify_job_review_bucket(job, actionability_config=actionability_config, now=now)
 
     if review_filter == REVIEW_FILTER_LOW_FIT:
         return bucket == REVIEW_BUCKET_LOW_FIT
@@ -189,8 +192,10 @@ def filter_jobs_by_review_filter(
     jobs: list[dict[str, Any]],
     review_filter: str,
 ) -> list[dict[str, Any]]:
+    from src.actionability import settings, now_utc
+    config, now = settings(), now_utc()
     return [
         job
         for job in jobs
-        if is_visible_for_review_filter(job, review_filter)
+        if is_visible_for_review_filter(job, review_filter, actionability_config=config, now=now)
     ]

@@ -41,6 +41,7 @@ from src.ai.resume_profiler import get_model_name
 from src.repositories.recommendation_repository import (
     count_cached_canonical_scores,
     count_unscored_candidate_jobs,
+    load_candidate_jobs,
 )
 
 
@@ -89,6 +90,7 @@ class UiBacklogSummary:
     quota_exhausted: bool
     dbt_was_run: bool
     log_lines: tuple[str, ...]
+    enrichment_jobs_processed: int = 0
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,7 @@ class ScoringBacklogStatus:
     resume_hash: str | None
     cached_scores: int
     unscored_candidates: int
+    candidate_posting_keys: tuple[str, ...] | None = None
 
 
 class DailyWorkflowError(Exception):
@@ -363,6 +366,7 @@ def run_unscored_job_backlog(
             quota_exhausted=summary.quota_exhausted,
             dbt_was_run=summary.dbt_was_run,
             log_lines=combined_log_lines,
+            enrichment_jobs_processed=enrichment_summary.jobs_processed,
         )
 
     except Exception as error:
@@ -391,6 +395,14 @@ def load_scoring_backlog_status(
             unscored_candidates=0,
         )
 
+    # The existing count helper ultimately counts this exact list. Keep its
+    # scope membership so NEW→Applied/Removed can update the session count
+    # without rebuilding candidates on every status interaction.
+    candidates = load_candidate_jobs(
+        resume_hash=selected_resume_hash, model_name=model_name, limit=100000,
+        minimum_rule_score=minimum_rule_score, prompt_version=MATCHER_PROMPT_VERSION,
+        reuse_any_model=True,
+    )
     return ScoringBacklogStatus(
         resume_hash=selected_resume_hash,
         cached_scores=count_cached_canonical_scores(
@@ -399,11 +411,6 @@ def load_scoring_backlog_status(
             prompt_version=MATCHER_PROMPT_VERSION,
             reuse_any_model=True,
         ),
-        unscored_candidates=count_unscored_candidate_jobs(
-            resume_hash=selected_resume_hash,
-            model_name=model_name,
-            minimum_rule_score=minimum_rule_score,
-            prompt_version=MATCHER_PROMPT_VERSION,
-            reuse_any_model=True,
-        ),
+        unscored_candidates=len(candidates),
+        candidate_posting_keys=tuple(job['canonical_job_key'] for job in candidates),
     )

@@ -1415,6 +1415,7 @@ def save_job_eligibility_decision(
 
 def load_all_jobs(
     resume_hash: str | None = None,
+    for_session_snapshot: bool = False,
 ) -> list[dict[str, Any]]:
     """Load reviewable UI jobs for one resume with fit/status metadata."""
     initialize_job_eligibility_table()
@@ -1977,12 +1978,30 @@ def load_all_jobs(
             job.get("risk_factors")
         )
 
-    jobs = apply_admission_gate(
-        jobs=filter_user_reviewable_jobs(jobs),
-        resume_hash=selected_resume_hash,
-        preserve_statuses=("applied", "removed"),
-    )
+    if for_session_snapshot:
+        # Retain status-dependent hidden cards. Compute their NEW admission/source
+        # eligibility using the SAME existing functions once, then restore status.
+        # A callback can thus reveal a historical counterpart without a DB reload.
+        original_statuses = {job['record_key']: job.get('application_status', 'new') for job in jobs}
+        for job in jobs:
+            job['application_status'] = 'new'
+        new_source_keys = {job['record_key'] for job in filter_user_reviewable_jobs(jobs)}
+        admitted = apply_admission_gate(jobs=jobs, resume_hash=selected_resume_hash,
+            preserve_statuses=("applied", "removed"))
+        admitted_keys = {job['record_key'] for job in admitted}
+        for job in jobs:
+            job['_snapshot_new_source_visible'] = job['record_key'] in new_source_keys
+            job['_snapshot_new_admitted'] = job['record_key'] in admitted_keys
+            job['application_status'] = original_statuses[job['record_key']]
+    else:
+        jobs = apply_admission_gate(
+            jobs=filter_user_reviewable_jobs(jobs),
+            resume_hash=selected_resume_hash,
+            preserve_statuses=("applied", "removed"),
+        )
 
+    from src.actionability import settings as actionability_settings, now_utc
+    actionability_config, actionability_now = actionability_settings(), now_utc()
     for job in jobs:
         job["has_current_complete_ai_assessment"] = (
             has_current_complete_ai_score(job)
@@ -1992,13 +2011,25 @@ def load_all_jobs(
         job["fit_priority_label"] = priority.label
         job["fit_priority_source"] = priority.source
         job["fit_priority_reason"] = priority.reason
-        job["job_review_bucket"] = classify_job_review_bucket(job)
+        job["job_review_bucket"] = classify_job_review_bucket(job,
+            actionability_config=actionability_config, now=actionability_now)
 
         enrichment_priority = calculate_enrichment_priority(job)
         job["enrichment_priority_score"] = enrichment_priority.score
         job["enrichment_priority_tier"] = enrichment_priority.tier
         job["enrichment_priority_reason"] = enrichment_priority.reason
 
+    return jobs if for_session_snapshot else prepare_job_display(jobs)
+
+
+def prepare_job_display(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Existing display ordering/dedup; session flags encode unchanged NEW gates."""
+    jobs = [job for job in jobs if (
+        job.get('application_status', 'new') in {'applied', 'removed'}
+        or (job.get('_snapshot_new_source_visible', True)
+            and job.get('_snapshot_new_admitted', True)))]
+    for job in jobs:
+        job.pop('approximate_enrichment_queue_rank', None)
     queue_candidates = sorted(
         [
             job
@@ -2102,75 +2133,121 @@ def load_all_jobs(
     return deduplicated_jobs
 
 
+@dataclass(frozen=True)
+class ApplicationStatusChange:
+    record_keys: tuple[str, ...]
+    exact_posting_key: str | None
+    verified_posting_keys: tuple[str, ...] = ()
+    overlays: tuple[dict[str, Any], ...] = ()
+
+
+def _trusted_snapshot_key(job: dict[str, Any]) -> str | None:
+    """Match the status join's SQL checks, including legacy third-party guards."""
+    from src.job_domains import posting_key_can_be_trusted, is_third_party_url
+    key = job.get("verified_posting_key")
+    if (key and str(key).strip()
+            and str(job.get("verified_posting_key_trust") or "").lower() == VERIFIED_KEY_TRUST_TRUSTED
+            and str(job.get("verified_posting_key_source") or "").lower() in TRUSTED_VERIFIED_KEY_SOURCES
+            and posting_key_can_be_trusted(key)
+            and not is_third_party_url(job.get("official_job_url"))):
+        return key
+    return None
+
+
+def _status_snapshot_overlays(connection, jobs, exact_key, changed_record_keys):
+    """Read only thin status rows; do not reconstruct recommendations or scores.
+
+    The snapshot already holds the chosen enrichment metadata. Canonical status
+    takes precedence over trusted verified status exactly as in load_all_jobs.
+    """
+    changed_keys = connection.execute(
+        "SELECT * FROM job_enrichment_attempts WHERE record_key IN (SELECT unnest(?))",
+        [list(changed_record_keys)],
+    )
+    names = [d[0] for d in changed_keys.description]
+    verified_keys = {_trusted_snapshot_key(dict(zip(names, row))) for row in changed_keys.fetchall()}
+    verified_keys.discard(None)
+    candidates = [job for job in jobs
+        if job.get("exact_posting_key", job.get("canonical_job_key")) == exact_key
+        or _trusted_snapshot_key(job) in verified_keys]
+    exact_keys = {job.get("exact_posting_key", job.get("canonical_job_key")) for job in candidates}
+    current_keys = {_trusted_snapshot_key(job) for job in candidates}
+    current_keys.discard(None)
+    # Ordered once: first row per scope has the same timestamp/key precedence
+    # as both ROW_NUMBER() partitions in the full recommendation query.
+    cursor = connection.execute(
+        """
+        SELECT status.status, raw.source, status.record_key,
+            exact_posting_identity(raw.source, raw.source_job_id, raw.apply_url, raw.record_key) AS exact_key,
+            attempts.verified_posting_key, attempts.verified_posting_key_source,
+            attempts.verified_posting_key_trust, attempts.official_job_url
+        FROM application_status AS status
+        JOIN raw_jobs AS raw ON raw.record_key = status.record_key
+        LEFT JOIN job_enrichment_attempts AS attempts ON attempts.record_key = status.record_key
+        WHERE exact_posting_identity(raw.source, raw.source_job_id, raw.apply_url, raw.record_key)
+                IN (SELECT unnest(?))
+           OR attempts.verified_posting_key IN (SELECT unnest(?))
+        ORDER BY status.updated_at DESC NULLS LAST, status.record_key
+        """, [list(exact_keys), list(current_keys)],
+    )
+    names = [d[0] for d in cursor.description]
+    exact, verified = {}, {}
+    for row in cursor.fetchall():
+        row = dict(zip(names, row))
+        exact.setdefault(row["exact_key"], row)
+        key = _trusted_snapshot_key(row)
+        if key: verified.setdefault(key, row)
+    overlays = []
+    for job in candidates:
+        row = exact.get(job.get("exact_posting_key", job.get("canonical_job_key")))
+        scope = "exact"
+        if row is None:
+            row = verified.get(_trusted_snapshot_key(job)); scope = "verified_posting"
+        overlays.append({"record_key": job["record_key"],
+            "application_status": row["status"] if row else "new",
+            "application_status_scope": scope if row else "default",
+            "application_status_source": row["source"] if row else None,
+            "application_status_record_key": row["record_key"] if row else None})
+    return tuple(sorted(verified_keys)), tuple(overlays)
+
+
 def update_application_status(
-    record_key: str,
-    status: str,
-) -> None:
-    """Apply a status to duplicate alerts for the same exact posting."""
+    record_key: str, status: str,
+    reviewable_jobs: list[dict[str, Any]] | None = None,
+) -> ApplicationStatusChange:
+    """Persist the same exact scope and optionally return fresh UI status overlays."""
     if status not in {"new", "applied", "removed"}:
-        raise ValueError(
-            "Application status must be new, applied or removed."
-        )
-
+        raise ValueError("Application status must be new, applied or removed.")
     initialize_database()
-
     updated_at = datetime.now(timezone.utc)
-
     with get_connection() as connection:
         register_exact_posting_identity_function(connection)
-        canonical_row = connection.execute(
-            """
-            SELECT
-                exact_posting_identity(
-                    source,
-                    source_job_id,
-                    apply_url,
-                    record_key
-                ) AS posting_status_key
-            FROM raw_jobs
-            WHERE record_key = ?
-            """,
+        target = connection.execute(
+            "SELECT exact_posting_identity(source, source_job_id, apply_url, record_key) FROM raw_jobs WHERE record_key = ?",
             [record_key],
         ).fetchone()
-
-        if not canonical_row:
-            return
-
-        related_rows = connection.execute(
-            """
-            SELECT record_key
-            FROM raw_jobs
-            WHERE exact_posting_identity(
-                source,
-                source_job_id,
-                apply_url,
-                record_key
-            ) = ?
-            """,
-            [canonical_row[0]],
-        ).fetchall()
-
-        connection.executemany(
-            """
-            INSERT INTO application_status (
-                record_key,
-                status,
-                updated_at
-            )
-            VALUES (?, ?, ?)
-            ON CONFLICT (record_key) DO UPDATE SET
-                status = excluded.status,
-                updated_at = excluded.updated_at
-            """,
-            [
-                [
-                    related_row[0],
-                    status,
-                    updated_at,
-                ]
-                for related_row in related_rows
-            ],
-        )
+        if not target: return ApplicationStatusChange((), None)
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            affected = connection.execute(
+                """
+                INSERT INTO application_status (record_key, status, updated_at)
+                SELECT record_key, ?, ? FROM raw_jobs
+                WHERE exact_posting_identity(source, source_job_id, apply_url, record_key) = ?
+                ON CONFLICT (record_key) DO UPDATE SET
+                    status = excluded.status, updated_at = excluded.updated_at
+                RETURNING record_key
+                """, [status, updated_at, target[0]],
+            ).fetchall()
+            record_keys = tuple(row[0] for row in affected)
+            keys, overlays = (), ()
+            if reviewable_jobs is not None:
+                keys, overlays = _status_snapshot_overlays(connection, reviewable_jobs, target[0], record_keys)
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+    return ApplicationStatusChange(record_keys, target[0], keys, overlays)
 
 
 def load_candidate_jobs(
@@ -2944,14 +3021,7 @@ def load_unscreened_job_eligibility_candidates(
     )[:limit]
 
 
-def load_pipeline_operation_metrics(
-    resume_hash: str | None,
-    minimum_rule_score: int,
-) -> dict[str, Any]:
-    """Return operations-tab counts from one consistent repository layer."""
-    selected_resume_hash = resolve_display_resume_hash(resume_hash)
-    reviewable_jobs = load_all_jobs(resume_hash=selected_resume_hash)
-
+def reviewable_job_metrics(reviewable_jobs: list[dict[str, Any]]) -> dict[str, Any]:
     metrics: dict[str, Any] = {
         "raw_jobs": 0,
         "exact_postings": 0,
@@ -3000,7 +3070,25 @@ def load_pipeline_operation_metrics(
         "enrichment_attempts": {},
     }
 
-    if selected_resume_hash:
+    return metrics
+
+
+def load_pipeline_operation_metrics(
+    resume_hash: str | None,
+    minimum_rule_score: int,
+    reviewable_jobs: list[dict[str, Any]] | None = None,
+    unscored_candidates: int | None = None,
+) -> dict[str, Any]:
+    """Return operations-tab counts from one consistent repository layer."""
+    selected_resume_hash = resolve_display_resume_hash(resume_hash)
+    if reviewable_jobs is None:
+        reviewable_jobs = load_all_jobs(resume_hash=selected_resume_hash)
+
+    metrics = reviewable_job_metrics(reviewable_jobs)
+
+    if unscored_candidates is not None:
+        metrics["ai_score_eligible"] = unscored_candidates
+    elif selected_resume_hash:
         metrics["ai_score_eligible"] = count_unscored_candidate_jobs(
             resume_hash=selected_resume_hash,
             model_name=None,
