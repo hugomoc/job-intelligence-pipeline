@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import re
+
+from bs4 import BeautifulSoup
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -23,7 +25,9 @@ from src.ai.resume_profiler import (
 )
 
 
-MINIMUM_COMPLETE_DESCRIPTION_WORDS = 80
+from src.description_quality import MINIMUM_FULL_DESCRIPTION_WORDS, assess_description_quality
+
+MINIMUM_COMPLETE_DESCRIPTION_WORDS = MINIMUM_FULL_DESCRIPTION_WORDS
 MATCHER_PROMPT_VERSION = "v3"
 
 SIGNIFICANT_TERM_PATTERN = re.compile(
@@ -413,8 +417,8 @@ def get_description_information(
     )
 
     description_complete = (
-        word_count
-        >= MINIMUM_COMPLETE_DESCRIPTION_WORDS
+        assess_description_quality(description).full_jd
+        and job.get("enrichment_status") != "resolution_rejected"
     )
 
     return (
@@ -582,7 +586,10 @@ def contains_phrase(
     if not normalized_phrase:
         return False
 
-    return f" {normalized_phrase} " in normalized_text
+    return bool(re.search(
+        r"(?<![a-z0-9+#.])" + re.escape(normalized_phrase) + r"(?![a-z0-9+#]|\.[a-z0-9])",
+        normalized_text,
+    ))
 
 
 def profile_to_text(
@@ -590,6 +597,7 @@ def profile_to_text(
     include_certifications: bool = True,
 ) -> str:
     profile_data = resume_profile.model_dump()
+    profile_data.pop("personal_eligibility", None)
 
     if not include_certifications:
         profile_data = {
@@ -682,6 +690,7 @@ OPTIONAL_REQUIREMENT_CONTEXT_PATTERNS = (
     r"\bbonus\b",
     r"\bplus\b",
     r"\boptional\b",
+    r"\bnot\s+(?:required|mandatory)\b",
 )
 
 
@@ -763,12 +772,13 @@ def capability_mentions_with_context(
                 window,
                 CRITICAL_REQUIREMENT_CONTEXT_PATTERNS,
             )
+            mandatory_window = re.sub(r"\bnot\s+(?:required|mandatory)\b", "", window)
             has_mandatory_context = regex_present(
-                window,
+                mandatory_window,
                 MANDATORY_REQUIREMENT_CONTEXT_PATTERNS,
             )
             has_hard_mandatory_context = regex_present(
-                window,
+                mandatory_window,
                 HARD_MANDATORY_CONTEXT_PATTERNS,
             )
 
@@ -804,46 +814,10 @@ def capability_mandatory_mentions(
     signal: CriticalCapabilitySignal,
     resume_profile: ResumeProfile,
 ) -> int:
-    normalized = normalize_match_text(job_text)
-    mention_count = 0
-
-    for pattern in signal.job_patterns:
-        for match in re.finditer(pattern, normalized):
-            start = max(match.start() - 90, 0)
-            end = min(match.end() + 90, len(normalized))
-            window = normalized[start:end]
-
-            has_mandatory_context = regex_present(
-                window,
-                MANDATORY_REQUIREMENT_CONTEXT_PATTERNS,
-            )
-            has_hard_mandatory_context = regex_present(
-                window,
-                HARD_MANDATORY_CONTEXT_PATTERNS,
-            )
-
-            if not has_mandatory_context:
-                continue
-
-            if (
-                regex_present(
-                    window,
-                    OPTIONAL_REQUIREMENT_CONTEXT_PATTERNS,
-                )
-                and not has_hard_mandatory_context
-            ):
-                continue
-
-            if requirement_has_satisfied_alternative(
-                window,
-                signal,
-                resume_profile,
-            ):
-                continue
-
-            mention_count += 1
-
-    return mention_count
+    # Mandatory provenance comes from the shared complete-clause policy,
+    # including essential/need-to-have wording outside headings.
+    decision = validate_hard_gap_clause(signal.label, job_text, resume_profile)
+    return sum(not row.get("satisfied", False) for row in decision["clauses"]) if decision["keep_hard_gap"] else 0
 
 
 def capability_is_central_to_job(
@@ -1147,6 +1121,13 @@ def requirement_is_demonstrated(
     normalized_requirement = normalize_match_text(
         requirement
     )
+    # Total relevant years prove a general data/analytics minimum, not tenure
+    # with a specific technology or specialist industry.
+    minimum_years = re.search(r"\b(\d+)\s*\+?\s*years?\s+(?:of\s+)?(?:relevant\s+)?(?:professional\s+)?(?:experience\s+(?:in|with)\s+)?(?:data engineering|analytics engineering|business intelligence)\b", normalized_requirement)
+    if minimum_years:
+        remaining = normalized_requirement[minimum_years.end():].strip()
+        if remaining in {"", "experience", "required", "is required", "experience required"}:
+            return int(minimum_years.group(1)) <= resume_profile.years_of_relevant_experience
     groups = mentioned_alias_groups(
         requirement
     )
@@ -1326,14 +1307,33 @@ def remove_demonstrated_missing_items(
     ]
 
 
+
+from src.ai.requirement_policy import (
+    description_requirement_clauses, clause_groups, validate_hard_gap_clause,
+    personal_fact_kind, personal_requirement_evidence,
+)
+
+
 def validate_missing_qualifications(
     analysis: JobMatchAnalysis,
     resume_profile: ResumeProfile,
+    description: str | None = None,
 ) -> JobMatchAnalysis:
     hard_missing = remove_demonstrated_missing_items(
         analysis.hard_requirements_missing,
         resume_profile,
     )
+    risks = list(analysis.risk_factors)
+    if description is not None:
+        hard_missing = []
+        for gap in analysis.hard_requirements_missing:
+            decision = validate_hard_gap_clause(gap, description, resume_profile)
+            if decision["keep_hard_gap"]:
+                hard_missing.append(gap)
+            elif decision.get("personal_evidence", {}).get("state") == "UNKNOWN":
+                risks.append(f"Needs confirmation (UNKNOWN personal eligibility): {decision['personal_evidence']['kind']}; no explicit candidate fact supplied.")
+            elif decision["reason"] in {"mandatory status not established", "vendor examples not mandatory; broader capability needs review"}:
+                risks.append(f"Unconfirmed qualification (mandatory JD evidence unavailable): {gap}")
     preferred_missing = remove_demonstrated_missing_items(
         analysis.preferred_qualifications_missing,
         resume_profile,
@@ -1343,12 +1343,14 @@ def validate_missing_qualifications(
         hard_missing == analysis.hard_requirements_missing
         and preferred_missing
         == analysis.preferred_qualifications_missing
+        and risks == analysis.risk_factors
     ):
         return analysis
 
     return analysis.model_copy(
         update={
             "hard_requirements_missing": hard_missing,
+            "risk_factors": list(dict.fromkeys(risks)),
             "preferred_qualifications_missing": (
                 preferred_missing
             ),
@@ -1558,6 +1560,7 @@ def build_resume_job_match(
     analysis = validate_missing_qualifications(
         analysis=analysis,
         resume_profile=resume_profile,
+        description=str(job.get("description") or ""),
     )
 
     specialization_gap_labels: list[str] = []
@@ -1662,6 +1665,8 @@ def build_resume_job_match(
                 update=update,
             )
 
+    analysis = validate_missing_qualifications(analysis, resume_profile, str(job.get("description") or ""))
+
     overall_score = calculate_overall_score(
         analysis
     )
@@ -1727,6 +1732,13 @@ def build_resume_job_match(
             }
         )
 
+    # Unknown personal conditions are not failed requirements or confirmed fits.
+    # Remove fabricated negative phrasing from model risks; retain confirmation.
+    clean_risks = []
+    for risk in analysis.risk_factors:
+        personal = personal_requirement_evidence(risk, str(job.get("description") or ""), resume_profile)
+        clean_risks.append(f"Needs confirmation (UNKNOWN personal eligibility): {personal['kind']}; no explicit candidate fact supplied." if personal and personal["state"] == "UNKNOWN" else risk)
+    analysis = analysis.model_copy(update={"risk_factors": list(dict.fromkeys(clean_risks))})
     recommendation = determine_recommendation(
         overall_score=overall_score,
         analysis=analysis,
@@ -1734,6 +1746,9 @@ def build_resume_job_match(
             description_complete
         ),
     )
+
+    if recommendation == "apply" and any(risk.startswith("Needs confirmation (UNKNOWN personal eligibility)") for risk in analysis.risk_factors):
+        recommendation = "review"
 
     return ResumeJobMatch(
         record_key=record_key,
@@ -1761,6 +1776,9 @@ def score_resume_against_job(
         description_word_count,
         description_complete,
     ) = get_description_information(job)
+
+    if not description_complete:
+        raise ResumeMatcherError("A current FULL_JD is required before AI scoring.")
 
     selected_model = (
         model_name
@@ -1836,6 +1854,9 @@ def score_resume_against_job_openai(
         description_word_count,
         description_complete,
     ) = get_description_information(job)
+
+    if not description_complete:
+        raise ResumeMatcherError("A current FULL_JD is required before AI scoring.")
 
     selected_model = (
         model_name

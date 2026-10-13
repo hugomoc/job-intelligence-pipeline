@@ -15,11 +15,13 @@ from typing import Any, Literal
 from google.genai import types
 from pydantic import BaseModel, Field, ValidationError
 
-from src.ai.resume_matcher import ResumeMatcherError
+from src.ai.resume_matcher import ResumeMatcherError, get_description_information
+from src.ai.requirement_policy import validate_hard_gap_clause, central_specialization_gaps
+from src.job_admission import evaluate_job_admission
 from src.ai.resume_profiler import ResumeProfile, get_gemini_client, get_model_name
 
 
-ELIGIBILITY_PROMPT_VERSION = "v1"
+ELIGIBILITY_PROMPT_VERSION = "v2"
 
 
 class JobEligibilityAnalysis(BaseModel):
@@ -57,6 +59,51 @@ class JobEligibilityDecision:
     prompt_version: str
     analysis: JobEligibilityAnalysis
 
+
+
+def normalize_job_eligibility(analysis: JobEligibilityAnalysis, resume_profile: ResumeProfile, job: dict[str, Any]) -> JobEligibilityAnalysis:
+    """Treat proposed gaps as pointers to fetched JD evidence, never proof."""
+    if not get_description_information(job)[2]:
+        return analysis
+    description = str(job.get("description") or "")
+    retained, uncertainties, satisfied = [], [], []
+    for gap in analysis.critical_skill_gaps:
+        check = validate_hard_gap_clause(gap, description, resume_profile)
+        if check["keep_hard_gap"]:
+            retained.append(gap)
+        elif check.get("personal_evidence", {}).get("state") == "UNKNOWN":
+            uncertainties.append(f"Needs confirmation (UNKNOWN personal eligibility): {check['personal_evidence']['kind']}; no explicit candidate fact supplied.")
+        elif check["reason"] == "allowed clause satisfied":
+            for row in check["clauses"]:
+                if row["satisfied"]:
+                    satisfied.append(f"{row['clause']} — demonstrated {', '.join(row['resume_evidence'])}")
+        elif check["reason"] != "personal condition satisfied":
+            uncertainties.append(f"Unconfirmed qualification/specialization: {gap}; {check['reason']}")
+    central = central_specialization_gaps(description, str(job.get("title") or ""), resume_profile)
+    retained = list(dict.fromkeys(retained + [row["gap"] for row in central]))
+    admission = evaluate_job_admission(job, resume_profile)
+    decision = analysis.decision
+    if retained:
+        decision = "exclude"
+        reason = "Confirmed JD requirement or central specialization mismatch: " + "; ".join(retained)
+    elif admission.admission_decision == "include":
+        decision = "eligible"
+        reason = "Permitted alternatives/profile evidence satisfy the proposed gaps; no remaining confirmed central specialization mismatch. " + "; ".join(satisfied)
+        if uncertainties:
+            reason += " Unconfirmed conditions remain review risks."
+    else:
+        # Full-JD admission still owns unrelated role-family exclusions.
+        reason = admission.admission_reason
+    return analysis.model_copy(update={
+        "decision": decision, "reason": reason,
+        "critical_skill_gaps": retained,
+        "admission_decision": "include" if decision == "eligible" else "exclude",
+        "admission_reason": reason,
+        "required_skill_match": "strong" if satisfied and not retained else analysis.required_skill_match,
+        "missing_or_mismatched_signals": list(dict.fromkeys(retained + uncertainties)),
+        "matched_resume_signals": list(dict.fromkeys(analysis.matched_resume_signals + satisfied)),
+        "confidence": "medium" if decision == "eligible" and uncertainties else analysis.confidence,
+    })
 
 def build_job_eligibility_prompt(
     resume_profile: ResumeProfile,
@@ -104,6 +151,12 @@ Rules:
     specialization, seniority, required experience, domain, and location.
 11. Do not exclude merely because one ordinary JD keyword is missing. Exclude
     only for central/core requirements or substantially mismatched role type.
+
+12. Evaluate whole mandatory clauses: Java OR Python is satisfied by Python;
+    Spark OR PySpark by Spark. Examples/preferred vendors are not mandatory.
+13. Missing citizenship, work authorization, sponsorship, security clearance,
+    relocation or travel facts are UNKNOWN, not failed requirements. Never infer.
+14. Preserve real central specialization mismatches using concrete JD evidence.
 
 CANDIDATE PROFILE:
 
@@ -230,7 +283,7 @@ def evaluate_job_eligibility(
             f"{type(error).__name__}: {error}"
         ) from error
 
-    analysis = parse_gemini_job_eligibility_response(response)
+    analysis = normalize_job_eligibility(parse_gemini_job_eligibility_response(response), resume_profile, job)
 
     return JobEligibilityDecision(
         canonical_job_key=str(job.get("canonical_job_key") or job.get("record_key") or ""),
@@ -308,7 +361,7 @@ def evaluate_job_eligibility_openai(
     except json.JSONDecodeError as error:
         raise ResumeMatcherError("OpenAI returned invalid eligibility JSON.") from error
 
-    analysis = parse_job_eligibility_payload(payload, "OpenAI")
+    analysis = normalize_job_eligibility(parse_job_eligibility_payload(payload, "OpenAI"), resume_profile, job)
 
     return JobEligibilityDecision(
         canonical_job_key=str(job.get("canonical_job_key") or job.get("record_key") or ""),

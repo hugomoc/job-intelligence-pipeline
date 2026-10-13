@@ -77,6 +77,12 @@ def is_official_retry_in_cooldown(
     )
 
 
+def with_scoring_queue_membership(job: dict[str, Any], posting_keys) -> dict[str, Any]:
+    """Use the sidebar's actual cached candidate set; never fetch during render."""
+    return dict(job, scoring_eligible=(job.get("application_status", "new") == "new"
+                                      and job.get("exact_posting_key") in posting_keys))
+
+
 def derive_job_pipeline_state(
     job: dict[str, Any],
     now: datetime | None = None,
@@ -97,8 +103,12 @@ def derive_job_pipeline_state(
         ).strip()
 
         if description_state == "FULL_JD":
-            code = "SCORING_PENDING"
-            label = "Awaiting AI scoring"
+            if job.get("scoring_eligible") is True:
+                code = "SCORING_PENDING"
+                label = "Awaiting AI scoring"
+            else:
+                code = "SCORING_EXCLUDED"
+                label = "Not eligible for AI scoring"
         elif is_official_retry_in_cooldown(job, now=now):
             code = "ENRICHMENT_COOLDOWN"
             label = "Official lookup retry after cooldown"

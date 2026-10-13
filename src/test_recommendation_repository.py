@@ -2501,7 +2501,225 @@ def test_display_resume_hash_falls_back_to_latest_cached_profile() -> None:
             database.DATABASE_PATH = old_database_path
 
 
+def test_legacy_exclusions_hold_scoring_until_current_normalization() -> None:
+    """A policy bump must not silently admit excluded jobs into scoring."""
+    from src.score_jobs_ai import initialize_ai_tables
+    from src.enrich_jobs import initialize_enrichment_tables
+    from src.ui.daily_workflow_service import load_scoring_backlog_status
+    from src.ui.job_pipeline_state import (
+        derive_job_pipeline_state,
+        with_scoring_queue_membership,
+    )
+
+    def scenario() -> None:
+        initialize_ai_tables()
+        initialize_enrichment_tables()
+        seed_resume_profile()
+        description = (
+            "Responsibilities include Python SQL Snowflake AWS dbt data "
+            "pipelines and analytics engineering. Qualifications include "
+            "data modeling experience and collaboration. "
+        ) * 20
+        keys = (
+            "legacy-excluded", "current-approved", "current-excluded",
+            "other-resume", "legacy-eligible", "unscreened",
+        )
+        for key in keys:
+            seed_job(key, description, title="Data Engineer", source="linkedin")
+
+        def screen(key: str, version: str, result: str,
+                   resume_hash: str = "resume-1") -> None:
+            save_job_eligibility_decision(JobEligibilityDecision(
+                canonical_job_key=exact_posting_identity(
+                    "linkedin", None, f"https://example.com/{key}", key,
+                ),
+                record_key=key, resume_hash=resume_hash,
+                model_name="model-1", prompt_version=version,
+                analysis=JobEligibilityAnalysis(
+                    decision=result, confidence="high", reason="fixture",
+                ),
+            ))
+
+        screen("legacy-excluded", "v1", "exclude")
+        screen("current-approved", "v1", "exclude")
+        screen("current-approved", ELIGIBILITY_PROMPT_VERSION, "eligible")
+        screen("current-excluded", "v1", "eligible")
+        screen("current-excluded", ELIGIBILITY_PROMPT_VERSION, "exclude")
+        screen("other-resume", "v1", "exclude", "different-resume")
+        screen("legacy-eligible", "v1", "eligible")
+
+        expected = {
+            "current-approved", "other-resume", "legacy-eligible", "unscreened",
+        }
+        candidates = load_candidate_jobs(
+            "resume-1", "model-1", 100, 0, reuse_any_model=True,
+        )
+        assert {job["record_key"] for job in candidates} == expected
+        assert count_unscored_candidate_jobs(
+            "resume-1", "model-1", 0, reuse_any_model=True,
+        ) == len(expected)
+        backlog = load_scoring_backlog_status("resume-1", 0)
+        assert backlog.unscored_candidates == len(expected)
+        held = {
+            "exact_posting_key": exact_posting_identity(
+                "linkedin", None, "https://example.com/legacy-excluded",
+                "legacy-excluded",
+            ),
+            "application_status": "new", "description_state": "FULL_JD",
+        }
+        assert derive_job_pipeline_state(with_scoring_queue_membership(
+            held, set(backlog.candidate_posting_keys),
+        )).label == "Not eligible for AI scoring"
+
+        pending = load_unscreened_job_eligibility_candidates("resume-1", 100)
+        assert "legacy-excluded" in {job["record_key"] for job in pending}
+        assert "legacy-eligible" in {job["record_key"] for job in pending}
+        # Historical eligible is still unscreened under the current policy.
+        # A current approved decision explicitly releases the scoring hold.
+        screen("legacy-excluded", ELIGIBILITY_PROMPT_VERSION, "eligible")
+        candidates = load_candidate_jobs(
+            "resume-1", "model-1", 100, 0, reuse_any_model=True,
+        )
+        assert {job["record_key"] for job in candidates} == expected | {
+            "legacy-excluded",
+        }
+
+    with_temp_review_database(scenario)
+
+
+def test_load_all_jobs_reads_current_exact_score_without_mart_refresh() -> None:
+    """Physical policy corrections and new scores must appear immediately."""
+    def scenario() -> None:
+        seed_resume_profile()
+        description = (
+            "Responsibilities include Python SQL Snowflake AWS data pipelines "
+            "and analytics engineering. Qualifications include SQL experience. "
+        ) * 20
+        seed_review_job(
+            "current-exact", "Senior Data Engineer", source="linkedin",
+            description=description,
+            apply_url="https://www.linkedin.com/jobs/view/321/",
+        )
+        seed_review_job(
+            "trusted-reuse", "Senior Data Engineer", source="wellfound",
+            description=description,
+            apply_url="https://wellfound.com/jobs/654-data-engineer",
+        )
+        for key, source in (("current-exact", "linkedin"),
+                            ("trusted-reuse", "wellfound")):
+            seed_verified_attempt(
+                key, "greenhouse:321", source=source,
+                description=description,
+                official_job_url="https://boards.greenhouse.io/example/jobs/321",
+            )
+        original_time = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
+        exact_key = exact_posting_identity(
+            "linkedin", None, "https://www.linkedin.com/jobs/view/321/",
+            "current-exact",
+        )
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO resume_job_scores (
+                    resume_hash,record_key,model_name,prompt_version,
+                    overall_score,recommendation,confidence,title_fit,
+                    skills_fit,experience_fit,seniority_fit,industry_fit,
+                    location_fit,matching_strengths,hard_requirements_missing,
+                    preferred_qualifications_missing,risk_factors,summary,
+                    description_word_count,description_complete,scored_at
+                ) VALUES (
+                    'resume-1','current-exact','actual-model',?,49,'skip','high',
+                    90,85,80,90,80,100,'["SQL"]','["old gap"]','[]','[]',
+                    'original summary',240,true,?
+                )
+                """, [MATCHER_PROMPT_VERSION, original_time],
+            )
+            connection.execute(
+                """
+                INSERT INTO analytics.mart_job_recommendations
+                SELECT ?,resume_hash,prompt_version,overall_score,
+                    recommendation,confidence,title_fit,skills_fit,
+                    experience_fit,seniority_fit,industry_fit,location_fit,
+                    matching_strengths,hard_requirements_missing,
+                    preferred_qualifications_missing,risk_factors,summary,
+                    description_word_count,description_complete,false,scored_at
+                FROM resume_job_scores WHERE record_key='current-exact'
+                """, [exact_key],
+            )
+            connection.execute(
+                """
+                UPDATE resume_job_scores SET overall_score=82,
+                    recommendation='apply',hard_requirements_missing='[]',
+                    risk_factors='["review domain"]',summary='corrected summary'
+                WHERE record_key='current-exact'
+                """,
+            )
+
+        jobs = {j['record_key']: j for j in load_all_jobs('resume-1')}
+        exact = jobs['current-exact']
+        assert exact['ai_score'] == 82
+        assert exact['recommendation'] == 'apply'
+        assert exact['hard_requirements_missing'] == []
+        assert exact['risk_factors'] == ['review domain']
+        assert exact['summary'] == 'corrected summary'
+        assert exact['ai_scored_at'] == original_time
+        assert exact['ai_prompt_version'] == MATCHER_PROMPT_VERSION
+        assert exact['ai_score_scope'] == 'exact'
+        assert jobs['trusted-reuse']['ai_score'] == 82
+        assert jobs['trusted-reuse']['ai_score_scope'] == 'verified_posting'
+        with database.get_connection() as connection:
+            assert connection.execute(
+                'SELECT ai_score FROM analytics.mart_job_recommendations',
+            ).fetchall() == [(49,)]
+            assert connection.execute(
+                'SELECT scored_at FROM resume_job_scores',
+            ).fetchall() == [(original_time,)]
+            # With no mart and no verified key, only guarded physical scores
+            # can provide the UI assessment.
+            connection.execute('DELETE FROM analytics.mart_job_recommendations')
+            connection.execute('DELETE FROM job_enrichment_attempts')
+
+        assert next(j for j in load_all_jobs('resume-1')
+                    if j['record_key']=='current-exact')['ai_score'] == 82
+        for assignment in (
+            "description_complete=false",
+            "prompt_version='old'",
+            "description_word_count=20",
+            "resume_hash='different-resume'",
+        ):
+            with database.get_connection() as connection:
+                connection.execute('UPDATE resume_job_scores SET '+assignment)
+            assert next(j for j in load_all_jobs('resume-1')
+                        if j['record_key']=='current-exact')['ai_score'] is None
+            with database.get_connection() as connection:
+                connection.execute(
+                    "UPDATE resume_job_scores SET description_complete=true,"
+                    "prompt_version=?,description_word_count=240,"
+                    "resume_hash='resume-1'", [MATCHER_PROMPT_VERSION],
+                )
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE raw_jobs SET description_updated_at=? "
+                "WHERE record_key='current-exact'",
+                [original_time+timedelta(seconds=1)],
+            )
+        assert next(j for j in load_all_jobs('resume-1')
+                    if j['record_key']=='current-exact')['ai_score'] is None
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE raw_jobs SET description_updated_at=NULL,"
+                "description='navigation chrome ' || repeat('marketing ',200) "
+                "WHERE record_key='current-exact'",
+            )
+        assert next(j for j in load_all_jobs('resume-1')
+                    if j['record_key']=='current-exact')['ai_score'] is None
+
+    with_temp_review_database(scenario)
+
+
 def main() -> None:
+    test_load_all_jobs_reads_current_exact_score_without_mart_refresh()
+    test_legacy_exclusions_hold_scoring_until_current_normalization()
     test_candidate_jobs_require_complete_descriptions()
     test_admission_gate_keeps_target_titles_needing_enrichment()
     test_admission_gate_preserves_manual_statuses_for_filtered_titles()

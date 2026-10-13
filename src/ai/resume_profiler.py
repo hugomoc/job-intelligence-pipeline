@@ -128,7 +128,19 @@ class EducationItem(BaseModel):
     )
 
 
+class CandidateEligibilityFacts(BaseModel):
+    """Explicit candidate-supplied facts; None always means unknown."""
+    citizenship_country_codes: list[str] | None = None
+    authorized_work_countries: list[str] | None = None
+    requires_sponsorship: bool | None = None
+    security_clearances: list[str] | None = None
+    willing_to_relocate: bool | None = None
+    willing_to_travel: bool | None = None
+    max_travel_percent: int | None = Field(default=None, ge=0, le=100)
+
+
 class ResumeProfile(BaseModel):
+    personal_eligibility: CandidateEligibilityFacts = Field(default_factory=CandidateEligibilityFacts, description="Only explicitly supplied personal eligibility facts; omitted values are UNKNOWN.")
     professional_summary: str = Field(
         description=(
             "Brief professional summary based only "

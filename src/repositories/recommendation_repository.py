@@ -1607,6 +1607,52 @@ def load_all_jobs(
                        enriched_jobs.record_key
             ),
 
+            exact_scores AS (
+                SELECT
+                    current_jobs.canonical_job_key,
+                    scores.overall_score AS ai_score,
+                    scores.recommendation,
+                    scores.confidence,
+                    scores.title_fit,
+                    scores.skills_fit,
+                    scores.experience_fit,
+                    scores.seniority_fit,
+                    scores.industry_fit,
+                    scores.location_fit,
+                    scores.matching_strengths,
+                    scores.hard_requirements_missing,
+                    scores.preferred_qualifications_missing,
+                    scores.risk_factors,
+                    scores.summary,
+                    scores.description_word_count,
+                    scores.description_complete,
+                    false AS has_incomplete_description,
+                    scores.prompt_version AS ai_prompt_version,
+                    scores.scored_at AS ai_scored_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY current_jobs.canonical_job_key
+                        ORDER BY scores.scored_at DESC NULLS LAST,
+                                 scores.record_key,
+                                 scores.model_name
+                    ) AS score_rank
+                FROM resume_job_scores AS scores
+                INNER JOIN raw_jobs_with_identity AS scored_jobs
+                    ON scores.record_key = scored_jobs.record_key
+                INNER JOIN jobs AS current_jobs
+                    ON scored_jobs.canonical_job_key =
+                       current_jobs.canonical_job_key
+                WHERE scores.resume_hash = ?
+                  AND coalesce(scores.prompt_version, 'v1') = ?
+                  AND scores.description_complete = true
+                  AND scores.description_word_count >= 80
+                  AND description_is_full_jd(scored_jobs.description)
+                  AND description_is_full_jd(current_jobs.description)
+                  AND scores.scored_at >= coalesce(
+                      current_jobs.description_updated_at,
+                      TIMESTAMPTZ '1970-01-01 00:00:00+00'
+                  )
+            ),
+
             verified_scores AS (
                 SELECT
                     attempts.verified_posting_key,
@@ -1751,83 +1797,161 @@ def load_all_jobs(
                     canonical_status.status_record_key,
                     verified_status.status_record_key
                 ) AS application_status_record_key,
-                coalesce(
-                    recommendations.ai_score,
-                    verified_scores.ai_score
-                ) AS ai_score,
-                coalesce(
-                    recommendations.recommendation,
-                    verified_scores.recommendation
-                ) AS recommendation,
-                coalesce(
-                    recommendations.confidence,
-                    verified_scores.confidence
-                ) AS confidence,
-                coalesce(
-                    recommendations.title_fit,
-                    verified_scores.title_fit
-                ) AS title_fit,
-                coalesce(
-                    recommendations.skills_fit,
-                    verified_scores.skills_fit
-                ) AS skills_fit,
-                coalesce(
-                    recommendations.experience_fit,
-                    verified_scores.experience_fit
-                ) AS experience_fit,
-                coalesce(
-                    recommendations.seniority_fit,
-                    verified_scores.seniority_fit
-                ) AS seniority_fit,
-                coalesce(
-                    recommendations.industry_fit,
-                    verified_scores.industry_fit
-                ) AS industry_fit,
-                coalesce(
-                    recommendations.location_fit,
-                    verified_scores.location_fit
-                ) AS location_fit,
-                coalesce(
-                    recommendations.matching_strengths,
-                    verified_scores.matching_strengths
-                ) AS matching_strengths,
-                coalesce(
-                    recommendations.hard_requirements_missing,
-                    verified_scores.hard_requirements_missing
-                ) AS hard_requirements_missing,
-                coalesce(
-                    recommendations.preferred_qualifications_missing,
-                    verified_scores.preferred_qualifications_missing
-                ) AS preferred_qualifications_missing,
-                coalesce(
-                    recommendations.risk_factors,
-                    verified_scores.risk_factors
-                ) AS risk_factors,
-                coalesce(
-                    recommendations.summary,
-                    verified_scores.summary
-                ) AS summary,
-                coalesce(
-                    recommendations.description_word_count,
-                    verified_scores.description_word_count
-                ) AS description_word_count,
-                coalesce(
-                    recommendations.description_complete,
-                    verified_scores.description_complete
-                ) AS description_complete,
-                coalesce(
-                    recommendations.has_incomplete_description,
-                    verified_scores.has_incomplete_description
-                ) AS has_incomplete_description,
-                coalesce(
-                    recommendations.ai_prompt_version,
-                    verified_scores.ai_prompt_version
-                ) AS ai_prompt_version,
-                coalesce(
-                    recommendations.ai_scored_at,
-                    verified_scores.ai_scored_at
-                ) AS ai_scored_at,
                 CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.ai_score
+                    ELSE coalesce(
+                        recommendations.ai_score,
+                        verified_scores.ai_score
+                    )
+                END AS ai_score,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.recommendation
+                    ELSE coalesce(
+                        recommendations.recommendation,
+                        verified_scores.recommendation
+                    )
+                END AS recommendation,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.confidence
+                    ELSE coalesce(
+                        recommendations.confidence,
+                        verified_scores.confidence
+                    )
+                END AS confidence,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.title_fit
+                    ELSE coalesce(
+                        recommendations.title_fit,
+                        verified_scores.title_fit
+                    )
+                END AS title_fit,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.skills_fit
+                    ELSE coalesce(
+                        recommendations.skills_fit,
+                        verified_scores.skills_fit
+                    )
+                END AS skills_fit,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.experience_fit
+                    ELSE coalesce(
+                        recommendations.experience_fit,
+                        verified_scores.experience_fit
+                    )
+                END AS experience_fit,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.seniority_fit
+                    ELSE coalesce(
+                        recommendations.seniority_fit,
+                        verified_scores.seniority_fit
+                    )
+                END AS seniority_fit,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.industry_fit
+                    ELSE coalesce(
+                        recommendations.industry_fit,
+                        verified_scores.industry_fit
+                    )
+                END AS industry_fit,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.location_fit
+                    ELSE coalesce(
+                        recommendations.location_fit,
+                        verified_scores.location_fit
+                    )
+                END AS location_fit,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.matching_strengths
+                    ELSE coalesce(
+                        recommendations.matching_strengths,
+                        verified_scores.matching_strengths
+                    )
+                END AS matching_strengths,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.hard_requirements_missing
+                    ELSE coalesce(
+                        recommendations.hard_requirements_missing,
+                        verified_scores.hard_requirements_missing
+                    )
+                END AS hard_requirements_missing,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.preferred_qualifications_missing
+                    ELSE coalesce(
+                        recommendations.preferred_qualifications_missing,
+                        verified_scores.preferred_qualifications_missing
+                    )
+                END AS preferred_qualifications_missing,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.risk_factors
+                    ELSE coalesce(
+                        recommendations.risk_factors,
+                        verified_scores.risk_factors
+                    )
+                END AS risk_factors,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.summary
+                    ELSE coalesce(
+                        recommendations.summary,
+                        verified_scores.summary
+                    )
+                END AS summary,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.description_word_count
+                    ELSE coalesce(
+                        recommendations.description_word_count,
+                        verified_scores.description_word_count
+                    )
+                END AS description_word_count,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.description_complete
+                    ELSE coalesce(
+                        recommendations.description_complete,
+                        verified_scores.description_complete
+                    )
+                END AS description_complete,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.has_incomplete_description
+                    ELSE coalesce(
+                        recommendations.has_incomplete_description,
+                        verified_scores.has_incomplete_description
+                    )
+                END AS has_incomplete_description,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.ai_prompt_version
+                    ELSE coalesce(
+                        recommendations.ai_prompt_version,
+                        verified_scores.ai_prompt_version
+                    )
+                END AS ai_prompt_version,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.ai_scored_at
+                    ELSE coalesce(
+                        recommendations.ai_scored_at,
+                        verified_scores.ai_scored_at
+                    )
+                END AS ai_scored_at,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN 'exact'
                     WHEN recommendations.ai_score IS NOT NULL
                     THEN 'exact'
                     WHEN verified_scores.ai_score IS NOT NULL
@@ -1844,6 +1968,9 @@ def load_all_jobs(
                 ON jobs.posting_status_key =
                     canonical_status.posting_status_key
                AND canonical_status.status_rank = 1
+            LEFT JOIN exact_scores
+                ON jobs.canonical_job_key = exact_scores.canonical_job_key
+               AND exact_scores.score_rank = 1
             LEFT JOIN analytics.mart_job_recommendations as recommendations
                 ON lower(jobs.canonical_job_key) =
                    lower(recommendations.canonical_job_key)
@@ -1914,6 +2041,8 @@ def load_all_jobs(
             [
                 selected_resume_hash,
                 ELIGIBILITY_PROMPT_VERSION,
+                selected_resume_hash,
+                MATCHER_PROMPT_VERSION,
                 selected_resume_hash,
                 MATCHER_PROMPT_VERSION,
                 selected_resume_hash,
@@ -2515,6 +2644,21 @@ def load_candidate_jobs(
                       eligibility.decision,
                       'needs_description'
                   ) IN ('eligible', 'needs_description')
+                  -- Current normalization overrides the historical screen.
+                  -- An old exclusion otherwise remains a scoring hold until
+                  -- re-screened; old eligible decisions provide no approval.
+                  AND (
+                      eligibility.canonical_job_key IS NOT NULL
+                      OR NOT EXISTS (
+                          SELECT 1
+                          FROM resume_job_eligibility AS legacy_eligibility
+                          WHERE legacy_eligibility.canonical_job_key =
+                                jobs.canonical_job_key
+                            AND legacy_eligibility.resume_hash = ?
+                            AND legacy_eligibility.prompt_version = 'v1'
+                            AND legacy_eligibility.decision = 'exclude'
+                      )
+                  )
             )
 
             SELECT
@@ -2560,6 +2704,7 @@ def load_candidate_jobs(
                 ELIGIBILITY_PROMPT_VERSION,
                 minimum_rule_score,
                 EXCLUDED_TITLE_SQL_REGEX,
+                resume_hash,
             ],
         )
 
@@ -2798,6 +2943,21 @@ def count_unscored_candidate_jobs(
                       eligibility.decision,
                       'needs_description'
                   ) IN ('eligible', 'needs_description')
+                  -- Current normalization overrides the historical screen.
+                  -- An old exclusion otherwise remains a scoring hold until
+                  -- re-screened; old eligible decisions provide no approval.
+                  AND (
+                      eligibility.canonical_job_key IS NOT NULL
+                      OR NOT EXISTS (
+                          SELECT 1
+                          FROM resume_job_eligibility AS legacy_eligibility
+                          WHERE legacy_eligibility.canonical_job_key =
+                                jobs.canonical_job_key
+                            AND legacy_eligibility.resume_hash = ?
+                            AND legacy_eligibility.prompt_version = 'v1'
+                            AND legacy_eligibility.decision = 'exclude'
+                      )
+                  )
             )
 
             SELECT COUNT(*)
@@ -2815,6 +2975,7 @@ def count_unscored_candidate_jobs(
                 ELIGIBILITY_PROMPT_VERSION,
                 minimum_rule_score,
                 EXCLUDED_TITLE_SQL_REGEX,
+                resume_hash,
             ],
         ).fetchone()
 

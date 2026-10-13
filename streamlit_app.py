@@ -31,7 +31,7 @@ from src.ui.job_recommendation_service import (
     process_resume_upload,
 )
 from src.ui.job_links import select_job_open_target
-from src.ui.job_pipeline_state import derive_job_pipeline_state
+from src.ui.job_pipeline_state import derive_job_pipeline_state, with_scoring_queue_membership
 from src.ui.job_visibility import (
     REVIEW_BUCKET_LOW_FIT,
     REVIEW_BUCKET_NEEDS_REVIEW,
@@ -253,7 +253,9 @@ def render_job_listing(job: dict) -> None:
         "application_status",
         "new",
     )
-    pipeline_state = derive_job_pipeline_state(job)
+    cached_backlog = st.session_state.get("scoring_backlog_snapshot", {}).get("status")
+    eligible_keys = cached_backlog.candidate_posting_keys if cached_backlog else ()
+    pipeline_state = derive_job_pipeline_state(with_scoring_queue_membership(job, eligible_keys))
     from src.actionability import effective_status
     current_actionability = effective_status(job)
 
