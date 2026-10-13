@@ -281,8 +281,9 @@ def is_specific_job_posting_url(value: str | None) -> bool:
         path_parts = [part for part in path.split("/") if part]
         return len(path_parts) >= 2
 
-    if "ashbyhq.com" in hostname:
-        return bool(re.search(r"/(?:job|jobs)/[^/]+(?:/|$)", path))
+    if hostname == "ashbyhq.com" or hostname.endswith(".ashbyhq.com"):
+        return bool(re.search(r"/(?:job|jobs)/[^/]+(?:/|$)", path)
+                    or re.fullmatch(r"/[^/]+/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/?", path, re.I))
 
     if "smartrecruiters.com" in hostname:
         path_parts = [part for part in path.split("/") if part]
@@ -344,8 +345,11 @@ def verified_posting_key_from_url(value: str | None) -> str:
         if job_id and is_specific_job_posting_url(normalized_url):
             return f"lever:{job_id}"
 
-    if "ashbyhq.com" in hostname:
+    if hostname == "ashbyhq.com" or hostname.endswith(".ashbyhq.com"):
         job_id = _path_match(r"/(?:job|jobs)/([^/?#]+)$", normalized_url)
+        if not job_id:
+            match = re.fullmatch(r"/[^/]+/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?", parsed.path, re.I)
+            job_id = match.group(1).lower() if match else ""
         if job_id:
             return f"ashby:{job_id}"
 

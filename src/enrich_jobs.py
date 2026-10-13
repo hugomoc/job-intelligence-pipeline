@@ -40,6 +40,9 @@ from src.enrichment.official_job_resolver import (
     OFFICIAL_SEARCH_DEFERRED,
     OFFICIAL_INSUFFICIENT_IDENTITY,
     OfficialJobResolutionResult,
+    fetch_candidate_description,
+    ats_type_for_url,
+    OfficialJobCandidate,
     is_aggregator_job,
     resolve_official_job,
     should_attempt_official_resolution,
@@ -474,6 +477,12 @@ def needs_description_enrichment(
         return False
 
     previous_status = job.get("previous_status")
+
+    # Verified URL identity does not imply that description retrieval completed.
+    if (official_status_value(job) == OFFICIAL_FOUND_VERIFIED
+            and trusted_known_official_description_url(job)
+            and previous_status not in FAILED_STATUSES):
+        return True
 
     if previous_status:
         return (
@@ -1927,15 +1936,24 @@ def save_enrichment_attempt(
         )
 
 
+def description_update_is_improvement(
+    job: dict[str, Any], result: JobDescriptionResult, *, replace_incomplete: bool = False,
+) -> bool:
+    """Share the same replacement decision between persistence and dry runs."""
+    if result.word_count > int(job.get("current_word_count") or 0):
+        return True
+    return bool(replace_incomplete and description_state(job) != "FULL_JD"
+                and result.word_count >= 80
+                and description_has_quality_signals(result.description))
+
+
 def update_job_description(
     job: dict[str, Any],
     result: JobDescriptionResult,
+    *,
+    replace_incomplete: bool = False,
 ) -> bool:
-    current_word_count = int(
-        job.get("current_word_count") or 0
-    )
-
-    if result.word_count <= current_word_count:
+    if not description_update_is_improvement(job, result, replace_incomplete=replace_incomplete):
         return False
 
     with get_connection() as connection:
@@ -2095,6 +2113,92 @@ def verify_known_official_candidate(
     )
 
 
+def trusted_known_official_description_url(job: dict[str, Any]) -> bool:
+    """Require exact URL identity plus persisted verification provenance."""
+    url = str(job.get("official_job_url") or "").strip()
+    key = verified_posting_key_from_url(url)
+    return bool(official_status_value(job) == OFFICIAL_FOUND_VERIFIED
+               and is_known_official_or_ats_url(url)
+               and (stored_verified_key_is_trusted(job)
+                    or (job.get("official_url_source") == ats_type_for_url(url)
+                        and ats_type_for_url(url)
+                        and job.get("official_resolved_company")
+                        and job.get("official_resolved_title")
+                        and job.get("official_url_validation_reason") == "identity accepted"))
+               and key and key == authoritative_verified_key_for_job(job))
+
+
+def fetch_verified_official_description(
+    job: dict[str, Any], client, *, persist: bool = True,
+) -> EnrichmentProcessingResult:
+    """Retrieve a known posting without discovery; recheck identity before saving.
+
+    persist=False is a read-only diagnostic path using identical fetch/validation.
+    A redirect must retain the exact trusted posting key, independently of text.
+    """
+    url = str(job.get("official_job_url") or "").strip()
+    key = verified_posting_key_from_url(url)
+    trusted = trusted_known_official_description_url(job)
+    result = JobDescriptionResult(
+        requested_url=url, final_url=url, status="resolution_rejected",
+        http_status=None, extraction_method=None, description="", word_count=0,
+        error_message="known official URL lacks trusted exact posting provenance",
+    )
+    validation = None
+    updated = False
+    if trusted:
+        result = fetch_candidate_description(
+            OfficialJobCandidate(url=url, label="", source="verified_official_direct"),
+            client, require_full_jd=True,
+        )
+        if result.status == "enriched":
+            validation = validate_enrichment_identity(job, result)
+            exact = (is_known_official_or_ats_url(result.final_url or "")
+                     and verified_posting_key_from_url(result.final_url or "") == key)
+            if not exact:
+                from dataclasses import replace
+                validation = replace(validation, accepted=False, confidence=0.0,
+                                     reason="trusted exact posting key conflict")
+            if not validation.accepted:
+                status, error = "resolution_rejected", validation.reason
+            elif (result.word_count < 80
+                  or not description_has_quality_signals(result.description)):
+                status, error = "no_description", "verified page lacks FULL_JD quality"
+            else:
+                status, error = "enriched", None
+                if not description_update_is_improvement(job, result, replace_incomplete=True):
+                    status, error = "not_improved", "existing full description retained"
+                elif persist:
+                    updated = update_job_description(job, result, replace_incomplete=True)
+                    if updated:
+                        job["description_hash"] = description_hash(result.description)
+                        job["description_source"] = "verified_official_direct"
+                        job["reused_description"] = False
+                    else:
+                        status, error = "not_improved", "existing description retained"
+        else:
+            status, error = result.status, result.error_message
+    else:
+        status, error = result.status, result.error_message
+    # Preserve established URL provenance on transient retrieval failures.
+    resolution = OfficialJobResolutionResult(
+        status=(OFFICIAL_FOUND_VERIFIED if trusted and status != "resolution_rejected"
+                else OFFICIAL_INSUFFICIENT_IDENTITY),
+        official_job_url=url,
+        official_url_source=job.get("official_url_source"),
+        official_url_resolved_at=job.get("official_url_resolved_at"),
+        official_url_confidence=job.get("official_url_confidence"),
+        official_url_validation_reason=job.get("official_url_validation_reason"),
+        resolved_title=result.resolved_title or job.get("official_resolved_title"),
+        resolved_company=result.resolved_company or job.get("official_resolved_company"),
+        resolved_location=result.resolved_location or job.get("official_resolved_location"),
+        description_result=result, identity_validation=validation,
+    )
+    return EnrichmentProcessingResult(result=result, stored_status=status,
+        stored_error=error, identity_validation=validation,
+        official_resolution=resolution, updated=updated)
+
+
 def process_enrichment_job(
     job: dict[str, Any],
     client,
@@ -2107,6 +2211,12 @@ def process_enrichment_job(
             True,
         )
     )
+    if (official_status_value(job) == OFFICIAL_FOUND_VERIFIED
+            and description_state(job) == "FULL_JD"):
+        needs_description = False
+    if (needs_description and official_status_value(job) == OFFICIAL_FOUND_VERIFIED
+            and description_state(job) != "FULL_JD"):
+        return fetch_verified_official_description(job, client)
     if needs_description:
         source_result = fetch_job_description(
             url=job["apply_url"],

@@ -490,10 +490,19 @@ def fetch_dynamic_job_description(
 def fetch_candidate_description(
     candidate: OfficialJobCandidate,
     client: httpx.Client,
+    *,
+    require_full_jd: bool = False,
 ) -> JobDescriptionResult:
     result = fetch_job_description(candidate.url, client)
 
-    if result.status != "no_description":
+    incomplete = False
+    if require_full_jd and result.status == "enriched":
+        from src.repositories.recommendation_repository import (
+            MINIMUM_FULL_DESCRIPTION_WORDS, description_has_quality_signals,
+        )
+        incomplete = (result.word_count < MINIMUM_FULL_DESCRIPTION_WORDS
+                      or not description_has_quality_signals(result.description))
+    if result.status != "no_description" and not incomplete:
         return result
 
     dynamic_result = fetch_dynamic_job_description(
