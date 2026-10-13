@@ -23,6 +23,10 @@ from src.ai.job_eligibility import (
 )
 from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
 from src.database import get_connection, initialize_database
+from src.description_quality import (
+    MINIMUM_FULL_DESCRIPTION_WORDS,
+    assess_description_quality,
+)
 from src.job_admission import evaluate_job_admission
 from src.job_title_filter import (
     EXCLUDED_TITLE_SQL_REGEX,
@@ -117,15 +121,6 @@ HIGH_PRIORITY_RECENT_DAYS = 7
 MEDIUM_PRIORITY_RECENT_DAYS = 30
 ENRICHMENT_WAITING_PRIORITY_CAP = 30
 ENRICHMENT_WAITING_PRIORITY_STEP_DAYS = 3
-MINIMUM_FULL_DESCRIPTION_WORDS = 80
-DESCRIPTION_QUALITY_PATTERN = re.compile(
-    r"\b("
-    r"responsibilit(?:y|ies)|requirements?|qualifications?|"
-    r"what\s+you(?:'|’)ll\s+do|you\s+will|duties|"
-    r"skills?|experience|must\s+have|preferred"
-    r")\b",
-    re.IGNORECASE,
-)
 
 AI_PRIORITY_BY_RECOMMENDATION = {
     "apply": "High",
@@ -457,6 +452,13 @@ def register_exact_posting_identity_function(connection) -> None:
     """Expose exact_posting_identity to DuckDB queries on this connection."""
     from src.job_domains import posting_key_can_be_trusted, is_third_party_url
     try:
+        connection.create_function(
+            "description_is_full_jd", description_has_quality_signals,
+            [str], bool, null_handling="special",
+        )
+    except Exception:
+        pass
+    try:
         connection.create_function("posting_url_is_third_party", is_third_party_url,
             [str], bool, null_handling="special")
     except Exception:
@@ -603,11 +605,8 @@ def enrichment_waiting_days(
 
 
 def description_has_quality_signals(description: Any) -> bool:
-    """Detect whether text looks like a real JD, not only long page chrome."""
-    return bool(
-        description
-        and DESCRIPTION_QUALITY_PATTERN.search(str(description))
-    )
+    """Evaluate extracted text without URL, identity or search metadata."""
+    return assess_description_quality(description).full_jd
 
 
 def current_description_word_count(job: dict[str, Any]) -> int:
@@ -1690,10 +1689,7 @@ def load_all_jobs(
                     ELSE 0
                 END AS raw_description_word_count,
                 CASE
-                    WHEN regexp_matches(
-                        lower(coalesce(jobs.description, '')),
-                        '\\b(responsibilit(y|ies)|requirements?|qualifications?|what\\s+you(''|’)ll\\s+do|you\\s+will|duties|skills?|experience|must\\s+have|preferred)\\b'
-                    )
+                    WHEN description_is_full_jd(jobs.description)
                     THEN true
                     ELSE false
                 END AS description_quality_signals,
@@ -2436,10 +2432,7 @@ def load_candidate_jobs(
                         ELSE 0
                     END AS raw_description_word_count,
                     CASE
-                        WHEN regexp_matches(
-                            lower(coalesce(jobs.description, '')),
-                            '\\b(responsibilit(y|ies)|requirements?|qualifications?|what\\s+you(''|’)ll\\s+do|you\\s+will|duties|skills?|experience|must\\s+have|preferred)\\b'
-                        )
+                        WHEN description_is_full_jd(jobs.description)
                         THEN true
                         ELSE false
                     END AS description_quality_signals,
@@ -2502,10 +2495,7 @@ def load_candidate_jobs(
                           '\\s+'
                       )
                   ) >= 80
-                  AND regexp_matches(
-                      lower(coalesce(jobs.description, '')),
-                      '\\b(responsibilit(y|ies)|requirements?|qualifications?|what\\s+you(''|’)ll\\s+do|you\\s+will|duties|skills?|experience|must\\s+have|preferred)\\b'
-                  )
+                  AND description_is_full_jd(jobs.description)
                   AND coalesce(
                       jobs.title_classification,
                       CASE
@@ -2788,10 +2778,7 @@ def count_unscored_candidate_jobs(
                           '\\s+'
                       )
                   ) >= 80
-                  AND regexp_matches(
-                      lower(coalesce(jobs.description, '')),
-                      '\\b(responsibilit(y|ies)|requirements?|qualifications?|what\\s+you(''|’)ll\\s+do|you\\s+will|duties|skills?|experience|must\\s+have|preferred)\\b'
-                  )
+                  AND description_is_full_jd(jobs.description)
                   AND coalesce(
                       jobs.title_classification,
                       CASE
