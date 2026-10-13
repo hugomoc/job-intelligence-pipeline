@@ -725,8 +725,15 @@ def test_prompt_version_controls_cache_reuse() -> None:
 
         try:
             initialize_ai_tables()
+            from src.enrich_jobs import initialize_enrichment_tables
+            initialize_enrichment_tables()
 
             with database.get_connection() as connection:
+                connection.execute(
+                    "INSERT INTO raw_jobs (record_key, job_fingerprint, source, title, company_name, apply_url, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ['job-1', 'job-1', 'linkedin', 'Data Engineer', 'Example', 'https://linkedin.com/jobs/view/job-1',
+                     'Responsibilities include SQL pipelines and analytics. Qualifications include Python experience. ' * 20],
+                )
                 connection.execute(
                     """
                     INSERT INTO resume_job_scores (

@@ -32,6 +32,7 @@ def test_full_jd_without_ai_score_waits_for_ai_scoring() -> None:
         {
             "description_state": "FULL_JD",
             "raw_description_word_count": 350,
+            "scoring_eligible": True,
             "ai_score": None,
         }
     )

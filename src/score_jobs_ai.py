@@ -257,6 +257,11 @@ def load_cached_job_score(
     prompt_version: str = MATCHER_PROMPT_VERSION,
 ) -> dict[str, Any] | None:
     with get_connection() as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info('raw_jobs')").fetchall()}
+        if "description_updated_at" not in columns:
+            return None  # Legacy schema cannot establish description freshness.
+        from src.repositories.recommendation_repository import register_exact_posting_identity_function
+        register_exact_posting_identity_function(connection)
         cursor = connection.execute(
             """
             SELECT
@@ -270,11 +275,19 @@ def load_cached_job_score(
                 summary,
                 description_word_count,
                 description_complete
-            FROM resume_job_scores
-            WHERE resume_hash = ?
-              AND record_key = ?
-              AND model_name = ?
-              AND coalesce(prompt_version, 'v1') = ?
+            FROM resume_job_scores AS scores
+            INNER JOIN raw_jobs AS jobs ON scores.record_key = jobs.record_key
+            WHERE scores.resume_hash = ?
+              AND scores.record_key = ?
+              AND scores.model_name = ?
+              AND coalesce(scores.prompt_version, 'v1') = ?
+              AND scores.description_complete = true
+              AND scores.description_word_count >= 80
+              AND description_is_full_jd(jobs.description)
+              AND scores.scored_at >= coalesce(
+                  jobs.description_updated_at,
+                  TIMESTAMPTZ '1970-01-01 00:00:00+00'
+              )
             """,
             [
                 resume_hash,

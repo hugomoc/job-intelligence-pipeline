@@ -441,6 +441,13 @@ def evaluate_job_admission(
             ),
         )
 
+    explanation = "The title family alone is not enough evidence to show this job."
+    if description_text:
+        from src.description_quality import assess_description_quality
+        from src.ai.requirement_policy import central_specialization_gaps
+        if assess_description_quality(description).full_jd:
+            central = central_specialization_gaps(description, title, resume_profile)
+            explanation = ("The complete JD centers on unsupported specialization: " + "; ".join(row["gap"] for row in central)) if central else "The complete JD does not demonstrate enough resume-supported core skills and responsibilities for admission."
     return JobAdmissionEvaluation(
         role_family_match=family_match,
         specialization_match=specialization_match,
@@ -453,6 +460,6 @@ def evaluate_job_admission(
         matched_resume_signals=sorted(set(title_core_matches + job_core_matches + project_only_matches + responsibility_matches)),
         admission_decision="exclude",
         admission_reason=(
-            "The title family alone is not enough evidence to show this job."
+            explanation
         ),
     )
