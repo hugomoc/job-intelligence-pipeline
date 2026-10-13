@@ -2501,7 +2501,94 @@ def test_display_resume_hash_falls_back_to_latest_cached_profile() -> None:
             database.DATABASE_PATH = old_database_path
 
 
+def test_legacy_exclusions_hold_scoring_until_current_normalization() -> None:
+    """A policy bump must not silently admit excluded jobs into scoring."""
+    from src.score_jobs_ai import initialize_ai_tables
+    from src.enrich_jobs import initialize_enrichment_tables
+    from src.ui.daily_workflow_service import load_scoring_backlog_status
+    from src.ui.job_pipeline_state import (
+        derive_job_pipeline_state,
+        with_scoring_queue_membership,
+    )
+
+    def scenario() -> None:
+        initialize_ai_tables()
+        initialize_enrichment_tables()
+        seed_resume_profile()
+        description = (
+            "Responsibilities include Python SQL Snowflake AWS dbt data "
+            "pipelines and analytics engineering. Qualifications include "
+            "data modeling experience and collaboration. "
+        ) * 20
+        keys = (
+            "legacy-excluded", "current-approved", "current-excluded",
+            "other-resume", "legacy-eligible", "unscreened",
+        )
+        for key in keys:
+            seed_job(key, description, title="Data Engineer", source="linkedin")
+
+        def screen(key: str, version: str, result: str,
+                   resume_hash: str = "resume-1") -> None:
+            save_job_eligibility_decision(JobEligibilityDecision(
+                canonical_job_key=exact_posting_identity(
+                    "linkedin", None, f"https://example.com/{key}", key,
+                ),
+                record_key=key, resume_hash=resume_hash,
+                model_name="model-1", prompt_version=version,
+                analysis=JobEligibilityAnalysis(
+                    decision=result, confidence="high", reason="fixture",
+                ),
+            ))
+
+        screen("legacy-excluded", "v1", "exclude")
+        screen("current-approved", "v1", "exclude")
+        screen("current-approved", ELIGIBILITY_PROMPT_VERSION, "eligible")
+        screen("current-excluded", "v1", "eligible")
+        screen("current-excluded", ELIGIBILITY_PROMPT_VERSION, "exclude")
+        screen("other-resume", "v1", "exclude", "different-resume")
+        screen("legacy-eligible", "v1", "eligible")
+
+        expected = {
+            "current-approved", "other-resume", "legacy-eligible", "unscreened",
+        }
+        candidates = load_candidate_jobs(
+            "resume-1", "model-1", 100, 0, reuse_any_model=True,
+        )
+        assert {job["record_key"] for job in candidates} == expected
+        assert count_unscored_candidate_jobs(
+            "resume-1", "model-1", 0, reuse_any_model=True,
+        ) == len(expected)
+        backlog = load_scoring_backlog_status("resume-1", 0)
+        assert backlog.unscored_candidates == len(expected)
+        held = {
+            "exact_posting_key": exact_posting_identity(
+                "linkedin", None, "https://example.com/legacy-excluded",
+                "legacy-excluded",
+            ),
+            "application_status": "new", "description_state": "FULL_JD",
+        }
+        assert derive_job_pipeline_state(with_scoring_queue_membership(
+            held, set(backlog.candidate_posting_keys),
+        )).label == "Not eligible for AI scoring"
+
+        pending = load_unscreened_job_eligibility_candidates("resume-1", 100)
+        assert "legacy-excluded" in {job["record_key"] for job in pending}
+        assert "legacy-eligible" in {job["record_key"] for job in pending}
+        # Historical eligible is still unscreened under the current policy.
+        # A current approved decision explicitly releases the scoring hold.
+        screen("legacy-excluded", ELIGIBILITY_PROMPT_VERSION, "eligible")
+        candidates = load_candidate_jobs(
+            "resume-1", "model-1", 100, 0, reuse_any_model=True,
+        )
+        assert {job["record_key"] for job in candidates} == expected | {
+            "legacy-excluded",
+        }
+
+    with_temp_review_database(scenario)
+
+
 def main() -> None:
+    test_legacy_exclusions_hold_scoring_until_current_normalization()
     test_candidate_jobs_require_complete_descriptions()
     test_admission_gate_keeps_target_titles_needing_enrichment()
     test_admission_gate_preserves_manual_statuses_for_filtered_titles()

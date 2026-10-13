@@ -2515,6 +2515,21 @@ def load_candidate_jobs(
                       eligibility.decision,
                       'needs_description'
                   ) IN ('eligible', 'needs_description')
+                  -- Current normalization overrides the historical screen.
+                  -- An old exclusion otherwise remains a scoring hold until
+                  -- re-screened; old eligible decisions provide no approval.
+                  AND (
+                      eligibility.canonical_job_key IS NOT NULL
+                      OR NOT EXISTS (
+                          SELECT 1
+                          FROM resume_job_eligibility AS legacy_eligibility
+                          WHERE legacy_eligibility.canonical_job_key =
+                                jobs.canonical_job_key
+                            AND legacy_eligibility.resume_hash = ?
+                            AND legacy_eligibility.prompt_version = 'v1'
+                            AND legacy_eligibility.decision = 'exclude'
+                      )
+                  )
             )
 
             SELECT
@@ -2560,6 +2575,7 @@ def load_candidate_jobs(
                 ELIGIBILITY_PROMPT_VERSION,
                 minimum_rule_score,
                 EXCLUDED_TITLE_SQL_REGEX,
+                resume_hash,
             ],
         )
 
@@ -2798,6 +2814,21 @@ def count_unscored_candidate_jobs(
                       eligibility.decision,
                       'needs_description'
                   ) IN ('eligible', 'needs_description')
+                  -- Current normalization overrides the historical screen.
+                  -- An old exclusion otherwise remains a scoring hold until
+                  -- re-screened; old eligible decisions provide no approval.
+                  AND (
+                      eligibility.canonical_job_key IS NOT NULL
+                      OR NOT EXISTS (
+                          SELECT 1
+                          FROM resume_job_eligibility AS legacy_eligibility
+                          WHERE legacy_eligibility.canonical_job_key =
+                                jobs.canonical_job_key
+                            AND legacy_eligibility.resume_hash = ?
+                            AND legacy_eligibility.prompt_version = 'v1'
+                            AND legacy_eligibility.decision = 'exclude'
+                      )
+                  )
             )
 
             SELECT COUNT(*)
@@ -2815,6 +2846,7 @@ def count_unscored_candidate_jobs(
                 ELIGIBILITY_PROMPT_VERSION,
                 minimum_rule_score,
                 EXCLUDED_TITLE_SQL_REGEX,
+                resume_hash,
             ],
         ).fetchone()
 
