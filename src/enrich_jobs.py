@@ -11,6 +11,8 @@ from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
 from src.job_title_filter import classify_job_title
 
 import argparse
+import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -134,6 +136,7 @@ class EnrichmentBatchSummary:
     stopped_for_time_budget: bool
     elapsed_seconds: float
     log_lines: tuple[str, ...]
+    persistence_error: int = 0
 
 
 @dataclass(frozen=True)
@@ -1432,6 +1435,7 @@ def default_enrichment_totals() -> dict[str, int]:
         "blocked": 0,
         "no_description": 0,
         "fetch_error": 0,
+        "persistence_error": 0,
         "invalid_url": 0,
         "not_improved": 0,
         "resolution_rejected": 0,
@@ -1492,6 +1496,27 @@ def failed_processing_result(
     )
 
 
+def safe_enrichment_log_message(value: Any) -> str:
+    """Keep run diagnostics useful without URLs, credentials or log injection."""
+    message = " ".join(str(value).split())
+    for name, secret in os.environ.items():
+        if (len(secret) >= 6 and re.search(
+                r"(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|ACCESS_KEY)", name, re.I)):
+            message = message.replace(secret, "[redacted]")
+    message = re.sub(r"(?i)\b(?:https?|ftp)://[^\s<>]+", "[URL omitted]", message)
+    message = re.sub(
+        r"(?i)\b(?:bearer|basic)\s+[^\s,;\"']+", "[authorization redacted]", message,
+    )
+    message = re.sub(
+        r"(?i)(\b(?:authorization|proxy-authorization|api[-_ ]?key|access[-_ ]?token|"
+        r"refresh[-_ ]?token|token|password|passwd|secret|credentials?)\b[\"']?\s*[:=]\s*)"
+        r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+        r"\1[redacted]", message,
+    )
+    message = re.sub(r"\b(?:sk-[A-Za-z0-9_-]{10,}|AKIA[A-Z0-9]{16})\b", "[redacted]", message)
+    return message[:1000]
+
+
 def process_enrichment_batch(
     jobs: list[dict[str, Any]],
     client,
@@ -1510,6 +1535,7 @@ def process_enrichment_batch(
     log_lines: list[str] = []
 
     def log(message: str) -> None:
+        message = safe_enrichment_log_message(message)
         log_lines.append(message)
 
         if emit:
@@ -1542,6 +1568,11 @@ def process_enrichment_batch(
                 **options,
             )
         except Exception as error:
+            log(
+                f"Processing failed for {job.get('title') or 'Untitled job'} | "
+                f"{job.get('company_name') or 'Unknown company'} "
+                f"[record_key={job.get('record_key')}]: {type(error).__name__}: {error}"
+            )
             processed = failed_processing_result(
                 job=job,
                 error=error,
@@ -1564,25 +1595,35 @@ def process_enrichment_batch(
         if processed.updated:
             updated_count += 1
 
-        save_enrichment_attempt(
-            job=job,
-            result=result,
-            status=stored_status,
-            error_message=stored_error,
-            identity_validation=identity_validation,
-            official_resolution=processed.official_resolution,
-        )
-
-        totals[stored_status] = (
-            totals.get(stored_status, 0) + 1
-        )
+        try:
+            save_enrichment_attempt(
+                job=job,
+                result=result,
+                status=stored_status,
+                error_message=stored_error,
+                identity_validation=identity_validation,
+                official_resolution=processed.official_resolution,
+            )
+        except Exception as error:
+            # The identity guard and atomic save retain the prior attempt.
+            # Do not retry the rejected result under a fetch-error disguise.
+            totals["persistence_error"] += 1
+            if stored_status == "fetch_error":
+                totals["fetch_error"] += 1
+            outcome = "rejected" if isinstance(error, ValueError) else "failed"
+            log(
+                f"Persistence {outcome} for {job.get('title') or 'Untitled job'} | "
+                f"{job.get('company_name') or 'Unknown company'} "
+                f"[record_key={job.get('record_key')}]: {type(error).__name__}: {error}"
+            )
+        else:
+            totals[stored_status] = totals.get(stored_status, 0) + 1
+            log(
+                f"Status: {stored_status}; "
+                f"words: {result.word_count}; "
+                f"updated: {'yes' if processed.updated else 'no'}"
+            )
         processed_count += 1
-
-        log(
-            f"Status: {stored_status}; "
-            f"words: {result.word_count}; "
-            f"updated: {'yes' if processed.updated else 'no'}"
-        )
 
         if rate_limit_guard is not None and rate_limit_guard.stopped:
             log("Stopping enrichment after excessive rate limiting; completed attempts are saved.")
@@ -1602,6 +1643,7 @@ def process_enrichment_batch(
         stopped_for_time_budget=stopped_for_time_budget,
         elapsed_seconds=time.monotonic() - started_at,
         log_lines=tuple(log_lines),
+        persistence_error=totals["persistence_error"],
     )
 
 

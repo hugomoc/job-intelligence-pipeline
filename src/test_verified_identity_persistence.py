@@ -241,5 +241,130 @@ class VerifiedIdentityPersistenceTests(unittest.TestCase):
         self.assertEqual(self.saved(), before)
 
 
+    def batch_result(self, job, *, resolution=None):
+        return enrichment.EnrichmentProcessingResult(
+            result=fetched(), stored_status="enriched", stored_error=None,
+            identity_validation=None,
+            official_resolution=resolution or verified_resolution(), updated=False,
+        )
+
+    def test_batch_guard_rejection_retains_attempt_and_saves_following_job(self):
+        enrichment.save_enrichment_attempt(posting(), fetched(), official_resolution=verified_resolution())
+        before = self.saved()
+        following = dict(posting(), record_key="following")
+        # Actual failing URL shape from the Maximus daily run: keep guard intact.
+        rejected = replace(verified_resolution(),
+                           official_job_url="https://maximus.avature.net/careers/FolderDetail?folderId=43413",
+                           official_url_source="search")
+        save = enrichment.save_enrichment_attempt
+        with patch.object(enrichment, "process_enrichment_job", side_effect=[
+                self.batch_result(posting(), resolution=rejected), self.batch_result(following),
+        ]) as process, patch.object(enrichment, "save_enrichment_attempt", wraps=save) as persist:
+            summary = enrichment.process_enrichment_batch([posting(), following], client=object())
+        self.assertEqual((process.call_count, persist.call_count), (2, 2))
+        self.assertEqual([call.kwargs["job"]["record_key"] for call in persist.call_args_list],
+                         ["optro", "following"])
+        self.assertTrue(all(call.kwargs["status"] == "enriched" for call in persist.call_args_list))
+        self.assertEqual(summary.jobs_processed, 2)
+        self.assertEqual(summary.persistence_error, 1)
+        self.assertEqual(summary.totals["persistence_error"], 1)
+        self.assertEqual(summary.totals["fetch_error"], 0)
+        self.assertEqual(summary.totals["enriched"], 1)
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT * FROM job_enrichment_attempts WHERE record_key='optro'").fetchall(), before)
+            self.assertEqual(connection.execute(
+                "SELECT status,verified_posting_key_trust FROM job_enrichment_attempts "
+                "WHERE record_key='following'").fetchone(), ("enriched", "trusted"))
+        log = "\n".join(summary.log_lines)
+        for value in ("optro", "Senior Analytics Engineer", "Optro", "ValueError",
+                      "Verified official identity requires a specific official posting URL"):
+            self.assertIn(value, log)
+
+    def test_batch_processing_failure_continues_with_separate_fetch_count(self):
+        first = dict(posting(), record_key="processing-failure")
+        following = dict(posting(), record_key="following")
+        with patch.object(enrichment, "process_enrichment_job", side_effect=[
+                RuntimeError("synthetic processor failure"), self.batch_result(following),
+        ]):
+            summary = enrichment.process_enrichment_batch([first, following], client=object())
+        self.assertEqual(summary.jobs_processed, 2)
+        self.assertEqual(summary.totals["fetch_error"], 1)
+        self.assertEqual(summary.persistence_error, 0)
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT record_key,status FROM job_enrichment_attempts ORDER BY record_key").fetchall(),
+                [("following", "enriched"), ("processing-failure", "fetch_error")])
+        self.assertTrue(any("RuntimeError: synthetic processor failure" in line
+                            and "processing-failure" in line for line in summary.log_lines))
+
+    def test_batch_database_constraint_failure_retains_prior_attempt(self):
+        enrichment.save_enrichment_attempt(posting(), fetched(), official_resolution=verified_resolution())
+        before = self.saved()
+        invalid = dict(posting(), source=None)
+        following = dict(posting(), record_key="following")
+        with patch.object(enrichment, "process_enrichment_job", side_effect=[
+                self.batch_result(invalid), self.batch_result(following),
+        ]):
+            summary = enrichment.process_enrichment_batch([invalid, following], client=object())
+        self.assertEqual((summary.jobs_processed, summary.persistence_error), (2, 1))
+        self.assertEqual(summary.totals["fetch_error"], 0)
+        self.assertTrue(any("ConstraintException" in line for line in summary.log_lines))
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT * FROM job_enrichment_attempts WHERE record_key='optro'").fetchall(), before)
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM job_enrichment_attempts WHERE record_key='following'").fetchone(), (1,))
+
+    def test_fetch_and_persistence_failures_are_both_reported_when_both_occur(self):
+        following = dict(posting(), record_key="following")
+        actual_save = enrichment.save_enrichment_attempt
+        def save(**kwargs):
+            if kwargs["job"]["record_key"] == "optro":
+                raise OSError("database unavailable")
+            return actual_save(**kwargs)
+        with patch.object(enrichment, "process_enrichment_job", side_effect=[
+                RuntimeError("fetch failed"), self.batch_result(following),
+        ]), patch.object(enrichment, "save_enrichment_attempt", side_effect=save):
+            summary = enrichment.process_enrichment_batch([posting(), following], client=object())
+        self.assertEqual(summary.jobs_processed, 2)
+        self.assertEqual(summary.totals["fetch_error"], 1)
+        self.assertEqual(summary.persistence_error, 1)
+        self.assertEqual(summary.totals["enriched"], 1)
+
+    def test_batch_diagnostics_redact_secrets_urls_and_log_injection(self):
+        emitted = []
+        sensitive = ("raw-environment-secret", "header-secret", "password-secret", "query-secret")
+        failure = ValueError(
+            "Unsafe identity Authorization: Bearer header-secret password=password-secret "
+            "raw-environment-secret https://user:pass@example.com/track?token=query-secret\nforged log")
+        unsafe_resolution = replace(verified_resolution(),
+            official_job_url="https://example.com/track?token=query-secret")
+        with patch.dict("os.environ", {"SERVICE_API_KEY": "raw-environment-secret"}), patch.object(
+                enrichment, "process_enrichment_job",
+                return_value=self.batch_result(posting(), resolution=unsafe_resolution)), patch.object(
+                enrichment, "save_enrichment_attempt", side_effect=failure):
+            summary = enrichment.process_enrichment_batch([posting()], client=object(), emit=emitted.append)
+        self.assertEqual(list(summary.log_lines), emitted)
+        log = "\n".join(emitted)
+        for secret in sensitive:
+            self.assertNotIn(secret, log)
+        self.assertNotIn("https://", log)
+        self.assertIn("ValueError: Unsafe identity", log)
+        self.assertIn("record_key=optro", log)
+        self.assertTrue(all("\n" not in line for line in emitted))
+
+    def test_rejected_save_still_obeys_rate_limit_stop(self):
+        class Stopped:
+            stopped = True
+        jobs = [posting(), dict(posting(), record_key="following")]
+        with patch.object(enrichment, "process_enrichment_job",
+                          return_value=self.batch_result(posting())) as process, patch.object(
+                enrichment, "save_enrichment_attempt", side_effect=ValueError("rejected")) as save:
+            summary = enrichment.process_enrichment_batch(jobs, client=object(), rate_limit_guard=Stopped())
+        self.assertEqual((summary.jobs_processed, summary.persistence_error), (1, 1))
+        self.assertEqual((process.call_count, save.call_count), (1, 1))
+
+
 if __name__ == "__main__":
     unittest.main()
