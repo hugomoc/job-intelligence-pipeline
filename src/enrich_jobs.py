@@ -1730,6 +1730,82 @@ def verified_key_metadata_for_save(
     return None, None, None, None, None
 
 
+def _validate_official_identity_for_save(
+    job: dict[str, Any],
+    result: JobDescriptionResult,
+    identity_validation: JobIdentityValidation | None,
+    resolution: OfficialJobResolutionResult | None,
+) -> JobIdentityValidation | None:
+    """Check verified identity before opening a connection or replacing a row."""
+    if resolution is None or resolution.status != OFFICIAL_FOUND_VERIFIED:
+        return identity_validation
+
+    from src.enrichment.verified_identity_recovery import supported_specific_posting_key
+
+    url = resolution.official_job_url
+    allow_employer = resolution.official_url_source == "employer" or (
+        official_status_value(job) == OFFICIAL_FOUND_VERIFIED
+        and stored_verified_key_is_trusted(job)
+    )
+    try:
+        key = supported_specific_posting_key(url, allow_employer=allow_employer)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Verified official posting URL is malformed") from error
+    if not key:
+        raise ValueError("Verified official identity requires a specific official posting URL")
+
+    validations = (identity_validation, resolution.identity_validation)
+    if any(validation is not None and not validation.accepted for validation in validations):
+        raise ValueError("Rejected identity cannot persist FOUND_VERIFIED")
+
+    stored_key = str(job.get("verified_posting_key") or "").strip()
+    if ((stored_key and stored_key != key)
+            or str(job.get("verified_posting_key_trust") or "").strip().casefold() == "conflict"):
+        raise ValueError("Verified posting identity conflicts with existing metadata")
+
+    stored_url = str(job.get("official_job_url") or "").strip()
+    if stored_url and official_status_value(job) == OFFICIAL_FOUND_VERIFIED:
+        try:
+            stored_url_key = verified_posting_key_from_url(stored_url)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Stored official posting URL is malformed") from error
+        if stored_url_key != key:
+            raise ValueError("Verified posting identity conflicts with existing official URL")
+
+    if result.status == "enriched" and result.final_url:
+        result_key = verified_posting_key_from_url(result.final_url)
+        if result_key and result_key != key:
+            raise ValueError("Verified posting identity conflicts with fetched posting URL")
+
+    # A retrieval failure cannot revoke an independently established matching
+    # identity. It also cannot establish one for an unverified legacy row.
+    if (result.status != "enriched" and stored_key == key
+            and stored_url and official_status_value(job) == OFFICIAL_FOUND_VERIFIED
+            and stored_verified_key_is_trusted(job)):
+        return None
+
+    # Recompute only from resolved posting metadata, never discovery hints or
+    # the original employer/title substituted for missing resolved fields.
+    validation = validate_job_identity(
+        original_title=job.get("title"),
+        original_company=job.get("company_name"),
+        original_location=job.get("location"),
+        resolved_title=resolution.resolved_title,
+        resolved_company=resolution.resolved_company,
+        resolved_location=resolution.resolved_location,
+        resolved_location_source=(
+            result.resolved_location_source
+            if result.resolved_location == resolution.resolved_location else None
+        ),
+        trusted_original_posting_key=trusted_original_identity_key(job),
+        resolved_posting_key=key,
+    )
+    if not validation.accepted:
+        raise ValueError("Verified official identity lacks acceptable independent evidence: "
+                         + validation.reason)
+    return validation
+
+
 def save_enrichment_attempt(
     job: dict[str, Any],
     result: JobDescriptionResult,
@@ -1738,6 +1814,9 @@ def save_enrichment_attempt(
     identity_validation: JobIdentityValidation | None = None,
     official_resolution: OfficialJobResolutionResult | None = None,
 ) -> None:
+    identity_validation = _validate_official_identity_for_save(
+        job, result, identity_validation, official_resolution,
+    )
     previous_attempt_count = int(
         job.get("attempt_count") or 0
     )
@@ -1763,6 +1842,20 @@ def save_enrichment_attempt(
         identity_validation=identity_validation,
         official_resolution=official_resolution,
     )
+    if (official_resolution and official_resolution.status == OFFICIAL_FOUND_VERIFIED
+            and identity_validation is None):
+        # The guard permits absent validation only when preserving an existing
+        # exact trusted identity through a transient retrieval failure.
+        verified_posting_key = str(job.get("verified_posting_key") or "").strip()
+        verified_posting_key_source = job.get("verified_posting_key_source")
+        verified_posting_key_verified_at = as_utc_datetime(job.get("verified_posting_key_verified_at"))
+        verified_posting_key_confidence = job.get("verified_posting_key_confidence")
+        verified_posting_key_trust = job.get("verified_posting_key_trust")
+    if official_resolution and official_resolution.status == OFFICIAL_FOUND_VERIFIED:
+        if (verified_posting_key != verified_posting_key_from_url(official_resolution.official_job_url)
+                or not verified_key_metadata_is_trusted(
+                    verified_posting_key_source, verified_posting_key_trust)):
+            raise ValueError("FOUND_VERIFIED requires matching trusted posting identity metadata")
     stored_description_hash = (
         job.get("description_hash")
         or description_hash(result.description)
@@ -1783,15 +1876,7 @@ def save_enrichment_attempt(
     with get_connection() as connection:
         connection.execute(
             """
-            DELETE FROM job_enrichment_attempts
-            WHERE record_key = ?
-            """,
-            [job["record_key"]],
-        )
-
-        connection.execute(
-            """
-            INSERT INTO job_enrichment_attempts (
+            INSERT OR REPLACE INTO job_enrichment_attempts (
                 record_key,
                 source,
                 requested_url,

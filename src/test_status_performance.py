@@ -13,7 +13,7 @@ from src.test_recommendation_repository import (
 from src import database
 
 DESC = 'Responsibilities include Python SQL Snowflake AWS data pipelines and analytics engineering requirements. '*20
-STATUS_FIELDS = ('application_status','application_status_scope','application_status_source','application_status_record_key')
+STATUS_FIELDS = ('application_status','application_status_scope','application_status_source','application_status_record_key','application_status_updated_at')
 def sample(key='a', **extra):
     row=dict(record_key=key,exact_posting_key=key,canonical_job_key=key,duplicate_fingerprint=key,
         source='linkedin',title='Senior Data Engineer',company_name='Example Co',
@@ -214,6 +214,13 @@ class RepositoryTests(unittest.TestCase):
             seed_verified_attempt(key,'greenhouse:999' if key=='other' else 'greenhouse:123',source=source,
                 description=DESC,official_job_url='https://boards.greenhouse.io/example/jobs/999' if key=='other' else 'https://boards.greenhouse.io/example/jobs/123',trusted_verified_key=key!='untrusted')
     def assert_fresh(self,state):
+        # A session retains every exact posting, even when display cards collapse.
+        cached_physical={j['record_key']:j for j in state['jobs_snapshot']}
+        fresh_physical={j['record_key']:j for j in repo.load_all_jobs('resume-1',for_session_snapshot=True)}
+        self.assertEqual(set(cached_physical),set(fresh_physical))
+        for key in fresh_physical:
+            self.assertEqual({f:cached_physical[key].get(f) for f in STATUS_FIELDS},
+                {f:fresh_physical[key].get(f) for f in STATUS_FIELDS},key)
         cached={j['record_key']:j for j in session.display_snapshot(state)}
         fresh={j['record_key']:j for j in repo.load_all_jobs('resume-1')}
         self.assertEqual(set(cached),set(fresh))
@@ -229,7 +236,11 @@ class RepositoryTests(unittest.TestCase):
                 self.assert_fresh(state)
                 with database.get_connection() as c:
                     self.assertEqual(c.execute("select count(*) from application_status where status=?",[status]).fetchone()[0],2)
-                cached={j['record_key']:j for j in session.display_snapshot(state)}
+                cached={j['record_key']:j for j in state['jobs_snapshot']}
+                display=session.display_snapshot(state)
+                trusted=[j for j in display if j.get('verified_posting_key')=='greenhouse:123' and j.get('verified_posting_key_trust')=='trusted']
+                self.assertEqual(len(trusted),1)
+                self.assertEqual(trusted[0]['application_status'],status)
                 self.assertEqual(cached['shared']['application_status'],status)
                 self.assertEqual(cached['other']['application_status'],'new')
                 self.assertEqual(cached['untrusted']['application_status'],'new')
@@ -239,8 +250,11 @@ class RepositoryTests(unittest.TestCase):
             self.seed();repo.update_application_status('shared','applied')
             state=initialize_session(repo.load_all_jobs('resume-1',for_session_snapshot=True))
             session.patch_status(state,'a','removed',repo.update_application_status);self.assert_fresh(state)
-            shared=next(j for j in session.display_snapshot(state) if j['record_key']=='shared')
+            shared=next(j for j in state['jobs_snapshot'] if j['record_key']=='shared')
             self.assertEqual(shared['application_status'],'applied');self.assertEqual(shared['application_status_scope'],'exact')
+            trusted=[j for j in session.display_snapshot(state) if j.get('verified_posting_key')=='greenhouse:123' and j.get('verified_posting_key_trust')=='trusted']
+            self.assertEqual(len(trusted),1)
+            self.assertEqual(trusted[0]['application_status'],'removed')
         with_temp_review_database(scenario)
     def test_hidden_admission_record_becomes_visible_history_without_reload(self):
         def scenario():
@@ -251,9 +265,77 @@ class RepositoryTests(unittest.TestCase):
             state=initialize_session(repo.load_all_jobs('resume-1',for_session_snapshot=True))
             self.assertNotIn('hard-gap',{j['record_key'] for j in session.display_snapshot(state)})
             session.patch_status(state,'a','applied',repo.update_application_status)
-            self.assertIn('hard-gap',{j['record_key'] for j in session.display_snapshot(state)})
+            historical=next(j for j in state['jobs_snapshot'] if j['record_key']=='hard-gap')
+            self.assertEqual(historical['application_status'],'applied')
+            self.assertEqual(historical['application_status_scope'],'verified_posting')
+            trusted=[j for j in session.display_snapshot(state) if j.get('verified_posting_key')=='greenhouse:123' and j.get('verified_posting_key_trust')=='trusted']
+            self.assertEqual(len(trusted),1)
+            self.assertEqual(trusted[0]['application_status'],'applied')
             self.assert_fresh(state)
         with_temp_review_database(scenario)
+    def seed_cross_source_opening(self):
+        seed_resume_profile()
+        for key,source,url in (
+                ('linkedin-opening','linkedin','https://www.linkedin.com/jobs/view/111/'),
+                ('lensa-opening','lensa','https://lensa.com/job-v1/example/data-engineer/opening-222'),
+                ('wttj-opening','welcometothejungle','https://www.welcometothejungle.com/en/companies/example/jobs/data-engineer')):
+            seed_review_job(key,'Senior Data Engineer',source=source,description=DESC,apply_url=url)
+            seed_verified_attempt(key,'greenhouse:123',source=source,description=DESC)
+
+    def test_collapsed_trusted_opening_applied_removed_restored_without_reappearing(self):
+        def scenario():
+            self.seed_cross_source_opening()
+            state=initialize_session(repo.load_all_jobs('resume-1',for_session_snapshot=True))
+            self.assertEqual(len(state['jobs_snapshot']),3)
+            self.assertEqual(len(session.display_snapshot(state)),1)
+            for status in ('applied','removed','new'):
+                representative=session.display_snapshot(state)[0]['record_key']
+                change=session.patch_status(state,representative,status,repo.update_application_status)
+                self.assertEqual(change.record_keys,(representative,))
+                self.assertEqual(len(state['jobs_snapshot']),3)
+                self.assertTrue(all(j['application_status']==status for j in state['jobs_snapshot']))
+                cards=session.display_snapshot(state)
+                self.assertEqual(len(cards),1)
+                self.assertEqual(cards[0]['application_status'],status)
+                for bucket in ('new','applied','removed'):
+                    self.assertEqual(len([j for j in cards if j['application_status']==bucket]),int(bucket==status))
+                metrics=repo.reviewable_job_metrics(cards)
+                self.assertEqual(metrics['reviewable_jobs'],1)
+                self.assertEqual(metrics[status+'_jobs'],1)
+                self.assert_fresh(state)
+        with_temp_review_database(scenario)
+
+    def test_latest_explicit_status_selects_one_card_without_rewriting_other_history(self):
+        def scenario():
+            self.seed_cross_source_opening()
+            repo.update_application_status('linkedin-opening','applied')
+            repo.update_application_status('lensa-opening','removed')
+            with database.get_connection() as connection:
+                connection.execute("UPDATE application_status SET updated_at=TIMESTAMPTZ '2000-01-01 00:00:00+00' WHERE record_key='linkedin-opening'")
+                connection.execute("UPDATE application_status SET updated_at=TIMESTAMPTZ '2001-01-01 00:00:00+00' WHERE record_key='lensa-opening'")
+            state=initialize_session(repo.load_all_jobs('resume-1',for_session_snapshot=True))
+            physical={j['record_key']:j for j in state['jobs_snapshot']}
+            self.assertEqual(physical['linkedin-opening']['application_status'],'applied')
+            self.assertEqual(physical['linkedin-opening']['application_status_scope'],'exact')
+            self.assertEqual(physical['lensa-opening']['application_status'],'removed')
+            self.assertEqual(physical['lensa-opening']['application_status_scope'],'exact')
+            cards=session.display_snapshot(state)
+            self.assertEqual(len(cards),1)
+            self.assertEqual(cards[0]['application_status'],'removed')
+            self.assert_fresh(state)
+            session.patch_status(state,'linkedin-opening','applied',repo.update_application_status)
+            cards=session.display_snapshot(state)
+            self.assertEqual(len(cards),1)
+            self.assertEqual(cards[0]['application_status'],'applied')
+            # The older exact removed history remains intact in its source row.
+            lensa=next(j for j in state['jobs_snapshot'] if j['record_key']=='lensa-opening')
+            self.assertEqual(lensa['application_status'],'removed')
+            self.assertEqual(lensa['application_status_scope'],'exact')
+            self.assert_fresh(state)
+            with database.get_connection() as connection:
+                self.assertEqual(connection.execute("SELECT status FROM application_status WHERE record_key='lensa-opening'").fetchone(),('removed',))
+        with_temp_review_database(scenario)
+
     def test_third_party_key_no_cross_status(self):
         def scenario():
             self.seed()

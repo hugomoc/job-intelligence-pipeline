@@ -891,8 +891,32 @@ def normalize_duplicate_text(value: Any) -> str:
     ).strip()
 
 
-def ui_duplicate_key(job: dict[str, Any]) -> tuple[str, str, str, str]:
-    """Return a conservative display key used to collapse duplicate cards."""
+def trusted_display_posting_key(job: dict[str, Any]) -> str | None:
+    """Use existing persisted trust and exact official URL proof for display.
+
+    A matching URL or search result alone never establishes duplicate identity.
+    Keep status propagation and verified-key generation policies unchanged.
+    """
+    from src.actionability import trusted_key
+    from src.verified_posting_identity import is_specific_job_posting_url
+
+    try:
+        key = _trusted_snapshot_key(job)
+        if (key and trusted_key(job) == key
+                and is_specific_job_posting_url(job.get("official_job_url"))):
+            return key
+    except (TypeError, ValueError):
+        # Historical malformed URLs remain separate diagnostic source cards.
+        pass
+    return None
+
+
+def ui_duplicate_key(job: dict[str, Any]) -> tuple[str, ...]:
+    """Prefer trusted opening proof, retaining conservative source fallback."""
+    verified_key = trusted_display_posting_key(job)
+    if verified_key:
+        return ("verified_posting", verified_key)
+
     duplicate_fingerprint = str(
         job.get("duplicate_fingerprint") or ""
     ).strip()
@@ -1797,6 +1821,10 @@ def load_all_jobs(
                     canonical_status.status_record_key,
                     verified_status.status_record_key
                 ) AS application_status_record_key,
+                coalesce(
+                    canonical_status.status_updated_at,
+                    verified_status.status_updated_at
+                ) AS application_status_updated_at,
                 CASE
                     WHEN exact_scores.ai_score IS NOT NULL
                     THEN exact_scores.ai_score
@@ -2147,8 +2175,54 @@ def load_all_jobs(
     return jobs if for_session_snapshot else prepare_job_display(jobs)
 
 
+def verified_display_representative_rank(job: dict[str, Any]) -> tuple:
+    """Rank evidence within one trusted opening; smaller values are preferred.
+
+    Latest actual status event wins (including explicit restoration to NEW).
+    With equal/missing event timestamps, REMOVED/APPLIED precede default NEW.
+    Then prefer FULL_JD, direct official/ATS description provenance, source
+    verification, verified reuse, current complete assessment, newest valid JD
+    and scoring timestamps, and ascending record_key. Never inspect the numeric
+    score, recommendation or fit priority when selecting a representative.
+    """
+    from datetime import timedelta
+
+    def newest(value: Any) -> tuple:
+        parsed = normalize_datetime(value)
+        if parsed is None:
+            return (1, timedelta(0))
+        return (0, datetime.max.replace(tzinfo=timezone.utc) - parsed)
+
+    full_jd = job.get("description_state") == "FULL_JD"
+    complete_score = has_current_complete_ai_score(job)
+    provenance = str(job.get("description_source") or "").strip().casefold()
+    if provenance in {
+        "verified_official_direct", "greenhouse", "lever", "ashby", "workday",
+        "icims", "smartrecruiters",
+    }:
+        provenance_rank = 3
+    elif provenance in {"source_verified", "source_verified_known_candidate"}:
+        provenance_rank = 2
+    elif provenance == "verified_reuse":
+        provenance_rank = 1
+    else:
+        provenance_rank = 0
+
+    status = str(job.get("application_status") or "new").casefold()
+    return (
+        newest(job.get("application_status_updated_at")),
+        -{"removed": 2, "applied": 1}.get(status, 0),
+        -int(full_jd),
+        -provenance_rank,
+        -int(complete_score),
+        newest(job.get("description_updated_at") if full_jd else None),
+        newest(job.get("ai_scored_at") if complete_score else None),
+        str(job.get("record_key") or ""),
+    )
+
+
 def prepare_job_display(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Existing display ordering/dedup; session flags encode unchanged NEW gates."""
+    """Choose trusted representatives before existing display ordering/dedup."""
     jobs = [job for job in jobs if (
         job.get('application_status', 'new') in {'applied', 'removed'}
         or (job.get('_snapshot_new_source_visible', True)
@@ -2220,8 +2294,23 @@ def prepare_job_display(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         return 0
 
+    # Resolve verified duplicates before score-based presentation ordering.
+    # Retain whole representative rows: no score/status/hash fields are merged.
+    verified_representatives: dict[str, dict[str, Any]] = {}
+    display_jobs: list[dict[str, Any]] = []
+    for job in jobs:
+        verified_key = trusted_display_posting_key(job)
+        if not verified_key:
+            display_jobs.append(job)
+            continue
+        previous = verified_representatives.get(verified_key)
+        if (previous is None or verified_display_representative_rank(job)
+                < verified_display_representative_rank(previous)):
+            verified_representatives[verified_key] = job
+    display_jobs.extend(verified_representatives.values())
+
     sorted_jobs = sorted(
-        jobs,
+        display_jobs,
         key=lambda job: (
             {
                 "new": 2,
@@ -2244,7 +2333,7 @@ def prepare_job_display(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
     deduplicated_jobs: list[dict[str, Any]] = []
-    seen_display_keys: set[tuple[str, str, str, str]] = set()
+    seen_display_keys: set[tuple[str, ...]] = set()
 
     for job in sorted_jobs:
         duplicate_key = ui_duplicate_key(job)
@@ -2302,7 +2391,8 @@ def _status_snapshot_overlays(connection, jobs, exact_key, changed_record_keys):
     # as both ROW_NUMBER() partitions in the full recommendation query.
     cursor = connection.execute(
         """
-        SELECT status.status, raw.source, status.record_key,
+        SELECT status.status, status.updated_at AS application_status_updated_at,
+            raw.source, status.record_key,
             exact_posting_identity(raw.source, raw.source_job_id, raw.apply_url, raw.record_key) AS exact_key,
             attempts.verified_posting_key, attempts.verified_posting_key_source,
             attempts.verified_posting_key_trust, attempts.official_job_url
@@ -2332,7 +2422,8 @@ def _status_snapshot_overlays(connection, jobs, exact_key, changed_record_keys):
             "application_status": row["status"] if row else "new",
             "application_status_scope": scope if row else "default",
             "application_status_source": row["source"] if row else None,
-            "application_status_record_key": row["record_key"] if row else None})
+            "application_status_record_key": row["record_key"] if row else None,
+            "application_status_updated_at": row["application_status_updated_at"] if row else None})
     return tuple(sorted(verified_keys)), tuple(overlays)
 
 
