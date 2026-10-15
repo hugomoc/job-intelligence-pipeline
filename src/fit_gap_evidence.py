@@ -13,6 +13,8 @@ from typing import Any
 from src.ai.requirement_policy import (
     AI_DELIVERY,
     AI_REQUIRED_TECH,
+    TENURE_PLATFORMS,
+    _platform_tenure_requirement,
     description_requirement_clauses,
 )
 from src.ai.resume_profiler import ResumeProfile
@@ -56,7 +58,24 @@ def approval_fingerprint(row: dict[str, Any], match: Any) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def platform_tenure_gap(gap: str) -> tuple[str, int, re.Pattern[str]] | None:
+    """Identify the exact platform and minimum stated by a tenure hard gap."""
+    match = re.search(
+        r"^Major gap: (\d+)\+ years of professional (.+?) experience\b",
+        gap, re.I,
+    )
+    if match is None:
+        return None
+    for name, pattern in TENURE_PLATFORMS:
+        if name.casefold() == match.group(2).casefold():
+            return name, int(match.group(1)), re.compile(pattern, re.I)
+    return None
+
+
 def gap_clause_pattern(gap: str) -> re.Pattern[str] | None:
+    tenure = platform_tenure_gap(gap)
+    if tenure is not None:
+        return tenure[2]
     if "production RAG" in gap or "agentic workflows" in gap:
         return AI_REQUIRED_TECH
     for label, pattern in GAP_RULES:
@@ -72,12 +91,19 @@ def candidate_evidence(row: dict[str, Any], match: Any) -> dict[str, Any]:
     groups = []
     for gap in new_hard_gaps(row, match):
         pattern = gap_clause_pattern(gap)
+        tenure = platform_tenure_gap(gap)
         is_ai = ("production RAG" in gap or "agentic workflows" in gap)
         relevant = []
         if pattern:
             for clause in clauses:
                 if not pattern.search(clause["clause"]):
                     continue
+                if tenure is not None:
+                    parsed = _platform_tenure_requirement(clause["clause"])
+                    if parsed is None or (parsed[0], parsed[2]) != tenure[:2]:
+                        # A named tool or general engineering-year minimum
+                        # does not substantiate an exact platform tenure gap.
+                        continue
                 item = {
                     "text": clause["clause"],
                     "section": clause["section"],
