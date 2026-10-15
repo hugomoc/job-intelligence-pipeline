@@ -156,7 +156,11 @@ class VerifiedDisplayTests(unittest.TestCase):
                 rows = [posting('a', official_job_url=url, verified_posting_key=key),
                         posting('b', source='lensa', official_job_url=url,
                                 verified_posting_key=key)]
-                self.assertEqual(trusted_display_posting_key(rows[0]), key)
+                from src.repositories.recommendation_repository import verified_identity_scope
+                self.assertEqual(
+                    trusted_display_posting_key(rows[0]),
+                    verified_identity_scope(key, url),
+                )
                 self.assertEqual(len(prepare_job_display(rows)), 1)
 
     def test_verification_status_and_exact_url_key_agreement_required(self):
