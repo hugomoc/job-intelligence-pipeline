@@ -936,9 +936,11 @@ def trusted_display_posting_key(job: dict[str, Any]) -> str | None:
 
     try:
         key = _trusted_snapshot_key(job)
-        if (key and trusted_key(job) == key
+        if (key and verified_identity_scope(
+                    trusted_key(job), job.get("official_job_url")
+                ) == key
                 and is_specific_job_posting_url(job.get("official_job_url"))):
-            return verified_identity_scope(key, job.get("official_job_url")) or None
+            return key
     except (TypeError, ValueError):
         # Historical malformed URLs remain separate diagnostic source cards.
         pass
