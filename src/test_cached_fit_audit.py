@@ -105,7 +105,9 @@ class CachedFitAuditTests(unittest.TestCase):
             overall_score=82,
             recommendation="review",
             description=(
-                "<h2>What You Bring</h2>"
+                "<h2>What You Do</h2><p>"
+                + "Build SQL Server pipelines and analytics marts for reporting. " * 12
+                + "</p><h2>What You Bring</h2>"
                 "<p>3+ years in data engineering or analytics engineering, "
                 "including at least 2 years building production dbt projects.</p>"
             ),
