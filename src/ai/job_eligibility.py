@@ -16,7 +16,7 @@ from google.genai import types
 from pydantic import BaseModel, Field, ValidationError
 
 from src.ai.resume_matcher import ResumeMatcherError, get_description_information
-from src.ai.requirement_policy import validate_hard_gap_clause, central_specialization_gaps
+from src.ai.requirement_policy import validate_hard_gap_clause, central_specialization_gaps, required_platform_tenure_gaps
 from src.job_admission import evaluate_job_admission
 from src.ai.resume_profiler import ResumeProfile, get_gemini_client, get_model_name
 
@@ -80,7 +80,13 @@ def normalize_job_eligibility(analysis: JobEligibilityAnalysis, resume_profile: 
         elif check["reason"] != "personal condition satisfied":
             uncertainties.append(f"Unconfirmed qualification/specialization: {gap}; {check['reason']}")
     central = central_specialization_gaps(description, str(job.get("title") or ""), resume_profile)
-    retained = list(dict.fromkeys(retained + [row["gap"] for row in central]))
+    tenure_missing, tenure_uncertain = required_platform_tenure_gaps(
+        description, resume_profile
+    )
+    uncertainties.extend(tenure_uncertain)
+    retained = list(dict.fromkeys(
+        retained + [row["gap"] for row in central] + tenure_missing
+    ))
     admission = evaluate_job_admission(job, resume_profile)
     decision = analysis.decision
     if retained:

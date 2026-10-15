@@ -93,6 +93,114 @@ def description_requirement_clauses(description: str) -> list[dict[str, Any]]:
     return clauses
 
 
+# Only explicit, single-platform professional-tenure minimums are enforceable.
+# Generic years of data engineering and open platform alternatives are left to
+# their own rules. A tool mentioned in a portfolio is not professional tenure.
+TENURE_PLATFORMS: tuple[tuple[str, str], ...] = (
+    ("dbt Cloud", r"\bdbt[\s-]+cloud\b"),
+    ("Azure Data Factory", r"\bazure\s+data\s+factory\b"),
+    ("Microsoft Fabric", r"\bmicrosoft\s+fabric\b"),
+    ("Databricks", r"\bdatabricks\b"),
+    ("Snowflake", r"\bsnowflake\b"),
+    ("dbt", r"\bdbt\b(?![\s-]+cloud\b)"),
+    ("Apache Spark", r"\b(?:apache\s+spark|pyspark|spark)\b"),
+    ("AWS Glue", r"\b(?:aws|amazon)\s+glue\b|\bglue\s+jobs?\b"),
+    ("Apache Airflow", r"\b(?:apache\s+)?airflow\b"),
+    ("Prefect", r"\bprefect\b"),
+    ("Dagster", r"\bdagster\b"),
+    ("Tableau", r"\btableau\b"),
+    ("Power BI", r"\bpower\s+bi\b"),
+    ("Domo", r"\bdomo\b"),
+    ("Looker", r"\blooker\b(?!\s+studio)"),
+)
+TECHNOLOGY_YEARS = re.compile(r"\b(\d{1,2})\s*\+?\s*(?:years?|yrs?)\b", re.I)
+
+
+def required_platform_tenure_gaps(
+    description: str,
+    profile: ResumeProfile,
+) -> tuple[list[str], list[str]]:
+    """Return confirmed missing and unverified mandatory professional-tenure claims.
+
+    Missing exact professional platform evidence is a hard gap. A platform
+    mentioned in ambiguous (or undated production) fields is a REVIEW risk,
+    not proof of the years required. Generic overall experience never counts
+    as years using a particular technology.
+    """
+    missing: list[str] = []
+    uncertain: list[str] = []
+    professional = [str(x) for x in profile.production_skills]
+    # A professional summary can confirm evidence but may also mention portfolio
+    # work; without explicit dated experience we treat it as uncertainty.
+    other = [
+        profile.professional_summary,
+        *profile.tools_platforms,
+        *profile.databases_warehouses,
+        *profile.data_engineering_capabilities,
+        *profile.bi_analytics_skills,
+    ]
+
+    for row in description_requirement_clauses(description):
+        clause = row["clause"]
+        if not row["mandatory"] or row["optional"]:
+            continue
+        years = TECHNOLOGY_YEARS.search(clause)
+        if not years or not re.search(
+            r"\b(?:experience|hands?[\s-]?on|using|working)\b", clause, re.I
+        ):
+            continue
+        # Do not turn interchangeable alternatives into a requirement for
+        # every named technology.
+        if re.search(
+            r"\b(?:or|equivalent|comparable|similar|such as|for example)\b|"
+            r"\be\.g\.", clause, re.I
+        ):
+            continue
+        matches = [
+            (name, pattern)
+            for name, pattern in TENURE_PLATFORMS
+            if re.search(pattern, clause, re.I)
+        ]
+        if len(matches) != 1:
+            continue
+        name, pattern = matches[0]
+        required_years = int(years.group(1))
+        label = f"{required_years}+ years of professional {name} experience"
+
+        exact_production = [
+            item for item in professional if re.search(pattern, item, re.I)
+        ]
+        proven_years: list[int] = []
+        for item in exact_production:
+            forward = re.search(
+                rf"\b(\d{{1,2}})\s*\+?\s*(?:years?|yrs?)\b.{{0,90}}{pattern}",
+                item, re.I
+            )
+            backward = re.search(
+                rf"{pattern}.{{0,90}}\b(\d{{1,2}})\s*\+?\s*(?:years?|yrs?)\b",
+                item, re.I
+            )
+            for candidate in (forward, backward):
+                if candidate:
+                    proven_years.append(int(candidate.group(1)))
+        if proven_years and max(proven_years) >= required_years:
+            continue
+
+        if exact_production or any(
+            re.search(pattern, str(item), re.I) for item in other
+        ):
+            uncertain.append(
+                f"Required {label} is not verified by dated professional "
+                "experience; project/undated tool use is insufficient."
+            )
+        else:
+            missing.append(
+                f"Major gap: {label} (not demonstrated in professional experience)"
+            )
+
+    return list(dict.fromkeys(missing)), list(dict.fromkeys(uncertain))
+
+
 def clause_groups(text: str) -> set[str]:
     from src.ai.resume_matcher import contains_phrase
     groups = {name for name, aliases in _aliases().items()
