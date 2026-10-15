@@ -698,7 +698,7 @@ class SharedRequirementPolicyTests(unittest.TestCase):
 
     def test_undated_nonproject_platform_inventory_is_review_not_false_skip(self):
         for tool, clause in (
-            ("Looker", "3+ years of professional Looker development experience."),
+            ("LookML", "3+ years of professional Looker development experience."),
             ("Apache Spark", "2+ years building production Apache Spark pipelines."),
         ):
             with self.subTest(tool=tool):
@@ -714,6 +714,13 @@ class SharedRequirementPolicyTests(unittest.TestCase):
                 self.assertEqual(missing, [])
                 self.assertEqual(len(uncertain), 1)
                 self.assertEqual(score(p, j, []).recommendation, "review")
+        # Explicit dated LookML production experience DOES prove Looker tenure.
+        p = profile(production_skills=["4+ years of production LookML modeling"],
+                    tools_platforms=["Looker"], project_skills=[])
+        j = job("<h2>Requirements</h2>"
+                "<p>3+ years of professional Looker development experience.</p>")
+        self.assertEqual(required_platform_tenure_gaps(j["description"], p),
+                         ([], []))
         # An explicitly project-only platform still cannot satisfy tenure.
         p = profile(production_skills=["SQL"], tools_platforms=["dbt"],
                     project_skills=["Personal dbt portfolio"])
