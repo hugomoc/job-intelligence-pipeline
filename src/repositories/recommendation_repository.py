@@ -470,6 +470,13 @@ def register_exact_posting_identity_function(connection) -> None:
         pass
     try:
         connection.create_function(
+            "verified_identity_scope", verified_identity_scope,
+            [str, str], str, null_handling="special",
+        )
+    except Exception:
+        pass
+    try:
+        connection.create_function(
             "exact_posting_identity",
             exact_posting_identity,
             [str, str, str, str],
@@ -891,8 +898,61 @@ def normalize_duplicate_text(value: Any) -> str:
     ).strip()
 
 
-def ui_duplicate_key(job: dict[str, Any]) -> tuple[str, str, str, str]:
-    """Return a conservative display key used to collapse duplicate cards."""
+def verified_identity_scope(key: str | None, official_url: str | None) -> str:
+    """Scope legacy Workday keys to their exact employer tenant hostname.
+
+    Saved key formats remain unchanged. This prevents unrelated tenants with
+    identical requisition IDs from sharing statuses, scores or display cards.
+    """
+    key = str(key or "").strip()
+    if not key:
+        return ""
+    if not key.startswith("workday:"):
+        return key
+    try:
+        parsed = urlsplit(str(official_url or ""))
+        host = (parsed.hostname or "").casefold().rstrip(".")
+    except (TypeError, ValueError):
+        host = ""
+    # No reliable tenant: fail closed rather than pooling all Workday jobs.
+    if not host or not (
+        host == "myworkdayjobs.com"
+        or host.endswith(".myworkdayjobs.com")
+        or host.endswith(".myworkdaysite.com")
+        or host.endswith(".workdayjobs.com")
+    ):
+        return ""
+    return key + "|tenant:" + host
+
+
+def trusted_display_posting_key(job: dict[str, Any]) -> str | None:
+    """Use existing persisted trust and exact official URL proof for display.
+
+    A matching URL or search result alone never establishes duplicate identity.
+    Keep status propagation and verified-key generation policies unchanged.
+    """
+    from src.actionability import trusted_key
+    from src.verified_posting_identity import is_specific_job_posting_url
+
+    try:
+        key = _trusted_snapshot_key(job)
+        if (key and verified_identity_scope(
+                    trusted_key(job), job.get("official_job_url")
+                ) == key
+                and is_specific_job_posting_url(job.get("official_job_url"))):
+            return key
+    except (TypeError, ValueError):
+        # Historical malformed URLs remain separate diagnostic source cards.
+        pass
+    return None
+
+
+def ui_duplicate_key(job: dict[str, Any]) -> tuple[str, ...]:
+    """Prefer trusted opening proof, retaining conservative source fallback."""
+    verified_key = trusted_display_posting_key(job)
+    if verified_key:
+        return ("verified_posting", verified_key)
+
     duplicate_fingerprint = str(
         job.get("duplicate_fingerprint") or ""
     ).strip()
@@ -1510,13 +1570,17 @@ def load_all_jobs(
 
             verified_application_status AS (
                 SELECT
-                    attempts.verified_posting_key,
+                    verified_identity_scope(
+                        attempts.verified_posting_key, attempts.official_job_url
+                    ) AS verified_posting_scope,
                     status.status,
                     status_jobs.source AS status_source,
                     status.record_key AS status_record_key,
                     status.updated_at AS status_updated_at,
                     row_number() over (
-                        partition by attempts.verified_posting_key
+                        partition by verified_identity_scope(
+                            attempts.verified_posting_key, attempts.official_job_url
+                        )
                         order by
                             status.updated_at desc nulls last,
                             status.record_key
@@ -1655,7 +1719,9 @@ def load_all_jobs(
 
             verified_scores AS (
                 SELECT
-                    attempts.verified_posting_key,
+                    verified_identity_scope(
+                        attempts.verified_posting_key, attempts.official_job_url
+                    ) AS verified_posting_scope,
                     attempts.description_hash,
                     scores.overall_score AS ai_score,
                     scores.recommendation,
@@ -1678,7 +1744,9 @@ def load_all_jobs(
                     scores.scored_at AS ai_scored_at,
                     row_number() over (
                         partition by
-                            attempts.verified_posting_key,
+                            verified_identity_scope(
+                                attempts.verified_posting_key, attempts.official_job_url
+                            ),
                             attempts.description_hash
                         order by
                             scores.scored_at desc nulls last,
@@ -1797,6 +1865,10 @@ def load_all_jobs(
                     canonical_status.status_record_key,
                     verified_status.status_record_key
                 ) AS application_status_record_key,
+                coalesce(
+                    canonical_status.status_updated_at,
+                    verified_status.status_updated_at
+                ) AS application_status_updated_at,
                 CASE
                     WHEN exact_scores.ai_score IS NOT NULL
                     THEN exact_scores.ai_score
@@ -1993,8 +2065,10 @@ def load_all_jobs(
                    enrichment_attempts.canonical_job_key
                AND enrichment_attempts.enrichment_rank = 1
             LEFT JOIN verified_application_status AS verified_status
-                ON enrichment_attempts.verified_posting_key =
-                   verified_status.verified_posting_key
+                ON verified_identity_scope(
+                    enrichment_attempts.verified_posting_key,
+                    enrichment_attempts.official_job_url
+                   ) = verified_status.verified_posting_scope
                AND verified_status.status_rank = 1
                AND lower(
                    coalesce(
@@ -2009,8 +2083,10 @@ def load_all_jobs(
                    )
                ) IN ({trusted_verified_key_sources}) AND posting_key_can_be_trusted(enrichment_attempts.verified_posting_key) AND NOT posting_url_is_third_party(enrichment_attempts.official_job_url)
             LEFT JOIN verified_scores
-                ON enrichment_attempts.verified_posting_key =
-                   verified_scores.verified_posting_key
+                ON verified_identity_scope(
+                    enrichment_attempts.verified_posting_key,
+                    enrichment_attempts.official_job_url
+                   ) = verified_scores.verified_posting_scope
                AND enrichment_attempts.description_hash =
                    verified_scores.description_hash
                AND verified_scores.score_rank = 1
@@ -2147,8 +2223,54 @@ def load_all_jobs(
     return jobs if for_session_snapshot else prepare_job_display(jobs)
 
 
+def verified_display_representative_rank(job: dict[str, Any]) -> tuple:
+    """Rank evidence within one trusted opening; smaller values are preferred.
+
+    Latest actual status event wins (including explicit restoration to NEW).
+    With equal/missing event timestamps, REMOVED/APPLIED precede default NEW.
+    Then prefer FULL_JD, direct official/ATS description provenance, source
+    verification, verified reuse, current complete assessment, newest valid JD
+    and scoring timestamps, and ascending record_key. Never inspect the numeric
+    score, recommendation or fit priority when selecting a representative.
+    """
+    from datetime import timedelta
+
+    def newest(value: Any) -> tuple:
+        parsed = normalize_datetime(value)
+        if parsed is None:
+            return (1, timedelta(0))
+        return (0, datetime.max.replace(tzinfo=timezone.utc) - parsed)
+
+    full_jd = job.get("description_state") == "FULL_JD"
+    complete_score = has_current_complete_ai_score(job)
+    provenance = str(job.get("description_source") or "").strip().casefold()
+    if provenance in {
+        "verified_official_direct", "greenhouse", "lever", "ashby", "workday",
+        "icims", "smartrecruiters",
+    }:
+        provenance_rank = 3
+    elif provenance in {"source_verified", "source_verified_known_candidate"}:
+        provenance_rank = 2
+    elif provenance == "verified_reuse":
+        provenance_rank = 1
+    else:
+        provenance_rank = 0
+
+    status = str(job.get("application_status") or "new").casefold()
+    return (
+        newest(job.get("application_status_updated_at")),
+        -{"removed": 2, "applied": 1}.get(status, 0),
+        -int(full_jd),
+        -provenance_rank,
+        -int(complete_score),
+        newest(job.get("description_updated_at") if full_jd else None),
+        newest(job.get("ai_scored_at") if complete_score else None),
+        str(job.get("record_key") or ""),
+    )
+
+
 def prepare_job_display(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Existing display ordering/dedup; session flags encode unchanged NEW gates."""
+    """Choose trusted representatives before existing display ordering/dedup."""
     jobs = [job for job in jobs if (
         job.get('application_status', 'new') in {'applied', 'removed'}
         or (job.get('_snapshot_new_source_visible', True)
@@ -2220,8 +2342,23 @@ def prepare_job_display(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         return 0
 
+    # Resolve verified duplicates before score-based presentation ordering.
+    # Retain whole representative rows: no score/status/hash fields are merged.
+    verified_representatives: dict[str, dict[str, Any]] = {}
+    display_jobs: list[dict[str, Any]] = []
+    for job in jobs:
+        verified_key = trusted_display_posting_key(job)
+        if not verified_key:
+            display_jobs.append(job)
+            continue
+        previous = verified_representatives.get(verified_key)
+        if (previous is None or verified_display_representative_rank(job)
+                < verified_display_representative_rank(previous)):
+            verified_representatives[verified_key] = job
+    display_jobs.extend(verified_representatives.values())
+
     sorted_jobs = sorted(
-        jobs,
+        display_jobs,
         key=lambda job: (
             {
                 "new": 2,
@@ -2244,7 +2381,7 @@ def prepare_job_display(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
     deduplicated_jobs: list[dict[str, Any]] = []
-    seen_display_keys: set[tuple[str, str, str, str]] = set()
+    seen_display_keys: set[tuple[str, ...]] = set()
 
     for job in sorted_jobs:
         duplicate_key = ui_duplicate_key(job)
@@ -2275,7 +2412,7 @@ def _trusted_snapshot_key(job: dict[str, Any]) -> str | None:
             and str(job.get("verified_posting_key_source") or "").lower() in TRUSTED_VERIFIED_KEY_SOURCES
             and posting_key_can_be_trusted(key)
             and not is_third_party_url(job.get("official_job_url"))):
-        return key
+        return verified_identity_scope(key, job.get("official_job_url")) or None
     return None
 
 
@@ -2302,7 +2439,8 @@ def _status_snapshot_overlays(connection, jobs, exact_key, changed_record_keys):
     # as both ROW_NUMBER() partitions in the full recommendation query.
     cursor = connection.execute(
         """
-        SELECT status.status, raw.source, status.record_key,
+        SELECT status.status, status.updated_at AS application_status_updated_at,
+            raw.source, status.record_key,
             exact_posting_identity(raw.source, raw.source_job_id, raw.apply_url, raw.record_key) AS exact_key,
             attempts.verified_posting_key, attempts.verified_posting_key_source,
             attempts.verified_posting_key_trust, attempts.official_job_url
@@ -2311,7 +2449,9 @@ def _status_snapshot_overlays(connection, jobs, exact_key, changed_record_keys):
         LEFT JOIN job_enrichment_attempts AS attempts ON attempts.record_key = status.record_key
         WHERE exact_posting_identity(raw.source, raw.source_job_id, raw.apply_url, raw.record_key)
                 IN (SELECT unnest(?))
-           OR attempts.verified_posting_key IN (SELECT unnest(?))
+           OR verified_identity_scope(
+                attempts.verified_posting_key, attempts.official_job_url
+              ) IN (SELECT unnest(?))
         ORDER BY status.updated_at DESC NULLS LAST, status.record_key
         """, [list(exact_keys), list(current_keys)],
     )
@@ -2332,7 +2472,8 @@ def _status_snapshot_overlays(connection, jobs, exact_key, changed_record_keys):
             "application_status": row["status"] if row else "new",
             "application_status_scope": scope if row else "default",
             "application_status_source": row["source"] if row else None,
-            "application_status_record_key": row["record_key"] if row else None})
+            "application_status_record_key": row["record_key"] if row else None,
+            "application_status_updated_at": row["application_status_updated_at"] if row else None})
     return tuple(sorted(verified_keys)), tuple(overlays)
 
 
@@ -2460,8 +2601,13 @@ def load_candidate_jobs(
                        scored_attempts.record_key
                 INNER JOIN job_enrichment_attempts
                     AS current_attempts
-                    ON scored_attempts.verified_posting_key =
-                       current_attempts.verified_posting_key
+                    ON verified_identity_scope(
+                        scored_attempts.verified_posting_key,
+                        scored_attempts.official_job_url
+                       ) = verified_identity_scope(
+                        current_attempts.verified_posting_key,
+                        current_attempts.official_job_url
+                       )
                    AND scored_attempts.description_hash =
                        current_attempts.description_hash
                 INNER JOIN jobs AS current_jobs

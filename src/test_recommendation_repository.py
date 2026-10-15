@@ -1092,7 +1092,7 @@ def test_verified_posting_key_shares_applied_status_across_sources() -> None:
 
         jobs = {
             job["record_key"]: job
-            for job in load_all_jobs(resume_hash="resume-1")
+            for job in load_all_jobs(resume_hash="resume-1", for_session_snapshot=True)
         }
 
         assert jobs["wellfound-robots"]["application_status"] == "applied"
@@ -1153,7 +1153,7 @@ def test_verified_posting_key_shares_removed_status_across_sources() -> None:
 
         jobs = {
             job["record_key"]: job
-            for job in load_all_jobs(resume_hash="resume-1")
+            for job in load_all_jobs(resume_hash="resume-1", for_session_snapshot=True)
         }
 
         assert jobs["wellfound-robots"]["application_status"] == "removed"
@@ -1284,7 +1284,7 @@ def test_verified_score_reuse_requires_same_description_hash() -> None:
 
         jobs = {
             job["record_key"]: job
-            for job in load_all_jobs(resume_hash="resume-1")
+            for job in load_all_jobs(resume_hash="resume-1", for_session_snapshot=True)
         }
 
         assert jobs["wellfound-robots"]["ai_score"] == 91
@@ -2655,7 +2655,7 @@ def test_load_all_jobs_reads_current_exact_score_without_mart_refresh() -> None:
                 """,
             )
 
-        jobs = {j['record_key']: j for j in load_all_jobs('resume-1')}
+        jobs = {j['record_key']: j for j in load_all_jobs('resume-1', for_session_snapshot=True)}
         exact = jobs['current-exact']
         assert exact['ai_score'] == 82
         assert exact['recommendation'] == 'apply'
@@ -2679,7 +2679,7 @@ def test_load_all_jobs_reads_current_exact_score_without_mart_refresh() -> None:
             connection.execute('DELETE FROM analytics.mart_job_recommendations')
             connection.execute('DELETE FROM job_enrichment_attempts')
 
-        assert next(j for j in load_all_jobs('resume-1')
+        assert next(j for j in load_all_jobs('resume-1', for_session_snapshot=True)
                     if j['record_key']=='current-exact')['ai_score'] == 82
         for assignment in (
             "description_complete=false",
@@ -2689,7 +2689,7 @@ def test_load_all_jobs_reads_current_exact_score_without_mart_refresh() -> None:
         ):
             with database.get_connection() as connection:
                 connection.execute('UPDATE resume_job_scores SET '+assignment)
-            assert next(j for j in load_all_jobs('resume-1')
+            assert next(j for j in load_all_jobs('resume-1', for_session_snapshot=True)
                         if j['record_key']=='current-exact')['ai_score'] is None
             with database.get_connection() as connection:
                 connection.execute(
@@ -2703,7 +2703,7 @@ def test_load_all_jobs_reads_current_exact_score_without_mart_refresh() -> None:
                 "WHERE record_key='current-exact'",
                 [original_time+timedelta(seconds=1)],
             )
-        assert next(j for j in load_all_jobs('resume-1')
+        assert next(j for j in load_all_jobs('resume-1', for_session_snapshot=True)
                     if j['record_key']=='current-exact')['ai_score'] is None
         with database.get_connection() as connection:
             connection.execute(
@@ -2711,7 +2711,7 @@ def test_load_all_jobs_reads_current_exact_score_without_mart_refresh() -> None:
                 "description='navigation chrome ' || repeat('marketing ',200) "
                 "WHERE record_key='current-exact'",
             )
-        assert next(j for j in load_all_jobs('resume-1')
+        assert next(j for j in load_all_jobs('resume-1', for_session_snapshot=True)
                     if j['record_key']=='current-exact')['ai_score'] is None
 
     with_temp_review_database(scenario)

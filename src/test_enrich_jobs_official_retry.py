@@ -517,7 +517,7 @@ def test_batch_continues_after_individual_enrichment_failure() -> None:
         )
         original_processor = enrich_jobs.process_enrichment_job
 
-        def fake_processor(job: dict, client) -> EnrichmentProcessingResult:
+        def fake_processor(job: dict, client, **kwargs) -> EnrichmentProcessingResult:
             if job["record_key"] == "batch-fail":
                 raise RuntimeError("synthetic fetch failure")
 

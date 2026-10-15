@@ -710,6 +710,7 @@ if enrich_descriptions_clicked or (run_daily_clicked and ingestion_succeeded):
             st.write(f"Pages blocked: {enrichment_result.blocked}")
             st.write(f"No description found: {enrichment_result.no_description}")
             st.write(f"Fetch errors: {enrichment_result.fetch_error}")
+            st.write(f"Persistence errors: {enrichment_result.persistence_error}")
             st.write(f"Not improved: {enrichment_result.not_improved}")
             st.write(
                 f"Elapsed seconds: {enrichment_result.elapsed_seconds:.1f}"
