@@ -494,6 +494,23 @@ def test_open_equivalent_cloud_platform_accepts_gcp() -> None:
     ) == []
 
 
+def test_specific_platform_years_are_not_satisfied_by_general_experience() -> None:
+    profile = make_profile(
+        project_skills=["dbt"],
+        production_skills=["Python", "SQL", "AWS"],
+        tools_platforms=["dbt"],
+    )
+    description = (
+        "Requirements\n"
+        "3+ years of hands-on experience using dbt Cloud.\n"
+        + "Build reliable SQL pipelines on AWS for business reporting. " * 12
+    )
+    match = scored_match(profile, "Data Analytics Engineer", description)
+    assert match.overall_score == 49
+    assert match.recommendation == "skip"
+    assert any("dbt Cloud" in x for x in match.analysis.hard_requirements_missing)
+
+
 def test_databricks_operational_ownership_is_central_without_explicit_required_label() -> None:
     profile = make_profile(
         databases_warehouses=["Snowflake"],
