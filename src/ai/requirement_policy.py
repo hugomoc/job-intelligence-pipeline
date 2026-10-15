@@ -321,9 +321,12 @@ def required_platform_tenure_gaps(
             continue
         name, pattern, required_years = requirement
         label = f"{required_years}+ years of professional {name} experience"
+        # LookML is the modeling language of Looker. It is professional
+        # platform evidence, but without dated years it is not tenure proof.
+        evidence_pattern = r"\b(?:looker|lookml)\b" if name == "Looker" else pattern
 
         exact_production = [
-            item for item in professional if re.search(pattern, item, re.I)
+            item for item in professional if re.search(evidence_pattern, item, re.I)
         ]
         demonstrated_years = []
         for item in exact_production:
@@ -342,11 +345,11 @@ def required_platform_tenure_gaps(
             continue
 
         inventory_hint = (
-            any(re.search(pattern, str(tool), re.I) for tool in undated_tools)
-            and not re.search(pattern, project_text, re.I)
+            any(re.search(evidence_pattern, str(tool), re.I) for tool in undated_tools)
+            and not re.search(evidence_pattern, project_text, re.I)
         )
         if exact_production or inventory_hint or any(
-            re.search(pattern, str(item), re.I)
+            re.search(evidence_pattern, str(item), re.I)
             and not project_only.search(str(item))
             for item in ambiguous_professional
         ):
