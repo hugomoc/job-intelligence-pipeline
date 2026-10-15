@@ -428,7 +428,7 @@ def central_specialization_gaps(description: str, title: str, profile: ResumePro
     if not isinstance(profile, ResumeProfile):
         return []
     evidence = profile_to_text(profile, include_certifications=False)
-    production = profile_fields_to_text(profile, ("professional_summary", "production_skills", "data_engineering_capabilities", "bi_analytics_skills", "tools_platforms", "industries"))
+    production = profile_fields_to_text(profile, ("professional_summary", "production_skills", "data_engineering_capabilities", "bi_analytics_skills", "tools_platforms", "ai_ml_experience", "industries"))
     clauses = description_requirement_clauses(description)
     output = []
     for label, pattern, resume_pattern in CENTRAL_SPECIALIZATIONS:
