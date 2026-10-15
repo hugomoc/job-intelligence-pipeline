@@ -331,11 +331,11 @@ def required_platform_tenure_gaps(
         demonstrated_years = []
         for item in exact_production:
             forward = re.search(
-                rf"\b(\d{{1,2}})\s*\+?\s*(?:years?|yrs?)\b.{{0,90}}{pattern}",
+                rf"\b(\d{{1,2}})\s*\+?\s*(?:years?|yrs?)\b.{{0,90}}{evidence_pattern}",
                 item, re.I,
             )
             backward = re.search(
-                rf"{pattern}.{{0,90}}\b(\d{{1,2}})\s*\+?\s*(?:years?|yrs?)\b",
+                rf"{evidence_pattern}.{{0,90}}\b(\d{{1,2}})\s*\+?\s*(?:years?|yrs?)\b",
                 item, re.I,
             )
             for evidence in (forward, backward):
