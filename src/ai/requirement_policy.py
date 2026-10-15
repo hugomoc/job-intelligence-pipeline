@@ -400,7 +400,7 @@ def clause_groups(text: str) -> set[str]:
 def validate_hard_gap_clause(gap: str, description: str, profile: ResumeProfile) -> dict[str, Any]:
     """Model labels are pointers, never mandatory-status evidence."""
     from src.ai.resume_matcher import significant_terms, CRITICAL_CAPABILITY_SIGNALS, regex_present, profile_to_text, requirement_is_demonstrated, requirement_requires_all, profile_fields_to_text, contains_phrase
-    tenure = re.match(r"^Major gap: (\\d+)\\+ years of professional (.+?) experience\\b", gap, re.I)
+    tenure = re.match(r"^Major gap: (\d+)\+ years of professional (.+?) experience\b", gap, re.I)
     if tenure:
         n, name = int(tenure.group(1)), tenure.group(2)
         if any(name.lower() == x.lower() for x, _ in TENURE_PLATFORMS):
@@ -525,15 +525,15 @@ def validate_hard_gap_clause(gap: str, description: str, profile: ResumeProfile)
     terms = significant_terms(gap)
     for row in matches:
         clause = row["clause"]
-        preferred = re.search(r"\\bpreferably\\b", clause, re.I)
+        preferred = re.search(r"\bpreferably\b", clause, re.I)
         if preferred and len(terms & significant_terms(clause[preferred.end():])) >= 2:
             continue
-        if re.search(r"\\b(?:ledger|accounting)\\b", gap, re.I):
-            academic = re.search(r"\\b(?:bachelor|master|associate|degree)\\b", clause, re.I)
+        if re.search(r"\b(?:ledger|accounting)\b", gap, re.I):
+            academic = re.search(r"\b(?:bachelor|master|associate|degree)\b", clause, re.I)
             practice = re.search(
-                r"\\b(?:ledger|bookkeeping|reconciliation|financial reporting|"
+                r"\b(?:ledger|bookkeeping|reconciliation|financial reporting|"
                 r"financial close|month.end close|work.in.progress|"
-                r"percentage.of.completion|accounting (?:experience|systems?|processes?|expertise))\\b",
+                r"percentage.of.completion|accounting (?:experience|systems?|processes?|expertise))\b",
                 clause, re.I,
             )
             if academic and not practice:
