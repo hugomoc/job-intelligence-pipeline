@@ -432,6 +432,24 @@ class SharedRequirementPolicyTests(unittest.TestCase):
         self.assertEqual(normalize_job_eligibility(proposed(["Microsoft Fabric"]), profile(), j).decision, "exclude")
         self.assertEqual(score(profile(), j, ["Microsoft Fabric"]).overall_score, 49)
 
+    def test_piedmont_preferred_domain_and_degree_are_not_experience_gaps(self):
+        p = profile(industries=["e-commerce"])
+        j = job(
+            "<h2>Requirements</h2>"
+            "<p>1 year of analysis work including Data Visualization and or Data Modeling, "
+            "preferably in a multi-entity healthcare provider environment.</p>"
+            "<p>Bachelor's Degree in Business, Finance, Accounting, "
+            "Information Technology, or closely-related field Required.</p>",
+            "BI Developer",
+        )
+        gaps = ["Experience in a multi-entity healthcare provider environment",
+                "Major gap: ledger or accounting data-domain expertise"]
+        for gap in gaps:
+            with self.subTest(gap=gap):
+                self.assertFalse(validate_hard_gap_clause(
+                    gap, j["description"], p)["keep_hard_gap"])
+        self.assertEqual(score(p, j, gaps).analysis.hard_requirements_missing, [])
+
     def test_essential_business_slogan_is_not_mandatory(self):
         clause = "Our mission is essential to the communities we serve."
         c = description_requirement_clauses(clause)[0]
