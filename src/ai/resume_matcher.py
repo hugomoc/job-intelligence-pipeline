@@ -682,6 +682,8 @@ CRITICAL_REQUIREMENT_CONTEXT_PATTERNS = (
     r"\bcore to\b",
     r"\breal users?\b",
     r"\bdepend on\b",
+    r"\bmanage(?:s|d)?\b",
+    r"\boptimiz(?:e|es|ed|ing|ation)\b",
 )
 
 OPTIONAL_REQUIREMENT_CONTEXT_PATTERNS = (
@@ -845,6 +847,11 @@ def capability_is_central_to_job(
             resume_profile,
         )
     ):
+        return True
+
+    # A verified unsatisfied mandatory clause is central even if it appears
+    # only once; otherwise an optional cloud-variant preference can mask it.
+    if capability_mandatory_mentions(description, signal, resume_profile):
         return True
 
     if description_mentions >= 3:
