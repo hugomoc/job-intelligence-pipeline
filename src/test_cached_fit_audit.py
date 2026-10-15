@@ -58,6 +58,36 @@ class CachedFitAuditTests(unittest.TestCase):
         values.update(updates)
         return values
 
+    def test_replay_corrects_john_burns_cached_82_review(self):
+        """Previously scored jobs can be corrected without a second AI call."""
+        row = self.row(
+            title="Data Engineer",
+            company_name="John Burns Research and Consulting",
+            description=(
+                "<h2>What You Do</h2><p>"
+                + "Build SQL Server data pipelines and implement governed dbt "
+                  "models for reporting and metrics. " * 12
+                + "</p><h2>What You Bring</h2>"
+                "<p>3+ years in data engineering or analytics engineering, "
+                "including at least 2 years building production dbt projects.</p>"
+            ),
+            overall_score=82,
+            recommendation="review",
+            profile_json=make_profile(
+                production_skills=["SQL Server", "Python", "Snowflake", "LookML"],
+                project_skills=["dbt Core data platform demo"],
+                tools_platforms=["dbt"],
+            ).model_dump_json(),
+        )
+        new_match = replay(row)
+        self.assertEqual(new_match.overall_score, 49)
+        self.assertEqual(new_match.recommendation, "skip")
+        self.assertTrue(should_downgrade(row, new_match))
+        self.assertTrue(any(
+            "2+ years of professional dbt" in gap
+            for gap in new_match.analysis.hard_requirements_missing
+        ))
+
     def test_replay_downgrades_mandatory_cloud_platform_tenure(self):
         row = self.row()
         result = replay(row)
