@@ -432,6 +432,8 @@ def central_specialization_gaps(description: str, title: str, profile: ResumePro
     clauses = description_requirement_clauses(description)
     output = []
     for label, pattern, resume_pattern in CENTRAL_SPECIALIZATIONS:
+        if label == "enterprise production AI/LLM analytics" and not explicit_production_ai_requirements(description):
+            continue
         if re.search(resume_pattern, production if label == "enterprise production AI/LLM analytics" else evidence, re.I):
             continue
         matches = [row for row in clauses if not row["optional"] and re.search(pattern, row["clause"], re.I)]
