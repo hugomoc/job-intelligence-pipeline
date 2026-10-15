@@ -482,6 +482,22 @@ class SharedRequirementPolicyTests(unittest.TestCase):
         self.assertEqual(match.overall_score, 49)
         self.assertEqual(normalize_job_eligibility(proposed([]), p, j).decision, "exclude")
 
+    def test_real_production_ai_experience_satisfies_both_gates(self):
+        p = profile(
+            ai_ml_experience=[
+                "Owned production RAG pipelines and deployed agentic LLM "
+                "systems serving real users."
+            ],
+        )
+        j = job(
+            "<h2>Required Qualifications</h2>"
+            "<p>Hands-on experience deploying production RAG and agentic AI systems.</p>"
+        )
+        self.assertEqual(
+            normalize_job_eligibility(proposed([]), p, j).decision, "eligible"
+        )
+        self.assertEqual(score(p, j, []).recommendation, "apply")
+
     def test_ai_requirement_must_be_in_same_mandatory_clause(self):
         p = profile()
         j = job(
