@@ -144,6 +144,47 @@ class SharedRequirementPolicyTests(unittest.TestCase):
         self.assertIn("sql_server", direct["clauses"][0]["resume_evidence"])
         self.assertIn("mysql", direct["clauses"][0]["resume_evidence"])
 
+    def test_modmed_cloud_preference_does_not_make_databricks_optional(self):
+        j = job(
+            "<h2>What You'll Do</h2>"
+            "<p>Manage and optimize our Databricks environment.</p>"
+            "<h2>What You Bring</h2>"
+            "<p>Fluency in SQL, dbt, and ideally Python.</p>"
+            "<p>Experience working with Databricks (on AWS preferred).</p>",
+            "Senior Data Analytics Engineer",
+        )
+        clause = next(
+            row for row in description_requirement_clauses(j["description"])
+            if "Experience working with Databricks" in row["clause"]
+        )
+        self.assertEqual(clause["section"], "required")
+        self.assertTrue(clause["mandatory"])
+        self.assertFalse(clause["optional"])
+        self.assertTrue(
+            validate_hard_gap_clause("Experience with Databricks", j["description"], profile())["keep_hard_gap"]
+        )
+        match = score(profile(), j, [])
+        self.assertEqual(match.overall_score, 49)
+        self.assertEqual(match.recommendation, "skip")
+        self.assertTrue(
+            any("Databricks" in gap for gap in match.analysis.hard_requirements_missing)
+        )
+        self.assertEqual(normalize_job_eligibility(proposed([]), profile(), j).decision, "exclude")
+
+    def test_databricks_preferred_itself_stays_optional(self):
+        j = job("<h2>What You Bring</h2><p>Experience with Databricks (preferred).</p>")
+        clause = next(
+            row for row in description_requirement_clauses(j["description"])
+            if "Experience with Databricks" in row["clause"]
+        )
+        self.assertEqual(clause["section"], "required")
+        self.assertTrue(clause["optional"])
+        self.assertFalse(clause["mandatory"])
+        self.assertFalse(
+            validate_hard_gap_clause("Experience with Databricks", j["description"], profile())["keep_hard_gap"]
+        )
+        self.assertEqual(score(profile(), j, []).overall_score, 85)
+
     def test_preferred_databricks_stays_optional_across_both_gates(self):
         j = job("<h2>Preferred qualifications</h2><p>Experience with Databricks</p>")
         clauses = description_requirement_clauses(j["description"])

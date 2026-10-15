@@ -494,6 +494,28 @@ def test_open_equivalent_cloud_platform_accepts_gcp() -> None:
     ) == []
 
 
+def test_databricks_operational_ownership_is_central_without_explicit_required_label() -> None:
+    profile = make_profile(
+        databases_warehouses=["Snowflake"],
+        production_skills=["Snowflake", "SQL"],
+    )
+    description = " ".join(
+        [
+            "Responsibilities: Manage and optimize our Databricks environment.",
+            "Develop production Databricks notebooks and data pipelines.",
+            "Provide reliable SQL analytics reporting for stakeholders.",
+        ]
+        * 8
+    )
+    match = scored_match(profile, "Senior Analytics Engineer", description)
+
+    assert match.recommendation == "review"
+    assert match.overall_score == 74
+    assert any(
+        "Databricks" in risk for risk in match.analysis.risk_factors
+    )
+
+
 def test_databricks_preferred_only_is_not_a_major_gap() -> None:
     profile = make_profile(
         databases_warehouses=[
