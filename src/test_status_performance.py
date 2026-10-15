@@ -305,6 +305,38 @@ class RepositoryTests(unittest.TestCase):
                 self.assert_fresh(state)
         with_temp_review_database(scenario)
 
+    def test_workday_different_tenants_never_inherit_status(self):
+        from src.verified_posting_identity import verified_posting_key_from_url
+        def scenario():
+            seed_resume_profile()
+            urls = (
+                "https://alpha.wd1.myworkdayjobs.com/en-US/careers/job/US/Data-Engineer_REQ123",
+                "https://beta.wd2.myworkdayjobs.com/en-US/careers/job/US/Data-Engineer_REQ123",
+            )
+            for i, (company, url) in enumerate(zip(("Alpha Corp", "Beta Corp"), urls)):
+                record = ("alpha", "beta")[i]
+                seed_review_job(record, "Senior Data Engineer", source=("linkedin", "lensa")[i],
+                                description=DESC, apply_url=url)
+                seed_verified_attempt(record, verified_posting_key_from_url(url),
+                                      source=("linkedin", "lensa")[i], description=DESC)
+                with database.get_connection() as connection:
+                    connection.execute(
+                        "UPDATE raw_jobs SET company_name=? WHERE record_key=?",
+                        [company, record],
+                    )
+                    connection.execute(
+                        "UPDATE job_enrichment_attempts SET official_job_url=? WHERE record_key=?",
+                        [url, record],
+                    )
+            assert verified_posting_key_from_url(urls[0]) == verified_posting_key_from_url(urls[1])
+            repo.update_application_status("alpha", "removed")
+            rows = repo.load_all_jobs("resume-1", for_session_snapshot=True)
+            by_id = {j["record_key"]: j for j in rows}
+            self.assertEqual(by_id["alpha"]["application_status"], "removed")
+            self.assertEqual(by_id["beta"]["application_status"], "new")
+            self.assertEqual(len(repo.prepare_job_display(rows)), 2)
+        with_temp_review_database(scenario)
+
     def test_latest_explicit_status_selects_one_card_without_rewriting_other_history(self):
         def scenario():
             self.seed_cross_source_opening()
