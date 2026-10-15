@@ -1,7 +1,8 @@
 """Audit cached AI scores against current deterministic policy without AI calls.
 
 Default is read-only. --apply backs up the entire local DuckDB database before
-updating only records that downgrade or retain a more cautious recommendation.
+downgrading only confirmed NEW hard-requirement misses to SKIP. Replayed score
+drift or REVIEW-only changes are never persisted automatically.
 Stop Streamlit/other database users before --apply.
 """
 from __future__ import annotations
@@ -83,11 +84,37 @@ def should_downgrade(row: dict[str, Any], match: ResumeJobMatch) -> bool:
         return False
     if PRIORITY[match.recommendation] > PRIORITY[row["recommendation"]]:
         return False
-    # Avoid rewriting harmless one-point differences in cached AI weights.
-    # Prefer changes in recommendation or a meaningful scoring downgrade.
+    # Only newly confirmed deterministic HARD requirements are eligible for
+    # automatic corrections. Risk-only REVIEW changes and numeric drift stay
+    # read-only: replaying normalized AI scores cannot prove a new assessment.
+    if row["recommendation"] == "skip" or match.recommendation != "skip":
+        return False
+    existing = {
+        gap.strip().casefold()
+        for gap in decode_list(row["hard_requirements_missing"])
+    }
+    confirmed_new = [
+        gap for gap in match.analysis.hard_requirements_missing
+        if gap.startswith("Major gap: ")
+        and gap.strip().casefold() not in existing
+    ]
+    return bool(confirmed_new)
+
+
+def needs_manual_review(row: dict[str, Any], match: ResumeJobMatch) -> bool:
+    """Surface large/risk-only changes without ever writing them to DuckDB."""
+    if not (
+        row["prompt_version"] == MATCHER_PROMPT_VERSION
+        and row["description_complete"]
+        and row["description_is_current"]
+        and match.description_complete
+    ):
+        return False
+    if should_downgrade(row, match):
+        return False
     return (
-        row["overall_score"] - match.overall_score >= 5
-        or PRIORITY[match.recommendation] < PRIORITY[row["recommendation"]]
+        PRIORITY[match.recommendation] < PRIORITY[row["recommendation"]]
+        or row["overall_score"] - match.overall_score >= 10
     )
 
 
@@ -158,7 +185,7 @@ def update_one(connection: duckdb.DuckDBPyConnection, row: dict[str, Any], match
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--apply", action="store_true", help="Back up DB then persist downgrades")
+    parser.add_argument("--apply", action="store_true", help="Back up DB then apply only newly confirmed hard-gap SKIP corrections")
     parser.add_argument("--limit", type=int, default=None, help="Maximum cached rows to inspect")
     parser.add_argument("--database", type=Path, default=DATABASE_PATH)
     arguments = parser.parse_args()
@@ -173,12 +200,15 @@ def main() -> None:
         rows = read_rows(connection, arguments.limit)
 
     proposed = []
+    manual_review = []
     failures = []
     for row in rows:
         try:
             match = replay(row)
             if should_downgrade(row, match):
                 proposed.append((row, match))
+            elif needs_manual_review(row, match):
+                manual_review.append((row, match))
         except Exception as error:
             failures.append((row.get("record_key"), str(error)))
 
@@ -191,7 +221,16 @@ def main() -> None:
             f"{match.overall_score}% {match.recommendation}; "
             f"hard gaps: {gaps or 'none'}"
         )
-    print(f"Candidates for deterministic downgrade: {len(proposed)}")
+    print(f"Confirmed new hard-gap downgrades (eligible for --apply): {len(proposed)}")
+    print(f"Other material/recommendation changes (REVIEW ONLY): {len(manual_review)}")
+    for row, match in manual_review[:20]:
+        print(
+            f"  REVIEW ONLY: {row['company_name']} | {row['title']}: "
+            f"{row['overall_score']}% {row['recommendation']} -> "
+            f"{match.overall_score}% {match.recommendation}"
+        )
+    if len(manual_review) > 20:
+        print(f"  ...and {len(manual_review) - 20} more")
     print(f"Replay errors: {len(failures)}")
     for key, error in failures[:5]:
         print(f"  {key}: {error}")
@@ -199,7 +238,7 @@ def main() -> None:
         raise SystemExit("No changes: audit errors must be resolved before applying.")
 
     if not arguments.apply:
-        print("READ ONLY — no scores changed. Use --apply only after reviewing output.")
+        print("READ ONLY — no scores changed. Review hard gaps before considering --apply.")
         return
     if not proposed:
         print("No downgrades to apply.")
