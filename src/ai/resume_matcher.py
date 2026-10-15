@@ -851,7 +851,9 @@ def capability_is_central_to_job(
 
     # A verified unsatisfied mandatory clause is central even if it appears
     # only once; otherwise an optional cloud-variant preference can mask it.
-    if capability_mandatory_mentions(description, signal, resume_profile):
+    if description_mentions and capability_mandatory_mentions(
+        description, signal, resume_profile
+    ):
         return True
 
     if description_mentions >= 3:
