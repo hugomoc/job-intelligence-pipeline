@@ -125,6 +125,7 @@ class EnrichmentProcessingResult:
     identity_validation: JobIdentityValidation | None
     official_resolution: OfficialJobResolutionResult | None
     updated: bool
+    pending_description: JobDescriptionResult | None = None
 
 
 @dataclass(frozen=True)
@@ -901,21 +902,7 @@ def reuse_verified_description(
     official_url = str(candidate.get("official_job_url") or "")
     now = datetime.now(timezone.utc)
 
-    with get_connection() as connection:
-        connection.execute(
-            """
-            UPDATE raw_jobs
-            SET
-                description = ?,
-                description_updated_at = CURRENT_TIMESTAMP
-            WHERE record_key = ?
-            """,
-            [
-                description,
-                job["record_key"],
-            ],
-        )
-
+    # Only update raw_jobs after the identity guard accepts the same transaction.
     job["description"] = description
     job["description_updated_at"] = now
     job["current_word_count"] = word_count
@@ -992,6 +979,7 @@ def reuse_verified_description(
         error_message=None,
         identity_validation=validation,
         official_resolution=official_resolution,
+        description_update=result,
     )
 
 
@@ -1565,6 +1553,7 @@ def process_enrichment_batch(
             processed = process_enrichment_job(
                 job=job,
                 client=client,
+                defer_description_write=True,
                 **options,
             )
         except Exception as error:
@@ -1592,9 +1581,6 @@ def process_enrichment_batch(
                 f"reason={official.official_url_validation_reason}"
             )
 
-        if processed.updated:
-            updated_count += 1
-
         try:
             save_enrichment_attempt(
                 job=job,
@@ -1603,6 +1589,7 @@ def process_enrichment_batch(
                 error_message=stored_error,
                 identity_validation=identity_validation,
                 official_resolution=processed.official_resolution,
+                description_update=processed.pending_description,
             )
         except Exception as error:
             # The identity guard and atomic save retain the prior attempt.
@@ -1617,6 +1604,8 @@ def process_enrichment_batch(
                 f"[record_key={job.get('record_key')}]: {type(error).__name__}: {error}"
             )
         else:
+            if processed.updated:
+                updated_count += 1
             totals[stored_status] = totals.get(stored_status, 0) + 1
             log(
                 f"Status: {stored_status}; "
@@ -1855,6 +1844,7 @@ def save_enrichment_attempt(
     error_message: str | None = None,
     identity_validation: JobIdentityValidation | None = None,
     official_resolution: OfficialJobResolutionResult | None = None,
+    description_update: JobDescriptionResult | None = None,
 ) -> None:
     identity_validation = _validate_official_identity_for_save(
         job, result, identity_validation, official_resolution,
@@ -1916,151 +1906,171 @@ def save_enrichment_attempt(
     reused_description = bool(job.get("reused_description"))
 
     with get_connection() as connection:
-        connection.execute(
-            """
-            INSERT OR REPLACE INTO job_enrichment_attempts (
-                record_key,
-                source,
-                requested_url,
-                final_url,
-                status,
-                http_status,
-                extraction_method,
-                description_word_count,
-                error_message,
-                resolved_candidate_title,
-                resolved_candidate_company,
-                resolved_candidate_location,
-                identity_confidence,
-                title_similarity,
-                company_similarity,
-                identity_validation_reason,
-                official_job_url,
-                official_url_status,
-                official_url_source,
-                official_url_resolved_at,
-                official_url_confidence,
-                official_url_validation_reason,
-                official_resolved_title,
-                official_resolved_company,
-                official_resolved_location,
-                verified_posting_key,
-                verified_posting_key_source,
-                verified_posting_key_verified_at,
-                verified_posting_key_confidence,
-                verified_posting_key_trust,
-                description_hash,
-                description_source,
-                posting_status,
-                matched_prior_record_key,
-                matched_prior_source,
-                reused_description,
-                attempt_count,
-                last_attempted_at
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO job_enrichment_attempts (
+                    record_key,
+                    source,
+                    requested_url,
+                    final_url,
+                    status,
+                    http_status,
+                    extraction_method,
+                    description_word_count,
+                    error_message,
+                    resolved_candidate_title,
+                    resolved_candidate_company,
+                    resolved_candidate_location,
+                    identity_confidence,
+                    title_similarity,
+                    company_similarity,
+                    identity_validation_reason,
+                    official_job_url,
+                    official_url_status,
+                    official_url_source,
+                    official_url_resolved_at,
+                    official_url_confidence,
+                    official_url_validation_reason,
+                    official_resolved_title,
+                    official_resolved_company,
+                    official_resolved_location,
+                    verified_posting_key,
+                    verified_posting_key_source,
+                    verified_posting_key_verified_at,
+                    verified_posting_key_confidence,
+                    verified_posting_key_trust,
+                    description_hash,
+                    description_source,
+                    posting_status,
+                    matched_prior_record_key,
+                    matched_prior_source,
+                    reused_description,
+                    attempt_count,
+                    last_attempted_at
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
+                    ?,
+                    CURRENT_TIMESTAMP
+                )
+                """,
+                [
+                    job["record_key"],
+                    job["source"],
+                    result.requested_url,
+                    result.final_url,
+                    final_status,
+                    result.http_status,
+                    result.extraction_method,
+                    result.word_count,
+                    final_error,
+                    result.resolved_title,
+                    result.resolved_company,
+                    result.resolved_location,
+                    (
+                        identity_validation.confidence
+                        if identity_validation
+                        else None
+                    ),
+                    (
+                        identity_validation.title_similarity
+                        if identity_validation
+                        else None
+                    ),
+                    (
+                        identity_validation.company_similarity
+                        if identity_validation
+                        else None
+                    ),
+                    (
+                        identity_validation.reason
+                        if identity_validation
+                        else None
+                    ),
+                    (
+                        official_resolution.official_job_url
+                        if official_resolution
+                        else None
+                    ),
+                    (
+                        official_resolution.status
+                        if official_resolution
+                        else None
+                    ),
+                    (
+                        official_resolution.official_url_source
+                        if official_resolution
+                        else None
+                    ),
+                    (
+                        official_resolution.official_url_resolved_at
+                        if official_resolution
+                        else None
+                    ),
+                    (
+                        official_resolution.official_url_confidence
+                        if official_resolution
+                        else None
+                    ),
+                    (
+                        official_resolution.official_url_validation_reason
+                        if official_resolution
+                        else None
+                    ),
+                    (
+                        official_resolution.resolved_title
+                        if official_resolution
+                        else None
+                    ),
+                    (
+                        official_resolution.resolved_company
+                        if official_resolution
+                        else None
+                    ),
+                    (
+                        official_resolution.resolved_location
+                        if official_resolution
+                        else None
+                    ),
+                    verified_posting_key,
+                    verified_posting_key_source,
+                    verified_posting_key_verified_at,
+                    verified_posting_key_confidence,
+                    verified_posting_key_trust,
+                    stored_description_hash,
+                    description_source,
+                    posting_status,
+                    job.get("matched_prior_record_key"),
+                    job.get("matched_prior_source"),
+                    reused_description,
+                    previous_attempt_count + 1,
+                ],
             )
-            VALUES (
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?,
-                CURRENT_TIMESTAMP
-            )
-            """,
-            [
-                job["record_key"],
-                job["source"],
-                result.requested_url,
-                result.final_url,
-                final_status,
-                result.http_status,
-                result.extraction_method,
-                result.word_count,
-                final_error,
-                result.resolved_title,
-                result.resolved_company,
-                result.resolved_location,
-                (
-                    identity_validation.confidence
-                    if identity_validation
-                    else None
-                ),
-                (
-                    identity_validation.title_similarity
-                    if identity_validation
-                    else None
-                ),
-                (
-                    identity_validation.company_similarity
-                    if identity_validation
-                    else None
-                ),
-                (
-                    identity_validation.reason
-                    if identity_validation
-                    else None
-                ),
-                (
-                    official_resolution.official_job_url
-                    if official_resolution
-                    else None
-                ),
-                (
-                    official_resolution.status
-                    if official_resolution
-                    else None
-                ),
-                (
-                    official_resolution.official_url_source
-                    if official_resolution
-                    else None
-                ),
-                (
-                    official_resolution.official_url_resolved_at
-                    if official_resolution
-                    else None
-                ),
-                (
-                    official_resolution.official_url_confidence
-                    if official_resolution
-                    else None
-                ),
-                (
-                    official_resolution.official_url_validation_reason
-                    if official_resolution
-                    else None
-                ),
-                (
-                    official_resolution.resolved_title
-                    if official_resolution
-                    else None
-                ),
-                (
-                    official_resolution.resolved_company
-                    if official_resolution
-                    else None
-                ),
-                (
-                    official_resolution.resolved_location
-                    if official_resolution
-                    else None
-                ),
-                verified_posting_key,
-                verified_posting_key_source,
-                verified_posting_key_verified_at,
-                verified_posting_key_confidence,
-                verified_posting_key_trust,
-                stored_description_hash,
-                description_source,
-                posting_status,
-                job.get("matched_prior_record_key"),
-                job.get("matched_prior_source"),
-                reused_description,
-                previous_attempt_count + 1,
-            ],
-        )
+
+            if description_update is not None:
+                changed = connection.execute(
+                    """
+                    UPDATE raw_jobs SET
+                        description = ?,
+                        description_updated_at = CURRENT_TIMESTAMP
+                    WHERE record_key = ?
+                    RETURNING record_key
+                    """,
+                    [description_update.description, job["record_key"]],
+                ).fetchall()
+                if len(changed) != 1:
+                    raise ValueError("Cannot persist description for missing record")
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
 
 
 def description_update_is_improvement(
@@ -2273,6 +2283,7 @@ def fetch_verified_official_description(
     )
     validation = None
     updated = False
+    pending_description = None
     if trusted:
         result = fetch_candidate_description(
             OfficialJobCandidate(url=url, label="", source="verified_official_direct"),
@@ -2303,6 +2314,12 @@ def fetch_verified_official_description(
                         job["reused_description"] = False
                     else:
                         status, error = "not_improved", "existing description retained"
+                else:
+                    updated = True
+                    pending_description = result
+                    job["description_hash"] = description_hash(result.description)
+                    job["description_source"] = "verified_official_direct"
+                    job["reused_description"] = False
         else:
             status, error = result.status, result.error_message
     else:
@@ -2323,13 +2340,16 @@ def fetch_verified_official_description(
     )
     return EnrichmentProcessingResult(result=result, stored_status=status,
         stored_error=error, identity_validation=validation,
-        official_resolution=resolution, updated=updated)
+        official_resolution=resolution, updated=updated,
+        pending_description=pending_description)
 
 
 def process_enrichment_job(
     job: dict[str, Any],
     client,
     search_circuit=None,
+    *,
+    defer_description_write: bool = False,
 ) -> EnrichmentProcessingResult:
     """Fetch/validate a description, falling back to official pages if needed."""
     needs_description = bool(
@@ -2343,7 +2363,9 @@ def process_enrichment_job(
         needs_description = False
     if (needs_description and official_status_value(job) == OFFICIAL_FOUND_VERIFIED
             and description_state(job) != "FULL_JD"):
-        return fetch_verified_official_description(job, client)
+        return fetch_verified_official_description(
+            job, client, persist=not defer_description_write
+        )
     if needs_description:
         source_result = fetch_job_description(
             url=job["apply_url"],
@@ -2358,6 +2380,17 @@ def process_enrichment_job(
     stored_error = result.error_message
     identity_validation: JobIdentityValidation | None = None
     official_resolution: OfficialJobResolutionResult | None = None
+    pending_description: JobDescriptionResult | None = None
+
+    def apply_or_stage(candidate: JobDescriptionResult) -> bool:
+        nonlocal pending_description
+        if defer_description_write:
+            if not description_update_is_improvement(job, candidate):
+                return False
+            if pending_description is None or candidate.word_count > pending_description.word_count:
+                pending_description = candidate
+            return True
+        return update_job_description(job, candidate)
 
     if needs_description and result.status == "enriched":
         identity_validation = validate_enrichment_identity(
@@ -2372,10 +2405,7 @@ def process_enrichment_job(
                 f"{identity_validation.reason}"
             )
         else:
-            updated = update_job_description(
-                job=job,
-                result=result,
-            )
+            updated = apply_or_stage(result)
 
             if not updated:
                 stored_status = "not_improved"
@@ -2396,10 +2426,7 @@ def process_enrichment_job(
         identity_validation = official_resolution.identity_validation
         stored_status = result.status
         stored_error = result.error_message
-        updated = update_job_description(
-            job=job,
-            result=result,
-        )
+        updated = apply_or_stage(result)
 
         if not updated:
             stored_status = "not_improved"
@@ -2430,10 +2457,7 @@ def process_enrichment_job(
             identity_validation = official_resolution.identity_validation
             stored_status = result.status
             stored_error = result.error_message
-            updated = update_job_description(
-                job=job,
-                result=result,
-            )
+            updated = apply_or_stage(result)
 
             if not updated:
                 stored_status = "not_improved"
@@ -2449,6 +2473,7 @@ def process_enrichment_job(
         identity_validation=identity_validation,
         official_resolution=official_resolution,
         updated=updated,
+        pending_description=pending_description,
     )
 
 
