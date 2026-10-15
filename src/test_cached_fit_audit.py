@@ -74,6 +74,10 @@ class CachedFitAuditTests(unittest.TestCase):
         self.assertFalse(should_downgrade({**row, "description_is_current": False}, lowered))
         self.assertFalse(should_downgrade({**row, "prompt_version": "v1"}, lowered))
         self.assertFalse(should_downgrade({**row, "description_complete": False}, lowered))
+        self.assertFalse(should_downgrade(
+            self.row(overall_score=93, recommendation="apply"),
+            SimpleNamespace(overall_score=92, recommendation="apply", description_complete=True),
+        ))
 
     def test_json_list_decode_is_safe(self):
         self.assertEqual(decode_list(None), [])
