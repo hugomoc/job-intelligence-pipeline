@@ -432,6 +432,63 @@ class SharedRequirementPolicyTests(unittest.TestCase):
         self.assertEqual(normalize_job_eligibility(proposed(["Microsoft Fabric"]), profile(), j).decision, "exclude")
         self.assertEqual(score(profile(), j, ["Microsoft Fabric"]).overall_score, 49)
 
+    def test_piedmont_preferred_domain_and_degree_are_not_experience_gaps(self):
+        p = profile(industries=["e-commerce"])
+        j = job(
+            "<h2>Requirements</h2>"
+            "<p>1 year of analysis work including Data Visualization and or Data Modeling, "
+            "preferably in a multi-entity healthcare provider environment.</p>"
+            "<p>Bachelor's Degree in Business, Finance, Accounting, "
+            "Information Technology, or closely-related field Required.</p>",
+            "BI Developer",
+        )
+        gaps = ["Experience in a multi-entity healthcare provider environment",
+                "Major gap: ledger or accounting data-domain expertise"]
+        for gap in gaps:
+            with self.subTest(gap=gap):
+                self.assertFalse(validate_hard_gap_clause(
+                    gap, j["description"], p)["keep_hard_gap"])
+        self.assertEqual(score(p, j, gaps).analysis.hard_requirements_missing, [])
+
+    def test_construction_accounting_and_healthcare_required_still_hard(self):
+        p = profile(industries=["e-commerce"])
+        for gap, clause in (
+            ("Experience in a healthcare setting", "Experience in a healthcare setting."),
+            ("Major gap: ledger or accounting data-domain expertise",
+             "Working knowledge of construction financial reporting: "
+             "percentage-of-completion accounting, work-in-progress schedules, "
+             "over and under billings, backlog and margin fade."),
+        ):
+            with self.subTest(gap=gap):
+                j = job("<h2>Requirements</h2><p>" + clause + "</p>")
+                self.assertTrue(validate_hard_gap_clause(
+                    gap, j["description"], p)["keep_hard_gap"])
+                self.assertEqual(score(p, j, [gap]).recommendation, "skip")
+
+    def test_generic_bi_years_cannot_prove_tableau_tenure(self):
+        p = profile(tools_platforms=["Looker", "LookML"])
+        j = job("<h2>Requirements</h2>"
+                "<p>8+ years of business intelligence development experience.</p>"
+                "<p>Build Tableau dashboards and provide reporting solutions.</p>",
+                "Senior Business Intelligence Developer")
+        gap = ("Major gap: 8+ years of professional Tableau experience "
+               "(not demonstrated in professional experience)")
+        self.assertEqual(required_platform_tenure_gaps(j["description"], p), ([], []))
+        self.assertFalse(validate_hard_gap_clause(
+            gap, j["description"], p)["keep_hard_gap"])
+        self.assertNotIn(gap, score(p, j, [gap]).analysis.hard_requirements_missing)
+
+    def test_explicit_dbt_cloud_tenure_still_requires_production(self):
+        p = profile(production_skills=["SQL", "Python"],
+                    project_skills=["Portfolio dbt Core models"])
+        j = job("<h2>Requirements</h2>"
+                "<p>3+ years of hands-on experience using DBT Cloud.</p>")
+        gap = ("Major gap: 3+ years of professional dbt Cloud experience "
+               "(not demonstrated in professional experience)")
+        self.assertTrue(validate_hard_gap_clause(
+            gap, j["description"], p)["keep_hard_gap"])
+        self.assertEqual(score(p, j, [gap]).recommendation, "skip")
+
     def test_essential_business_slogan_is_not_mandatory(self):
         clause = "Our mission is essential to the communities we serve."
         c = description_requirement_clauses(clause)[0]
