@@ -93,6 +93,30 @@ def description_requirement_clauses(description: str) -> list[dict[str, Any]]:
     return clauses
 
 
+# The AI hard-gap check requires a named AI capability and ownership terms
+# in one mandatory JD clause. Generic references to agents/tools do not count.
+AI_REQUIRED_TECH = re.compile(
+    r"\b(?:rag|retrieval[\s-]+augmented[\s-]+generation|agentic"
+    r"|llms?|large[\s-]+language[\s-]+models?|ai[\s-]+agents?"
+    r"|ai[\s-]+tool[\s-]+integrations?|model[\s-]+context[\s-]+protocol)\b",
+    re.I,
+)
+AI_DELIVERY = re.compile(
+    r"\b(?:production|deploy\w*|build\w*|built|develop\w*|design\w*"
+    r"|implement\w*|operat\w*|own\w*|integrat\w*|hands?[\s-]?on)\b",
+    re.I,
+)
+
+
+def explicit_production_ai_requirements(description: str) -> list[dict[str, Any]]:
+    return [
+        row for row in description_requirement_clauses(description)
+        if row["mandatory"] and not row["optional"]
+        and AI_REQUIRED_TECH.search(row["clause"])
+        and AI_DELIVERY.search(row["clause"])
+    ]
+
+
 # Only explicit, single-platform professional-tenure minimums are enforceable.
 # Generic years of data engineering and open platform alternatives are left to
 # their own rules. A tool mentioned in a portfolio is not professional tenure.
