@@ -108,13 +108,80 @@ AI_DELIVERY = re.compile(
 )
 
 
+# A required mention of LLMs, coding agents or AI-consumed metrics is NOT a
+# requirement to own/deploy a production RAG or agent system. Alternatives that
+# permit building a conventional semantic layer also cannot enforce RAG alone.
+AI_OWNED_SYSTEM = re.compile(
+    r"\b(?:rag|retrieval[\s-]+augmented[\s-]+generation|agentic"
+    r"(?:\s+(?:ai|workflows?|systems?))?|ai[\s-]+agents?"
+    r"|ai[\s-]+tool[\s-]+integrations?)\b", re.I
+)
+AI_OWNERSHIP = re.compile(
+    r"\b(?:production|deploy\w*|operat\w*|own\w*|build\w*|built"
+    r"|develop\w*|design\w*|implement\w*)\b", re.I
+)
+NON_AI_ALTERNATIVE = re.compile(
+    r"\bor\b.{0,95}\b(?:semantic|metrics?|reporting|analytics)\b"
+    r"|\b(?:semantic|metrics?|reporting|analytics)\b.{0,95}\bor\b", re.I
+)
+
+
 def explicit_production_ai_requirements(description: str) -> list[dict[str, Any]]:
     return [
         row for row in description_requirement_clauses(description)
         if row["mandatory"] and not row["optional"]
-        and AI_REQUIRED_TECH.search(row["clause"])
-        and AI_DELIVERY.search(row["clause"])
+        and AI_OWNED_SYSTEM.search(row["clause"])
+        and AI_OWNERSHIP.search(row["clause"])
+        and not NON_AI_ALTERNATIVE.search(row["clause"])
+        and not re.search(r"\b(?:comfortable using|familiar with|exposure to)\b", row["clause"], re.I)
     ]
+
+
+def explicit_production_platform_clauses(
+    description: str, platform: str,
+) -> list[dict[str, Any]]:
+    """Require an actual platform production skill, not lists or mere familiarity."""
+    platform_pattern = r"\bdatabricks\b" if platform == "Databricks" else r"\b(?:machine[\s-]+learning|mlops|ml[\s-]+models?)\b"
+    matching = []
+    for row in description_requirement_clauses(description):
+        clause = row["clause"]
+        if not row["mandatory"] or row["optional"] or not re.search(platform_pattern, clause, re.I):
+            continue
+        if platform == "Databricks":
+            if re.search(r"\b(?:understanding|familiarity|knowledge|exposure)\b", clause, re.I) and not re.search(
+                r"\b(?:hands[\s-]?on|production|build\w*|develop\w*|operat\w*|deploy\w*|deep experience)\b", clause, re.I
+            ):
+                continue
+            if re.search(r"\bor\b|\band/or\b|\bequivalent\b|\bcomparable\b", clause, re.I):
+                continue
+            # A group of example platforms is not a requirement to know every
+            # vendor. E.g. BECU: (Fabric, Azure Databricks, BigQuery, Snowflake).
+            if re.search(r"\b(?:platforms?|technologies?|components?|services?)\b.{0,45}\(", clause, re.I) and len(
+                re.findall(r"\b(?:databricks|snowflake|big\s*query|bigquery|fabric|redshift)\b", clause, re.I)
+            ) > 1:
+                continue
+            if re.search(r"\bincluding\b", clause, re.I) and re.search(
+                r"\b(?:platforms?|technologies?|components?|services?)\b", clause, re.I
+            ):
+                continue
+            if not re.search(
+                r"\b(?:production|hands[\s-]?on|deep experience|expert\w*"
+                r"|build\w*|built|develop\w*|design\w*|operat\w*|deploy\w*|maintain\w*)\b",
+                clause, re.I,
+            ):
+                continue
+        else:
+            # Owning deployed models is distinct from ML concepts, data
+            # preparation, support for data scientists or model familiarity.
+            if not re.search(r"\b(?:deploy\w*|production|mlops)\b", clause, re.I):
+                continue
+            if re.search(r"\b(?:familiarity|basic|support|assist|collaborat\w*|facilitat\w*)\b", clause, re.I) and not re.search(
+                r"\b(?:hands[\s-]?on|owned?|responsib\w*|deploy(?:ing|ed)?\s+(?:ml|machine[\s-]+learning|models?))\b",
+                clause, re.I,
+            ):
+                continue
+        matching.append(row)
+    return matching
 
 
 # Only explicit, single-platform professional-tenure minimums are enforceable.
@@ -240,6 +307,11 @@ def required_platform_tenure_gaps(
         *profile.data_engineering_capabilities,
         *profile.bi_analytics_skills,
     ]
+    # Undated skill inventories cannot PROVE tenure, but an inventory mention
+    # without a matching project-only claim warrants REVIEW, not a false SKIP.
+    # A named portfolio technology (e.g. John Burns/dbt) is still project-only.
+    undated_tools = [*profile.tools_platforms, *profile.databases_warehouses]
+    project_text = " ".join(str(x) for x in profile.project_skills)
 
     for row in description_requirement_clauses(description):
         if not row["mandatory"] or row["optional"]:
@@ -269,7 +341,11 @@ def required_platform_tenure_gaps(
         if demonstrated_years and max(demonstrated_years) >= required_years:
             continue
 
-        if exact_production or any(
+        inventory_hint = (
+            any(re.search(pattern, str(tool), re.I) for tool in undated_tools)
+            and not re.search(pattern, project_text, re.I)
+        )
+        if exact_production or inventory_hint or any(
             re.search(pattern, str(item), re.I)
             and not project_only.search(str(item))
             for item in ambiguous_professional
@@ -329,6 +405,45 @@ def validate_hard_gap_clause(gap: str, description: str, profile: ResumeProfile)
             ),
             "clauses": checked,
             "matched_clauses": clauses,
+        }
+    if "Databricks production" in gap:
+        clauses = explicit_production_platform_clauses(description, "Databricks")
+        from src.ai.resume_matcher import profile_fields_to_text
+        professional = profile_fields_to_text(profile, (
+            "production_skills", "professional_summary", "data_engineering_capabilities",
+        ))
+        demonstrated = bool(re.search(r"\bdatabricks\b", professional, re.I))
+        checked = [dict(row, satisfied=demonstrated,
+                        allowed_groups=[], resume_evidence=["professional Databricks"] if demonstrated else [])
+                   for row in clauses]
+        return {
+            "gap": gap, "keep_hard_gap": bool(clauses) and not demonstrated,
+            "reason": ("mandatory Databricks production clause unsatisfied"
+                       if clauses and not demonstrated else
+                       "allowed clause satisfied" if clauses else
+                       "no explicit mandatory Databricks production requirement"),
+            "clauses": checked, "matched_clauses": clauses,
+        }
+    if gap == "production machine-learning model deployment":
+        clauses = explicit_production_platform_clauses(description, "ML deployment")
+        from src.ai.resume_matcher import production_resume_text
+        professional = production_resume_text(profile)
+        demonstrated = bool(re.search(
+            r"\b(?:deployed?|production|mlops)\b.{0,75}"
+            r"\b(?:machine[\s-]+learning|ml[\s-]+models?|model[\s-]+deployment)\b"
+            r"|\b(?:machine[\s-]+learning|ml[\s-]+models?|model[\s-]+deployment)\b.{0,75}"
+            r"\b(?:deployed?|production|mlops)\b", professional, re.I,
+        ))
+        checked = [dict(row, satisfied=demonstrated, allowed_groups=[],
+                        resume_evidence=["production ML deployment"] if demonstrated else [])
+                   for row in clauses]
+        return {
+            "gap": gap, "keep_hard_gap": bool(clauses) and not demonstrated,
+            "reason": ("mandatory production ML deployment unsatisfied"
+                       if clauses and not demonstrated else
+                       "allowed clause satisfied" if clauses else
+                       "no explicit mandatory production ML deployment requirement"),
+            "clauses": checked, "matched_clauses": clauses,
         }
     groups = clause_groups(gap)
     terms = significant_terms(gap) - {"production", "expert", "required", "missing", "demonstrated", "major", "gap"}
@@ -507,6 +622,8 @@ def central_specialization_gaps(description: str, title: str, profile: ResumePro
             # cannot rescue an incorrectly claimed missing Java/Python or vendor.
             check = validate_hard_gap_clause(label, "Requirements\n" + row["clause"], profile)
             if check["reason"] == "allowed clause satisfied":
+                continue
+            if label == "Databricks production platform" and not check["keep_hard_gap"]:
                 continue
             if check["reason"].startswith("vendor examples"):
                 continue
