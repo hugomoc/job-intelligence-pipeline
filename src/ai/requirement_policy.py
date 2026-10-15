@@ -354,8 +354,18 @@ def required_platform_tenure_gaps(
         if demonstrated_years and max(demonstrated_years) >= required_years:
             continue
 
+        # A tool inventory alone cannot establish *building production
+        # projects* with the named platform. This is a stronger, explicit
+        # delivery requirement than generic technology familiarity. Do not
+        # soften it to REVIEW just because an undated tool was listed.
+        production_project_ownership = bool(re.search(
+            r"\b(?:build\w*|built|develop\w*|deliver\w*|own\w*)\b"
+            r".{0,80}\bproduction\b.{0,100}\bprojects?\b",
+            row["clause"], re.I,
+        ))
         inventory_hint = (
-            any(re.search(evidence_pattern, str(tool), re.I) for tool in undated_tools)
+            not production_project_ownership
+            and any(re.search(evidence_pattern, str(tool), re.I) for tool in undated_tools)
             and not re.search(evidence_pattern, project_text, re.I)
         )
         if exact_production or inventory_hint or any(
