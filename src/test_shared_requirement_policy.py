@@ -145,6 +145,111 @@ class SharedRequirementPolicyTests(unittest.TestCase):
         self.assertIn("sql_server", direct["clauses"][0]["resume_evidence"])
         self.assertIn("mysql", direct["clauses"][0]["resume_evidence"])
 
+    def test_john_burns_explicit_production_dbt_minimum(self):
+        """Unrelated data-engineering OR must not waive a separate dbt minimum."""
+        candidate = profile(
+            production_skills=["SQL Server", "Snowflake", "Python", "LookML"],
+            project_skills=["dbt Core portfolio transformation models"],
+            tools_platforms=["dbt", "Airflow", "Snowflake"],
+        )
+        posting = job(
+            "<h2>What You'll Do</h2>"
+            "<p>Build and maintain dbt models across staging, intermediate, "
+            "and mart layers. Migrate T-SQL views into tested dbt models.</p>"
+            "<h2>What You Bring</h2>"
+            "<p>3+ years in data engineering or analytics engineering, "
+            "including at least 2 years building production dbt projects.</p>"
+            "<p>Strong SQL and dimensional modeling experience.</p>"
+            "<h2>Nice to have</h2>"
+            "<p>Azure data services and SQL Server.</p>",
+            "Data Engineer",
+        )
+        clauses = description_requirement_clauses(posting["description"])
+        self.assertTrue(any(
+            x["mandatory"] and "2 years building production dbt" in x["clause"]
+            for x in clauses
+        ))
+        missing, uncertainties = required_platform_tenure_gaps(
+            posting["description"], candidate,
+        )
+        self.assertEqual(len(missing), 1, (missing, uncertainties))
+        self.assertIn("2+ years of professional dbt experience", missing[0])
+        self.assertEqual(uncertainties, [])
+        scored = score(candidate, posting, [])
+        self.assertEqual(scored.overall_score, 49)
+        self.assertEqual(scored.recommendation, "skip")
+        self.assertTrue(any("2+ years of professional dbt" in x
+                            for x in scored.analysis.hard_requirements_missing))
+        screened = normalize_job_eligibility(proposed([]), candidate, posting)
+        self.assertEqual(screened.decision, "exclude")
+        self.assertTrue(any("2+ years of professional dbt" in x
+                            for x in screened.critical_skill_gaps))
+
+    def test_nearby_years_do_not_become_platform_tenure(self):
+        candidate = profile(
+            production_skills=["SQL", "Python"],
+            project_skills=["dbt portfolio project"],
+        )
+        for clause in (
+            "3+ years in data engineering or analytics engineering, "
+            "including some exposure to dbt projects.",
+            "3+ years of data engineering, including experience with dbt.",
+        ):
+            posting = job(
+                "<h2>What You Bring</h2><p>" + clause + "</p>"
+            )
+            self.assertEqual(
+                required_platform_tenure_gaps(posting["description"], candidate),
+                ([], []),
+            )
+
+    def test_local_tool_alternatives_are_not_individually_mandatory(self):
+        candidate = profile(production_skills=["Python", "SQL"])
+        for clause in (
+            "2+ years of production dbt or equivalent transformation technology.",
+            "3+ years working with dbt or Airflow.",
+            "3+ years of experience in Snowflake or BigQuery.",
+        ):
+            posting = job("<h2>Required Qualifications</h2><p>" + clause + "</p>")
+            self.assertEqual(
+                required_platform_tenure_gaps(posting["description"], candidate),
+                ([], []),
+            )
+
+    def test_dated_production_dbt_meets_local_requirement(self):
+        candidate = profile(
+            production_skills=["2+ years building production dbt Core models"],
+            project_skills=[],
+        )
+        posting = job(
+            "<h2>What You Bring</h2>"
+            "<p>3+ years in data engineering or analytics engineering, "
+            "including at least 2 years building production dbt projects.</p>"
+        )
+        self.assertEqual(
+            required_platform_tenure_gaps(posting["description"], candidate),
+            ([], []),
+        )
+        self.assertEqual(score(candidate, posting, []).recommendation, "apply")
+        self.assertEqual(
+            normalize_job_eligibility(proposed([]), candidate, posting).decision,
+            "eligible",
+        )
+
+    def test_undated_professional_dbt_is_review_not_assumed_two_years(self):
+        candidate = profile(production_skills=["Production dbt Core models"])
+        posting = job(
+            "<h2>What You Bring</h2>"
+            "<p>3+ years in data engineering or analytics engineering, "
+            "including at least 2 years building production dbt projects.</p>"
+        )
+        missing, unknown = required_platform_tenure_gaps(
+            posting["description"], candidate,
+        )
+        self.assertEqual(missing, [])
+        self.assertEqual(len(unknown), 1)
+        self.assertEqual(score(candidate, posting, []).recommendation, "review")
+
     def test_metlife_dbt_cloud_is_mandatory_professional_tenure(self):
         p = profile(
             project_skills=["dbt Core", "dbt transformations"],
@@ -215,9 +320,10 @@ class SharedRequirementPolicyTests(unittest.TestCase):
             "<p>3+ years of hands-on experience using dbt Cloud.</p>"
         )
         missing, uncertain = required_platform_tenure_gaps(j["description"], p)
-        self.assertEqual(missing, [])
-        self.assertTrue(uncertain)
-        self.assertEqual(score(p, j, []).recommendation, "review")
+        self.assertEqual(len(missing), 1)
+        self.assertIn("dbt Cloud", missing[0])
+        self.assertEqual(uncertain, [])
+        self.assertEqual(score(p, j, []).recommendation, "skip")
 
     def test_modmed_cloud_preference_does_not_make_databricks_optional(self):
         j = job(
