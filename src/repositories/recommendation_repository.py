@@ -470,6 +470,13 @@ def register_exact_posting_identity_function(connection) -> None:
         pass
     try:
         connection.create_function(
+            "verified_identity_scope", verified_identity_scope,
+            [str, str], str, null_handling="special",
+        )
+    except Exception:
+        pass
+    try:
+        connection.create_function(
             "exact_posting_identity",
             exact_posting_identity,
             [str, str, str, str],
@@ -891,6 +898,33 @@ def normalize_duplicate_text(value: Any) -> str:
     ).strip()
 
 
+def verified_identity_scope(key: str | None, official_url: str | None) -> str:
+    """Scope legacy Workday keys to their exact employer tenant hostname.
+
+    Saved key formats remain unchanged. This prevents unrelated tenants with
+    identical requisition IDs from sharing statuses, scores or display cards.
+    """
+    key = str(key or "").strip()
+    if not key:
+        return ""
+    if not key.startswith("workday:"):
+        return key
+    try:
+        parsed = urlsplit(str(official_url or ""))
+        host = (parsed.hostname or "").casefold().rstrip(".")
+    except (TypeError, ValueError):
+        host = ""
+    # No reliable tenant: fail closed rather than pooling all Workday jobs.
+    if not host or not (
+        host == "myworkdayjobs.com"
+        or host.endswith(".myworkdayjobs.com")
+        or host.endswith(".myworkdaysite.com")
+        or host.endswith(".workdayjobs.com")
+    ):
+        return ""
+    return key + "|tenant:" + host
+
+
 def trusted_display_posting_key(job: dict[str, Any]) -> str | None:
     """Use existing persisted trust and exact official URL proof for display.
 
@@ -904,7 +938,7 @@ def trusted_display_posting_key(job: dict[str, Any]) -> str | None:
         key = _trusted_snapshot_key(job)
         if (key and trusted_key(job) == key
                 and is_specific_job_posting_url(job.get("official_job_url"))):
-            return key
+            return verified_identity_scope(key, job.get("official_job_url")) or None
     except (TypeError, ValueError):
         # Historical malformed URLs remain separate diagnostic source cards.
         pass
@@ -1534,13 +1568,17 @@ def load_all_jobs(
 
             verified_application_status AS (
                 SELECT
-                    attempts.verified_posting_key,
+                    verified_identity_scope(
+                        attempts.verified_posting_key, attempts.official_job_url
+                    ) AS verified_posting_scope,
                     status.status,
                     status_jobs.source AS status_source,
                     status.record_key AS status_record_key,
                     status.updated_at AS status_updated_at,
                     row_number() over (
-                        partition by attempts.verified_posting_key
+                        partition by verified_identity_scope(
+                            attempts.verified_posting_key, attempts.official_job_url
+                        )
                         order by
                             status.updated_at desc nulls last,
                             status.record_key
@@ -1679,7 +1717,9 @@ def load_all_jobs(
 
             verified_scores AS (
                 SELECT
-                    attempts.verified_posting_key,
+                    verified_identity_scope(
+                        attempts.verified_posting_key, attempts.official_job_url
+                    ) AS verified_posting_scope,
                     attempts.description_hash,
                     scores.overall_score AS ai_score,
                     scores.recommendation,
@@ -1702,7 +1742,9 @@ def load_all_jobs(
                     scores.scored_at AS ai_scored_at,
                     row_number() over (
                         partition by
-                            attempts.verified_posting_key,
+                            verified_identity_scope(
+                                attempts.verified_posting_key, attempts.official_job_url
+                            ),
                             attempts.description_hash
                         order by
                             scores.scored_at desc nulls last,
@@ -2021,8 +2063,10 @@ def load_all_jobs(
                    enrichment_attempts.canonical_job_key
                AND enrichment_attempts.enrichment_rank = 1
             LEFT JOIN verified_application_status AS verified_status
-                ON enrichment_attempts.verified_posting_key =
-                   verified_status.verified_posting_key
+                ON verified_identity_scope(
+                    enrichment_attempts.verified_posting_key,
+                    enrichment_attempts.official_job_url
+                   ) = verified_status.verified_posting_scope
                AND verified_status.status_rank = 1
                AND lower(
                    coalesce(
@@ -2037,8 +2081,10 @@ def load_all_jobs(
                    )
                ) IN ({trusted_verified_key_sources}) AND posting_key_can_be_trusted(enrichment_attempts.verified_posting_key) AND NOT posting_url_is_third_party(enrichment_attempts.official_job_url)
             LEFT JOIN verified_scores
-                ON enrichment_attempts.verified_posting_key =
-                   verified_scores.verified_posting_key
+                ON verified_identity_scope(
+                    enrichment_attempts.verified_posting_key,
+                    enrichment_attempts.official_job_url
+                   ) = verified_scores.verified_posting_scope
                AND enrichment_attempts.description_hash =
                    verified_scores.description_hash
                AND verified_scores.score_rank = 1
@@ -2364,7 +2410,7 @@ def _trusted_snapshot_key(job: dict[str, Any]) -> str | None:
             and str(job.get("verified_posting_key_source") or "").lower() in TRUSTED_VERIFIED_KEY_SOURCES
             and posting_key_can_be_trusted(key)
             and not is_third_party_url(job.get("official_job_url"))):
-        return key
+        return verified_identity_scope(key, job.get("official_job_url")) or None
     return None
 
 
@@ -2401,7 +2447,9 @@ def _status_snapshot_overlays(connection, jobs, exact_key, changed_record_keys):
         LEFT JOIN job_enrichment_attempts AS attempts ON attempts.record_key = status.record_key
         WHERE exact_posting_identity(raw.source, raw.source_job_id, raw.apply_url, raw.record_key)
                 IN (SELECT unnest(?))
-           OR attempts.verified_posting_key IN (SELECT unnest(?))
+           OR verified_identity_scope(
+                attempts.verified_posting_key, attempts.official_job_url
+              ) IN (SELECT unnest(?))
         ORDER BY status.updated_at DESC NULLS LAST, status.record_key
         """, [list(exact_keys), list(current_keys)],
     )
@@ -2551,8 +2599,13 @@ def load_candidate_jobs(
                        scored_attempts.record_key
                 INNER JOIN job_enrichment_attempts
                     AS current_attempts
-                    ON scored_attempts.verified_posting_key =
-                       current_attempts.verified_posting_key
+                    ON verified_identity_scope(
+                        scored_attempts.verified_posting_key,
+                        scored_attempts.official_job_url
+                       ) = verified_identity_scope(
+                        current_attempts.verified_posting_key,
+                        current_attempts.official_job_url
+                       )
                    AND scored_attempts.description_hash =
                        current_attempts.description_hash
                 INNER JOIN jobs AS current_jobs
