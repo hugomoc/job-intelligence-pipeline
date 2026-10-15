@@ -465,6 +465,30 @@ class SharedRequirementPolicyTests(unittest.TestCase):
                     gap, j["description"], p)["keep_hard_gap"])
                 self.assertEqual(score(p, j, [gap]).recommendation, "skip")
 
+    def test_generic_bi_years_cannot_prove_tableau_tenure(self):
+        p = profile(tools_platforms=["Looker", "LookML"])
+        j = job("<h2>Requirements</h2>"
+                "<p>8+ years of business intelligence development experience.</p>"
+                "<p>Build Tableau dashboards and provide reporting solutions.</p>",
+                "Senior Business Intelligence Developer")
+        gap = ("Major gap: 8+ years of professional Tableau experience "
+               "(not demonstrated in professional experience)")
+        self.assertEqual(required_platform_tenure_gaps(j["description"], p), ([], []))
+        self.assertFalse(validate_hard_gap_clause(
+            gap, j["description"], p)["keep_hard_gap"])
+        self.assertNotIn(gap, score(p, j, [gap]).analysis.hard_requirements_missing)
+
+    def test_explicit_dbt_cloud_tenure_still_requires_production(self):
+        p = profile(production_skills=["SQL", "Python"],
+                    project_skills=["Portfolio dbt Core models"])
+        j = job("<h2>Requirements</h2>"
+                "<p>3+ years of hands-on experience using DBT Cloud.</p>")
+        gap = ("Major gap: 3+ years of professional dbt Cloud experience "
+               "(not demonstrated in professional experience)")
+        self.assertTrue(validate_hard_gap_clause(
+            gap, j["description"], p)["keep_hard_gap"])
+        self.assertEqual(score(p, j, [gap]).recommendation, "skip")
+
     def test_essential_business_slogan_is_not_mandatory(self):
         clause = "Our mission is essential to the communities we serve."
         c = description_requirement_clauses(clause)[0]
