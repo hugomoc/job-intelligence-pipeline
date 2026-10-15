@@ -114,7 +114,7 @@ AI_DELIVERY = re.compile(
 AI_OWNED_SYSTEM = re.compile(
     r"\b(?:rag|retrieval[\s-]+augmented[\s-]+generation|agentic"
     r"(?:\s+(?:ai|workflows?|systems?))?|ai[\s-]+agents?"
-    r"|ai[\s-]+tool[\s-]+integrations?)\b", re.I
+    r"|llm(?:[\s-]+based)?[\s-]+agents?|ai[\s-]+tool[\s-]+integrations?)\b", re.I
 )
 AI_OWNERSHIP = re.compile(
     r"\b(?:production|deploy\w*|operat\w*|own\w*|build\w*|built"
