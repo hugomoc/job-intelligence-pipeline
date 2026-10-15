@@ -517,6 +517,29 @@ def validate_hard_gap_clause(gap: str, description: str, profile: ResumeProfile)
         mandatory_personal = [row for row in relevant if row["mandatory"]]
         keep = personal["state"] == "DOES_NOT_MEET" and bool(mandatory_personal)
         return {"gap": gap, "keep_hard_gap": keep, "reason": "mandatory personal condition explicitly unmet" if keep else "personal eligibility UNKNOWN; needs confirmation" if personal["state"] == "UNKNOWN" else "personal condition satisfied" if personal["state"] == "MEETS" else "mandatory status not established", "personal_evidence": personal, "clauses": [dict(row, satisfied=personal["state"] == "MEETS", allowed_groups=[], resume_evidence=[personal["evidence"]]) for row in mandatory_personal], "matched_clauses": relevant}
+    # A preferred domain after an otherwise mandatory experience minimum is
+    # not itself mandatory (Piedmont: "... preferably in healthcare").
+    # A list of acceptable bachelor's fields also does not require working
+    # professionally in every listed field.
+    scoped = []
+    terms = significant_terms(gap)
+    for row in matches:
+        clause = row["clause"]
+        preferred = re.search(r"\\bpreferably\\b", clause, re.I)
+        if preferred and len(terms & significant_terms(clause[preferred.end():])) >= 2:
+            continue
+        if re.search(r"\\b(?:ledger|accounting)\\b", gap, re.I):
+            academic = re.search(r"\\b(?:bachelor|master|associate|degree)\\b", clause, re.I)
+            practice = re.search(
+                r"\\b(?:ledger|bookkeeping|reconciliation|financial reporting|"
+                r"financial close|month.end close|work.in.progress|"
+                r"percentage.of.completion|accounting (?:experience|systems?|processes?|expertise))\\b",
+                clause, re.I,
+            )
+            if academic and not practice:
+                continue
+        scoped.append(row)
+    matches = scoped
     mandatory = [row for row in matches if row["mandatory"]]
     evidence = profile_to_text(profile, include_certifications=False)
     decisions = []
