@@ -68,9 +68,9 @@ class CachedFitAuditTests(unittest.TestCase):
 
     def test_no_upgrade_and_no_stale_overwrite(self):
         row = self.row(overall_score=49, recommendation="skip")
-        upgraded = SimpleNamespace(overall_score=85, recommendation="apply")
+        upgraded = SimpleNamespace(overall_score=85, recommendation="apply", description_complete=True)
         self.assertFalse(should_downgrade(row, upgraded))
-        lowered = SimpleNamespace(overall_score=40, recommendation="skip")
+        lowered = SimpleNamespace(overall_score=40, recommendation="skip", description_complete=True)
         self.assertFalse(should_downgrade({**row, "description_is_current": False}, lowered))
         self.assertFalse(should_downgrade({**row, "prompt_version": "v1"}, lowered))
         self.assertFalse(should_downgrade({**row, "description_complete": False}, lowered))
