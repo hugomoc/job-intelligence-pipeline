@@ -8,6 +8,7 @@ from src.ai.job_eligibility import JobEligibilityAnalysis, normalize_job_eligibi
 from src.ai.requirement_policy import (
     central_specialization_gaps,
     description_requirement_clauses,
+    explicit_production_ai_requirements,
     personal_requirement_evidence,
     validate_hard_gap_clause,
     required_platform_tenure_gaps,
@@ -573,6 +574,155 @@ class SharedRequirementPolicyTests(unittest.TestCase):
         self.assertFalse(validate_hard_gap_clause(gap, j["description"], p)["keep_hard_gap"])
         self.assertEqual(score(p, j, []).recommendation, "apply")
         self.assertEqual(normalize_job_eligibility(proposed([gap]), p, j).decision, "eligible")
+
+    def test_audit_ai_alternatives_and_tool_usage_do_not_require_production_rag(self):
+        """The Oct 15 audit incorrectly rejected four employers (five rows)."""
+        p = profile(
+            production_skills=["SQL", "Python", "LookML semantic layer models"],
+            bi_analytics_skills=["Looker semantic models and governed metrics"],
+            project_skills=["AI-assisted personal analytics demo"],
+        )
+        clauses = {
+            "ElevenLabs / UMAI": (
+                "Experience serving data to LLM-based agents or building "
+                "semantic / metrics layers consumed by AI tools."
+            ),
+            "Owner.com": (
+                "Experience building a semantic layer, or data infrastructure "
+                "for AI/ML and LLM retrieval (RAG, feature stores, dataset compliance)"
+            ),
+            "WorkOS": (
+                "Comfortable using LLMs and coding agents as part of your "
+                "day-to-day development workflow, with the judgment to "
+                "validate their output and scale it into shared processes, "
+                "and embracing AI and automation to scale platform work "
+                "and accelerate your teammates"
+            ),
+        }
+        gap = "production RAG, agentic workflows, and AI tool integrations"
+        for company, clause in clauses.items():
+            with self.subTest(company=company):
+                j = job("<h2>Required Qualifications</h2><p>" + clause + "</p>")
+                self.assertEqual(explicit_production_ai_requirements(j["description"]), [])
+                self.assertFalse(
+                    validate_hard_gap_clause(gap, j["description"], p)["keep_hard_gap"]
+                )
+                self.assertGreater(score(p, j, []).overall_score, 49)
+                self.assertEqual(
+                    normalize_job_eligibility(proposed([gap]), p, j).decision,
+                    "eligible",
+                )
+
+    def test_audit_databricks_lists_optional_and_knowledge_are_not_production_requirements(self):
+        """Incidental platform references must not become hard production gaps."""
+        p = profile(
+            production_skills=["SQL", "Python", "Snowflake", "Spark"],
+            tools_platforms=["Spark", "dbt"],
+        )
+        cases = {
+            "ScolerTec": (
+                "<h2>Requirements</h2>"
+                "<p>Senior BI Architect – Databricks, AWS & Self-Service Analytics</p>"
+                "<p>Exposure to Databricks and/or AWS analytics platforms preferred.</p>"
+            ),
+            "BECU": (
+                "<h2>Requirements</h2>"
+                "<p>Demonstrated experience using Modern data platforms "
+                "( Microsoft Fabric, Azure Databricks, Big Query, Snowflake).</p>"
+            ),
+            "Centene": (
+                "<p>Enhanced understanding of cloud analytics components "
+                "including AWS, Databricks, Data Mesh, Delta Lake, and Data "
+                "Lakehouse environments required.</p>"
+            ),
+            "Protective Life": (
+                "<h2>Requirements</h2>"
+                "<p>Hands-on experience with Databricks or a comparable "
+                "Spark-based lakehouse, including Delta Lake tables, MERGE, "
+                "and incremental load patterns</p>"
+            ),
+        }
+        for company, clause in cases.items():
+            with self.subTest(company=company):
+                j = job(clause, "Data Engineer")
+                self.assertFalse(validate_hard_gap_clause(
+                    "Databricks production experience", j["description"], p
+                )["keep_hard_gap"])
+                self.assertGreater(score(p, j, []).overall_score, 49)
+                self.assertEqual(
+                    normalize_job_eligibility(
+                        proposed(["Databricks production experience"]), p, j
+                    ).decision,
+                    "eligible",
+                )
+
+    def test_audit_supporting_ml_is_not_owning_production_model_deployment(self):
+        p = profile(ai_ml_experience=["Machine Learning Models"])
+        j = job(
+            "<h2>Required Qualifications</h2>"
+            "<p>Familiarity with basic machine learning concepts, data "
+            "preparation techniques, and model evaluation processes.</p>"
+            "<h2>Responsibilities</h2>"
+            "<p>Work alongside data scientists and engineers to facilitate "
+            "data access and support ML model deployment and maintenance.</p>"
+        )
+        gap = "production machine-learning model deployment"
+        self.assertFalse(
+            validate_hard_gap_clause(gap, j["description"], p)["keep_hard_gap"]
+        )
+        self.assertGreater(score(p, j, []).overall_score, 49)
+        self.assertEqual(
+            normalize_job_eligibility(proposed([gap]), p, j).decision, "eligible"
+        )
+
+    def test_explicit_production_ml_deployment_and_databricks_still_exclude(self):
+        p = profile(production_skills=["SQL", "Python"],
+                    tools_platforms=["dbt", "Spark"])
+        cases = [
+            ("production machine-learning model deployment",
+             "Hands-on experience deploying machine learning models to production."),
+            ("Databricks production experience",
+             "Deep experience building production pipelines in Databricks required."),
+        ]
+        for gap, clause in cases:
+            with self.subTest(gap=gap):
+                j = job("<h2>Required Qualifications</h2><p>" + clause + "</p>")
+                self.assertTrue(
+                    validate_hard_gap_clause(gap, j["description"], p)["keep_hard_gap"]
+                )
+                self.assertEqual(score(p, j, []).recommendation, "skip")
+                self.assertEqual(
+                    normalize_job_eligibility(proposed([gap]), p, j).decision,
+                    "exclude",
+                )
+
+    def test_undated_nonproject_platform_inventory_is_review_not_false_skip(self):
+        for tool, clause in (
+            ("Looker", "3+ years of professional Looker development experience."),
+            ("Apache Spark", "2+ years building production Apache Spark pipelines."),
+        ):
+            with self.subTest(tool=tool):
+                p = profile(
+                    production_skills=["SQL", "Python"],
+                    tools_platforms=[tool],
+                    project_skills=["dbt Core portfolio models"],
+                )
+                j = job("<h2>Required Qualifications</h2><p>" + clause + "</p>")
+                missing, uncertain = required_platform_tenure_gaps(
+                    j["description"], p
+                )
+                self.assertEqual(missing, [])
+                self.assertEqual(len(uncertain), 1)
+                self.assertEqual(score(p, j, []).recommendation, "review")
+        # An explicitly project-only platform still cannot satisfy tenure.
+        p = profile(production_skills=["SQL"], tools_platforms=["dbt"],
+                    project_skills=["Personal dbt portfolio"])
+        j = job("<h2>Requirements</h2>"
+                "<p>2+ years building production dbt projects.</p>")
+        missing, uncertain = required_platform_tenure_gaps(j["description"], p)
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(uncertain, [])
+        self.assertEqual(score(p, j, []).recommendation, "skip")
 
     def test_required_ai_production_ownership_remains_a_hard_gap(self):
         p = profile(project_skills=["Personal AI chatbot using RAG and agentic workflows"])
