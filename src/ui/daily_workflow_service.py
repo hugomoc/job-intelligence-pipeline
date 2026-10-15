@@ -75,6 +75,7 @@ class EnrichmentSummary:
     needs_official_resolution: int = 0
     stopped_for_time_budget: bool = False
     elapsed_seconds: float = 0.0
+    persistence_error: int = 0
 
 
 @dataclass(frozen=True)
@@ -275,6 +276,7 @@ def run_description_enrichment(
             blocked=batch_summary.totals["blocked"],
             no_description=batch_summary.totals["no_description"],
             fetch_error=batch_summary.totals["fetch_error"],
+            persistence_error=batch_summary.totals.get("persistence_error", 0),
             invalid_url=batch_summary.totals["invalid_url"],
             not_improved=batch_summary.totals["not_improved"],
             rule_matches_refreshed=rule_matches_refreshed,
@@ -346,6 +348,7 @@ def run_unscored_job_backlog(
                 f"Pages blocked: {enrichment_summary.blocked}",
                 f"No description found: {enrichment_summary.no_description}",
                 f"Fetch errors: {enrichment_summary.fetch_error}",
+                f"Persistence errors: {enrichment_summary.persistence_error}",
                 f"Not improved: {enrichment_summary.not_improved}",
                 "",
             )
