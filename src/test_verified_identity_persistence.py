@@ -248,6 +248,67 @@ class VerifiedIdentityPersistenceTests(unittest.TestCase):
             official_resolution=resolution or verified_resolution(), updated=False,
         )
 
+    def test_batch_rejected_verified_identity_never_changes_raw_description(self):
+        enrichment.save_enrichment_attempt(posting(), fetched(),
+                                           official_resolution=verified_resolution())
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE raw_jobs SET description='original trusted description', "
+                "description_updated_at=TIMESTAMPTZ '2026-01-01 00:00:00+00' "
+                "WHERE record_key='optro'"
+            )
+            before_raw = connection.execute(
+                "SELECT description, description_updated_at FROM raw_jobs "
+                "WHERE record_key='optro'"
+            ).fetchone()
+        before_attempt = self.saved()
+        malicious = replace(verified_resolution(),
+            official_job_url="https://maximus.avature.net/careers/FolderDetail?folderId=43413",
+            official_url_source="search")
+        proposed = replace(fetched(), description="Unverified replacement description " * 25,
+                           word_count=75)
+        processed = enrichment.EnrichmentProcessingResult(
+            result=proposed, stored_status="enriched", stored_error=None,
+            identity_validation=None, official_resolution=malicious,
+            updated=True, pending_description=proposed,
+        )
+        with patch.object(enrichment, "process_enrichment_job", return_value=processed):
+            summary = enrichment.process_enrichment_batch([posting()], client=object())
+        with database.get_connection() as connection:
+            after_raw = connection.execute(
+                "SELECT description, description_updated_at FROM raw_jobs "
+                "WHERE record_key='optro'"
+            ).fetchone()
+        self.assertEqual(after_raw, before_raw)
+        self.assertEqual(self.saved(), before_attempt)
+        self.assertEqual(summary.descriptions_updated, 0)
+        self.assertEqual(summary.persistence_error, 1)
+
+    def test_db_constraint_rolls_back_attempt_and_pending_description(self):
+        enrichment.save_enrichment_attempt(posting(), fetched(),
+                                           official_resolution=verified_resolution())
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE raw_jobs SET description='valid description' WHERE record_key='optro'"
+            )
+            before_raw = connection.execute(
+                "SELECT description, description_updated_at FROM raw_jobs "
+                "WHERE record_key='optro'"
+            ).fetchone()
+        before_attempt = self.saved()
+        invalid = dict(posting(), source=None)
+        with self.assertRaises(duckdb.ConstraintException):
+            enrichment.save_enrichment_attempt(
+                invalid, fetched(), official_resolution=verified_resolution(),
+                description_update=fetched(),
+            )
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT description, description_updated_at FROM raw_jobs "
+                "WHERE record_key='optro'"
+            ).fetchone(), before_raw)
+        self.assertEqual(self.saved(), before_attempt)
+
     def test_batch_guard_rejection_retains_attempt_and_saves_following_job(self):
         enrichment.save_enrichment_attempt(posting(), fetched(), official_resolution=verified_resolution())
         before = self.saved()
