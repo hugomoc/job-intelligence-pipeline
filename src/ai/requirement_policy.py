@@ -138,80 +138,141 @@ TENURE_PLATFORMS: tuple[tuple[str, str], ...] = (
     ("Looker", r"\blooker\b(?!\s+studio)"),
 )
 TECHNOLOGY_YEARS = re.compile(r"\b(\d{1,2})\s*\+?\s*(?:years?|yrs?)\b", re.I)
+# Keep each year's minimum tied to its own capability, not to an earlier
+# unrelated minimum. For example, "3 years data engineering or analytics
+# engineering, including 2 years building production dbt projects" requires
+# TWO years of dbt, regardless of the unrelated "or" in the first phrase.
+TENURE_ALTERNATIVE = re.compile(
+    r"\b(?:or|equivalent|comparable|similar|such as|for example)\b|\be\.g\.", re.I
+)
+TENURE_CONTEXT = re.compile(
+    r"\b(?:experience|hands?[\s-]?on|using|working|build\w*|develop\w*"
+    r"|maintain\w*|operat\w*|production|implement\w*|in|with|on|of)\b",
+    re.I,
+)
+GENERAL_EXPERIENCE_CONTEXT = re.compile(
+    r"\b(?:data|analytics|software|database|platform)\s+engineering\b"
+    r"|\bdata\s+(?:engineer|analyst|scientist)\b", re.I
+)
+
+
+def _platform_tenure_requirement(clause: str) -> tuple[str, str, int] | None:
+    """Match a specific minimum to one platform within the same local phrase.
+
+    Do not assign a generic preceding number to a later incidental tool
+    mention, or treat an unrelated "X or Y" as a dbt alternative.
+    """
+    platforms = [
+        (name, pattern)
+        for name, pattern in TENURE_PLATFORMS
+        if re.search(pattern, clause, re.I)
+    ]
+    # Multiple named platforms in one sentence may be alternatives or
+    # distinct requirements; do not infer hard single-platform tenure.
+    if len(platforms) != 1:
+        return None
+    name, pattern = platforms[0]
+    hits = list(re.finditer(pattern, clause, re.I))
+    if len(hits) != 1:
+        return None
+    hit = hits[0]
+
+    candidates: list[tuple[int, int, int]] = []
+    for years in TECHNOLOGY_YEARS.finditer(clause):
+        if years.end() <= hit.start():
+            between = clause[years.end():hit.start()]
+            distance = len(between)
+            if distance > 95:
+                continue
+            # "5 years data engineering, including dbt" is not 5 years dbt.
+            if re.search(r"\b(?:including|includes|such as|for example)\b", between, re.I):
+                continue
+            if TENURE_ALTERNATIVE.search(between):
+                continue
+            if GENERAL_EXPERIENCE_CONTEXT.search(between):
+                continue
+            if between.strip() and not TENURE_CONTEXT.search(between):
+                continue
+            candidates.append((distance, years.start(), int(years.group(1))))
+        elif hit.end() <= years.start():
+            between = clause[hit.end():years.start()]
+            distance = len(between)
+            if distance > 70 or TENURE_ALTERNATIVE.search(between):
+                continue
+            if between.strip() and not TENURE_CONTEXT.search(between):
+                continue
+            candidates.append((distance, years.start(), int(years.group(1))))
+
+    if not candidates:
+        return None
+    # The CLOSEST numbered minimum governs the named platform.
+    _, pos, required_years = min(candidates)
+    local_requirement = clause[pos:]
+    if TENURE_ALTERNATIVE.search(local_requirement):
+        return None
+    return name, pattern, required_years
 
 
 def required_platform_tenure_gaps(
     description: str,
     profile: ResumeProfile,
 ) -> tuple[list[str], list[str]]:
-    """Return confirmed missing and unverified mandatory professional-tenure claims.
+    """Find explicit mandatory professional platform-tenure gaps.
 
-    Missing exact professional platform evidence is a hard gap. A platform
-    mentioned in ambiguous (or undated production) fields is a REVIEW risk,
-    not proof of the years required. Generic overall experience never counts
-    as years using a particular technology.
+    A general job-tenure requirement is never evidence of tool-specific
+    tenure. Portfolio projects and undated tool inventories do not prove
+    professional experience. Credible but undated production evidence is a
+    REVIEW uncertainty rather than an automatic SKIP.
     """
     missing: list[str] = []
     uncertain: list[str] = []
-    professional = [str(x) for x in profile.production_skills]
-    # A professional summary can confirm evidence but may also mention portfolio
-    # work; without explicit dated experience we treat it as uncertainty.
-    other = [
+    project_only = re.compile(
+        r"\b(?:personal|portfolio|coursework|self[\s-]?study|side[\s-]?project)\b",
+        re.I,
+    )
+    professional = [
+        str(item) for item in profile.production_skills
+        if not project_only.search(str(item))
+    ]
+    # These are possible professional descriptions, but not dated proof.
+    ambiguous_professional = [
         profile.professional_summary,
-        *profile.tools_platforms,
-        *profile.databases_warehouses,
         *profile.data_engineering_capabilities,
         *profile.bi_analytics_skills,
     ]
 
     for row in description_requirement_clauses(description):
-        clause = row["clause"]
         if not row["mandatory"] or row["optional"]:
             continue
-        years = TECHNOLOGY_YEARS.search(clause)
-        if not years or not re.search(
-            r"\b(?:experience|hands?[\s-]?on|using|working)\b", clause, re.I
-        ):
+        requirement = _platform_tenure_requirement(row["clause"])
+        if requirement is None:
             continue
-        # Do not turn interchangeable alternatives into a requirement for
-        # every named technology.
-        if re.search(
-            r"\b(?:or|equivalent|comparable|similar|such as|for example)\b|"
-            r"\be\.g\.", clause, re.I
-        ):
-            continue
-        matches = [
-            (name, pattern)
-            for name, pattern in TENURE_PLATFORMS
-            if re.search(pattern, clause, re.I)
-        ]
-        if len(matches) != 1:
-            continue
-        name, pattern = matches[0]
-        required_years = int(years.group(1))
+        name, pattern, required_years = requirement
         label = f"{required_years}+ years of professional {name} experience"
 
         exact_production = [
             item for item in professional if re.search(pattern, item, re.I)
         ]
-        proven_years: list[int] = []
+        demonstrated_years = []
         for item in exact_production:
             forward = re.search(
                 rf"\b(\d{{1,2}})\s*\+?\s*(?:years?|yrs?)\b.{{0,90}}{pattern}",
-                item, re.I
+                item, re.I,
             )
             backward = re.search(
                 rf"{pattern}.{{0,90}}\b(\d{{1,2}})\s*\+?\s*(?:years?|yrs?)\b",
-                item, re.I
+                item, re.I,
             )
-            for candidate in (forward, backward):
-                if candidate:
-                    proven_years.append(int(candidate.group(1)))
-        if proven_years and max(proven_years) >= required_years:
+            for evidence in (forward, backward):
+                if evidence:
+                    demonstrated_years.append(int(evidence.group(1)))
+        if demonstrated_years and max(demonstrated_years) >= required_years:
             continue
 
         if exact_production or any(
-            re.search(pattern, str(item), re.I) for item in other
+            re.search(pattern, str(item), re.I)
+            and not project_only.search(str(item))
+            for item in ambiguous_professional
         ):
             uncertain.append(
                 f"Required {label} is not verified by dated professional "
@@ -223,7 +284,6 @@ def required_platform_tenure_gaps(
             )
 
     return list(dict.fromkeys(missing)), list(dict.fromkeys(uncertain))
-
 
 def clause_groups(text: str) -> set[str]:
     from src.ai.resume_matcher import contains_phrase
