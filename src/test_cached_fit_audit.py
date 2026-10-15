@@ -87,6 +87,35 @@ class CachedFitAuditTests(unittest.TestCase):
             "2+ years of professional dbt" in gap
             for gap in new_match.analysis.hard_requirements_missing
         ))
+        proof = candidate_evidence(row, new_match)
+        self.assertTrue(proof["all_new_gaps_have_explicit_mandatory_clause"])
+        snippets = proof["gaps"][0]["matching_saved_jd_clauses"]
+        self.assertEqual(len(snippets), 1)
+        self.assertIn("2 years building production dbt", snippets[0]["text"])
+        self.assertTrue(snippets[0]["mandatory"])
+        self.assertEqual(len(approved_candidates(
+            [(row, new_match)], {approval_fingerprint(row, new_match)}
+        )), 1)
+
+    def test_tenure_evidence_rejects_generic_years_and_platform_alternatives(self):
+        row = self.row(description=(
+            "<h2>Required Qualifications</h2>"
+            "<p>3+ years of data engineering, including some dbt exposure.</p>"
+            "<p>2+ years using dbt or equivalent transformation frameworks.</p>"
+        ))
+        proposed = SimpleNamespace(
+            overall_score=49, recommendation="skip",
+            analysis=SimpleNamespace(hard_requirements_missing=[
+                "Major gap: 2+ years of professional dbt experience"
+            ]),
+        )
+        proof = candidate_evidence(row, proposed)
+        self.assertFalse(proof["all_new_gaps_have_explicit_mandatory_clause"])
+        self.assertEqual(proof["gaps"][0]["matching_saved_jd_clauses"], [])
+        with self.assertRaisesRegex(ValueError, "no explicit"):
+            approved_candidates(
+                [(row, proposed)], {approval_fingerprint(row, proposed)}
+            )
 
     def test_replay_downgrades_mandatory_cloud_platform_tenure(self):
         row = self.row()
