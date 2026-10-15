@@ -400,6 +400,24 @@ def clause_groups(text: str) -> set[str]:
 def validate_hard_gap_clause(gap: str, description: str, profile: ResumeProfile) -> dict[str, Any]:
     """Model labels are pointers, never mandatory-status evidence."""
     from src.ai.resume_matcher import significant_terms, CRITICAL_CAPABILITY_SIGNALS, regex_present, profile_to_text, requirement_is_demonstrated, requirement_requires_all, profile_fields_to_text, contains_phrase
+    tenure = re.match(r"^Major gap: (\\d+)\\+ years of professional (.+?) experience\\b", gap, re.I)
+    if tenure:
+        n, name = int(tenure.group(1)), tenure.group(2)
+        if any(name.lower() == x.lower() for x, _ in TENURE_PLATFORMS):
+            missing, uncertain = required_platform_tenure_gaps(description, profile)
+            label = f"{n}+ years of professional {name} experience"
+            keep = any(x.startswith("Major gap: " + label) for x in missing)
+            clauses = [x for x in description_requirement_clauses(description)
+                       if (p := _platform_tenure_requirement(x["clause"])) is not None
+                       and p[0].casefold() == name.casefold() and p[2] == n
+                       and x["mandatory"] and not x["optional"]]
+            return {"gap": gap, "keep_hard_gap": keep,
+                    "reason": ("mandatory platform tenure unsatisfied" if keep else
+                               "platform tenure unverified; review" if any(label in x for x in uncertain)
+                               else "mandatory platform tenure not established"),
+                    "clauses": [dict(x, satisfied=not keep, allowed_groups=[],
+                                     resume_evidence=[]) for x in clauses],
+                    "matched_clauses": clauses}
     if AI_REQUIRED_TECH.search(gap):
         # Model-generated RAG/agentic gaps cannot establish mandatory status.
         # A concrete deployment requirement in the JD itself is required.
