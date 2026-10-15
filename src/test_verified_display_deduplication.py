@@ -64,6 +64,31 @@ class VerifiedDisplayTests(unittest.TestCase):
         self.assertNotEqual(rows[0]['source_job_id'], rows[1]['source_job_id'])
         self.assertEqual(len(prepare_job_display(rows)), 1)
 
+    def test_workday_same_requisition_different_employers_remain_separate(self):
+        first = 'https://alpha.wd1.myworkdayjobs.com/en-US/careers/job/US/Data-Engineer_REQ123'
+        second = 'https://beta.wd2.myworkdayjobs.com/en-US/careers/job/US/Data-Engineer_REQ123'
+        key_first = verified_posting_key_from_url(first)
+        key_second = verified_posting_key_from_url(second)
+        self.assertEqual(key_first, key_second)  # Legacy key is tenant-blind.
+        jobs = [
+            posting('alpha', company_name='Alpha Corp', source='linkedin',
+                    official_job_url=first, verified_posting_key=key_first),
+            posting('beta', company_name='Beta Corp', source='lensa',
+                    official_job_url=second, verified_posting_key=key_second),
+        ]
+        self.assertNotEqual(trusted_display_posting_key(jobs[0]),
+                            trusted_display_posting_key(jobs[1]))
+        self.assertEqual(len(prepare_job_display(jobs)), 2)
+
+    def test_workday_same_tenant_same_requisition_collapses_only_once(self):
+        url = 'https://alpha.wd1.myworkdayjobs.com/en-US/careers/job/US/Data-Engineer_REQ123'
+        key = verified_posting_key_from_url(url)
+        jobs = [
+            posting('a', official_job_url=url, verified_posting_key=key),
+            posting('b', source='lensa', official_job_url=url, verified_posting_key=key),
+        ]
+        self.assertEqual(len(prepare_job_display(jobs)), 1)
+
     def test_different_locations_are_same_verified_opening(self):
         rows = [posting('a', location='Denver, CO (Remote)'),
                 posting('b', source='lensa', location='Austin, TX (Remote)')]
