@@ -1,8 +1,9 @@
 """Audit cached AI scores against current deterministic policy without AI calls.
 
-Default is read-only. --apply backs up the entire local DuckDB database before
-downgrading only confirmed NEW hard-requirement misses to SKIP. Replayed score
-drift or REVIEW-only changes are never persisted automatically.
+Default is read-only. An evidence report exposes exact saved JD clauses for
+manual verification, without exporting whole descriptions or the candidate's
+resume. --apply now requires a reviewed fingerprint allowlist and a backup.
+Score drift and REVIEW-only changes are never persisted automatically.
 Stop Streamlit/other database users before --apply.
 """
 from __future__ import annotations
@@ -25,6 +26,11 @@ from src.ai.resume_matcher import (
 )
 from src.ai.resume_profiler import ResumeProfile
 from src.database import DATABASE_PATH
+from src.fit_gap_evidence import (
+    approved_candidates,
+    approval_tokens,
+    candidate_evidence,
+)
 
 
 COMPONENTS = (
@@ -185,12 +191,26 @@ def update_one(connection: duckdb.DuckDBPyConnection, row: dict[str, Any], match
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--apply", action="store_true", help="Back up DB then apply only newly confirmed hard-gap SKIP corrections")
+    parser.add_argument("--apply", action="store_true", help="Apply only explicitly approved, newly verified SKIP corrections")
+    parser.add_argument(
+        "--approved-file", type=Path,
+        help="Required with --apply; JSON with version=1 and approved_fingerprints",
+    )
+    parser.add_argument(
+        "--evidence-report", type=Path,
+        help="Write only candidate JD clauses and approval fingerprints to a local JSON report",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Maximum cached rows to inspect")
     parser.add_argument("--database", type=Path, default=DATABASE_PATH)
     arguments = parser.parse_args()
     if arguments.limit is not None and arguments.limit < 1:
         parser.error("--limit must be positive")
+    if arguments.apply and arguments.approved_file is None:
+        parser.error("--apply requires --approved-file; never apply every candidate")
+    if arguments.approved_file is not None and not arguments.apply:
+        parser.error("--approved-file only applies together with --apply")
+    if arguments.apply and arguments.limit is not None:
+        parser.error("--limit is disallowed with --apply; review the full audit")
     db = arguments.database.resolve()
     if not db.is_file():
         parser.error(f"Database does not exist: {db}")
@@ -221,7 +241,7 @@ def main() -> None:
             f"{match.overall_score}% {match.recommendation}; "
             f"hard gaps: {gaps or 'none'}"
         )
-    print(f"Confirmed new hard-gap downgrades (eligible for --apply): {len(proposed)}")
+    print(f"New hard-gap SKIP candidates (require JD verification and approval): {len(proposed)}")
     print(f"Other material/recommendation changes (REVIEW ONLY): {len(manual_review)}")
     for row, match in manual_review[:20]:
         print(
@@ -234,12 +254,38 @@ def main() -> None:
     print(f"Replay errors: {len(failures)}")
     for key, error in failures[:5]:
         print(f"  {key}: {error}")
+    if arguments.evidence_report is not None:
+        evidence = {
+            "version": 1,
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "candidate_count": len(proposed),
+            "note": (
+                "These are excerpts from YOUR SAVED JD, not independently "
+                "verified external employer requirements. Review every "
+                "clause before approving any fingerprint."
+            ),
+            "candidates": [candidate_evidence(row, match) for row, match in proposed],
+        }
+        destination = arguments.evidence_report.expanduser().resolve()
+        if destination == db:
+            raise SystemExit("Refusing to overwrite the database with evidence report")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            raise SystemExit("Evidence file already exists; choose a new filename")
+        destination.write_text(json.dumps(evidence, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"Saved read-only JD evidence report: {destination}")
     if failures and arguments.apply:
         raise SystemExit("No changes: audit errors must be resolved before applying.")
 
     if not arguments.apply:
-        print("READ ONLY — no scores changed. Review hard gaps before considering --apply.")
+        print("READ ONLY — no scores changed. Review the evidence before approving corrections.")
         return
+    try:
+        approved = approval_tokens(arguments.approved_file)
+        proposed = approved_candidates(proposed, approved)
+    except ValueError as error:
+        raise SystemExit(f"Refusing database updates: {error}") from error
+    print(f"Explicitly approved, independently selected corrections: {len(proposed)}")
     if not proposed:
         print("No downgrades to apply.")
         return
