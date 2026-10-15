@@ -83,8 +83,10 @@ def should_downgrade(row: dict[str, Any], match: ResumeJobMatch) -> bool:
         return False
     if PRIORITY[match.recommendation] > PRIORITY[row["recommendation"]]:
         return False
+    # Avoid rewriting harmless one-point differences in cached AI weights.
+    # Prefer changes in recommendation or a meaningful scoring downgrade.
     return (
-        match.overall_score < row["overall_score"]
+        row["overall_score"] - match.overall_score >= 5
         or PRIORITY[match.recommendation] < PRIORITY[row["recommendation"]]
     )
 
