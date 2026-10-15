@@ -173,12 +173,11 @@ CRITICAL_CAPABILITY_SIGNALS: tuple[
             r"\brag\b",
             r"\bretrieval augmented generation\b",
             r"\bagentic\b",
-            r"\bagents?\b",
-            r"\bllm\b",
+            r"\bllms?\b",
             r"\blarge language model",
-            r"\bmcp\b",
-            r"\btool integrations?\b",
-            r"\bai systems?\b",
+            r"\bai[\s-]+agents?\b",
+            r"\bai[\s-]+tool[\s-]+integrations?\b",
+            r"\bmodel[\s-]+context[\s-]+protocol\b",
         ),
         production_patterns=(
             r"\bproduction\b.{0,80}\b(rag|agentic|agents?|llm|mcp|ai systems?)\b",
@@ -818,6 +817,10 @@ def capability_mandatory_mentions(
 ) -> int:
     # Mandatory provenance comes from the shared complete-clause policy,
     # including essential/need-to-have wording outside headings.
+    if signal.label.startswith("production RAG,"):
+        # Do not treat nearby headings, support agents, or general AI tools as
+        # mandatory production RAG experience.
+        return len(explicit_production_ai_requirements(job_text))
     decision = validate_hard_gap_clause(signal.label, job_text, resume_profile)
     return sum(not row.get("satisfied", False) for row in decision["clauses"]) if decision["keep_hard_gap"] else 0
 
@@ -828,6 +831,9 @@ def capability_is_central_to_job(
     signal: CriticalCapabilitySignal,
     resume_profile: ResumeProfile,
 ) -> bool:
+    if signal.label.startswith("production RAG,"):
+        return bool(explicit_production_ai_requirements(description))
+
     title = str(job.get("title") or "")
     title_has_signal = regex_present(
         title,
@@ -1319,6 +1325,7 @@ def remove_demonstrated_missing_items(
 
 from src.ai.requirement_policy import (
     description_requirement_clauses, clause_groups, validate_hard_gap_clause,
+    explicit_production_ai_requirements,
     personal_fact_kind, personal_requirement_evidence,
     required_platform_tenure_gaps,
 )
