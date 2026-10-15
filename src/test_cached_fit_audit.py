@@ -14,7 +14,12 @@ class CachedFitAuditTests(unittest.TestCase):
             "title": "Data Analytics Engineer",
             "company_name": "Example Company",
             "description": (
-                "<h2>Required Qualifications</h2>"
+                "<h2>Responsibilities</h2><p>"
+                + (
+                    "Build and maintain reliable production SQL and Python pipelines "
+                    "on AWS and partner with business analysts to deliver governed data models. "
+                ) * 9
+                + "</p><h2>Required Qualifications</h2>"
                 "<p>3+ years of hands-on experience using dbt Cloud.</p>"
             ),
             "location": "Remote",
