@@ -97,6 +97,34 @@ class CachedFitAuditTests(unittest.TestCase):
             [(row, new_match)], {approval_fingerprint(row, new_match)}
         )), 1)
 
+    def test_john_burns_replay_rejects_undated_dbt_tool_inventory(self):
+        """Read-only replay must find the real hard gap even with dbt in tools."""
+        row = self.row(
+            title="Data Engineer",
+            company_name="John Burns Research and Consulting",
+            overall_score=82,
+            recommendation="review",
+            description=(
+                "<h2>What You Bring</h2>"
+                "<p>3+ years in data engineering or analytics engineering, "
+                "including at least 2 years building production dbt projects.</p>"
+            ),
+            profile_json=make_profile(
+                production_skills=["SQL Server", "Python", "Snowflake", "LookML"],
+                project_skills=["AI-assisted FastAPI portfolio demo"],
+                tools_platforms=["dbt", "Looker", "Spark"],
+            ).model_dump_json(),
+        )
+        result = replay(row)
+        self.assertEqual(result.overall_score, 49)
+        self.assertEqual(result.recommendation, "skip")
+        self.assertTrue(should_downgrade(row, result))
+        proof = candidate_evidence(row, result)
+        self.assertTrue(proof["all_new_gaps_have_explicit_mandatory_clause"])
+        self.assertEqual(len(approved_candidates(
+            [(row, result)], {approval_fingerprint(row, result)}
+        )), 1)
+
     def test_tenure_evidence_rejects_generic_years_and_platform_alternatives(self):
         row = self.row(description=(
             "<h2>Required Qualifications</h2>"
