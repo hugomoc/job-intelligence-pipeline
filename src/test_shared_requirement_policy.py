@@ -450,6 +450,21 @@ class SharedRequirementPolicyTests(unittest.TestCase):
                     gap, j["description"], p)["keep_hard_gap"])
         self.assertEqual(score(p, j, gaps).analysis.hard_requirements_missing, [])
 
+    def test_construction_accounting_and_healthcare_required_still_hard(self):
+        p = profile(industries=["e-commerce"])
+        for gap, clause in (
+            ("Experience in a healthcare setting", "Experience in a healthcare setting."),
+            ("Major gap: ledger or accounting data-domain expertise",
+             "Working knowledge of construction financial reporting: "
+             "percentage-of-completion accounting, work-in-progress schedules, "
+             "over and under billings, backlog and margin fade."),
+        ):
+            with self.subTest(gap=gap):
+                j = job("<h2>Requirements</h2><p>" + clause + "</p>")
+                self.assertTrue(validate_hard_gap_clause(
+                    gap, j["description"], p)["keep_hard_gap"])
+                self.assertEqual(score(p, j, [gap]).recommendation, "skip")
+
     def test_essential_business_slogan_is_not_mandatory(self):
         clause = "Our mission is essential to the communities we serve."
         c = description_requirement_clauses(clause)[0]
