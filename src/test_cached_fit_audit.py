@@ -2,7 +2,7 @@
 import unittest
 from types import SimpleNamespace
 
-from src.audit_cached_fit import decode_list, replay, should_downgrade
+from src.audit_cached_fit import decode_list, replay, should_downgrade, needs_manual_review
 from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
 from src.test_resume_matcher_validation import make_profile
 
@@ -64,7 +64,8 @@ class CachedFitAuditTests(unittest.TestCase):
         result = replay(row)
         self.assertEqual(result.overall_score, 74)
         self.assertEqual(result.recommendation, "review")
-        self.assertTrue(should_downgrade(row, result))
+        self.assertFalse(should_downgrade(row, result))
+        self.assertTrue(needs_manual_review(row, result))
 
     def test_no_upgrade_and_no_stale_overwrite(self):
         row = self.row(overall_score=49, recommendation="skip")
@@ -78,6 +79,33 @@ class CachedFitAuditTests(unittest.TestCase):
             self.row(overall_score=93, recommendation="apply"),
             SimpleNamespace(overall_score=92, recommendation="apply", description_complete=True),
         ))
+
+    def test_score_drift_alone_never_changes_database(self):
+        row = self.row(overall_score=94, recommendation="apply")
+        small = SimpleNamespace(
+            overall_score=87, recommendation="apply", description_complete=True,
+            analysis=SimpleNamespace(hard_requirements_missing=[]),
+        )
+        self.assertFalse(should_downgrade(row, small))
+        self.assertFalse(needs_manual_review(row, small))
+
+    def test_review_recommendation_change_is_manual_only(self):
+        row = self.row(overall_score=93, recommendation="apply")
+        review = SimpleNamespace(
+            overall_score=93, recommendation="review", description_complete=True,
+            analysis=SimpleNamespace(hard_requirements_missing=[]),
+        )
+        self.assertFalse(should_downgrade(row, review))
+        self.assertTrue(needs_manual_review(row, review))
+
+    def test_previous_hard_gap_is_not_a_new_automated_downgrade(self):
+        gap = "Major gap: 3+ years of professional dbt Cloud experience (not demonstrated in professional experience)"
+        row = self.row(
+            hard_requirements_missing='["' + gap + '"]'
+        )
+        match = replay(row)
+        self.assertEqual(match.recommendation, "skip")
+        self.assertFalse(should_downgrade(row, match))
 
     def test_json_list_decode_is_safe(self):
         self.assertEqual(decode_list(None), [])

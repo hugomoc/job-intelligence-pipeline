@@ -93,6 +93,30 @@ def description_requirement_clauses(description: str) -> list[dict[str, Any]]:
     return clauses
 
 
+# The AI hard-gap check requires a named AI capability and ownership terms
+# in one mandatory JD clause. Generic references to agents/tools do not count.
+AI_REQUIRED_TECH = re.compile(
+    r"\b(?:rag|retrieval[\s-]+augmented[\s-]+generation|agentic"
+    r"|llms?|large[\s-]+language[\s-]+models?|ai[\s-]+agents?"
+    r"|ai[\s-]+tool[\s-]+integrations?|model[\s-]+context[\s-]+protocol)\b",
+    re.I,
+)
+AI_DELIVERY = re.compile(
+    r"\b(?:production|deploy\w*|build\w*|built|develop\w*|design\w*"
+    r"|implement\w*|operat\w*|own\w*|integrat\w*|hands?[\s-]?on)\b",
+    re.I,
+)
+
+
+def explicit_production_ai_requirements(description: str) -> list[dict[str, Any]]:
+    return [
+        row for row in description_requirement_clauses(description)
+        if row["mandatory"] and not row["optional"]
+        and AI_REQUIRED_TECH.search(row["clause"])
+        and AI_DELIVERY.search(row["clause"])
+    ]
+
+
 # Only explicit, single-platform professional-tenure minimums are enforceable.
 # Generic years of data engineering and open platform alternatives are left to
 # their own rules. A tool mentioned in a portfolio is not professional tenure.
@@ -217,6 +241,35 @@ def clause_groups(text: str) -> set[str]:
 def validate_hard_gap_clause(gap: str, description: str, profile: ResumeProfile) -> dict[str, Any]:
     """Model labels are pointers, never mandatory-status evidence."""
     from src.ai.resume_matcher import significant_terms, CRITICAL_CAPABILITY_SIGNALS, regex_present, profile_to_text, requirement_is_demonstrated, requirement_requires_all, profile_fields_to_text, contains_phrase
+    if AI_REQUIRED_TECH.search(gap):
+        # Model-generated RAG/agentic gaps cannot establish mandatory status.
+        # A concrete deployment requirement in the JD itself is required.
+        clauses = explicit_production_ai_requirements(description)
+        from src.ai.resume_matcher import production_resume_text
+        signal = next(
+            item for item in CRITICAL_CAPABILITY_SIGNALS
+            if item.label.startswith("production RAG,")
+        )
+        demonstrated = regex_present(
+            production_resume_text(profile), signal.production_patterns
+        )
+        checked = [
+            dict(row, satisfied=demonstrated, allowed_groups=[],
+                 resume_evidence=["production AI experience"] if demonstrated else [])
+            for row in clauses
+        ]
+        return {
+            "gap": gap,
+            "keep_hard_gap": bool(clauses) and not demonstrated,
+            "reason": (
+                "mandatory production AI clause unsatisfied"
+                if clauses and not demonstrated else
+                "allowed clause satisfied" if clauses else
+                "no explicit mandatory production AI requirement"
+            ),
+            "clauses": checked,
+            "matched_clauses": clauses,
+        }
     groups = clause_groups(gap)
     terms = significant_terms(gap) - {"production", "expert", "required", "missing", "demonstrated", "major", "gap"}
     matches = []
@@ -375,13 +428,19 @@ def central_specialization_gaps(description: str, title: str, profile: ResumePro
     if not isinstance(profile, ResumeProfile):
         return []
     evidence = profile_to_text(profile, include_certifications=False)
-    production = profile_fields_to_text(profile, ("professional_summary", "production_skills", "data_engineering_capabilities", "bi_analytics_skills", "tools_platforms", "industries"))
+    production = profile_fields_to_text(profile, ("professional_summary", "production_skills", "data_engineering_capabilities", "bi_analytics_skills", "tools_platforms", "ai_ml_experience", "industries"))
     clauses = description_requirement_clauses(description)
     output = []
     for label, pattern, resume_pattern in CENTRAL_SPECIALIZATIONS:
+        if label == "enterprise production AI/LLM analytics" and not explicit_production_ai_requirements(description):
+            continue
         if re.search(resume_pattern, production if label == "enterprise production AI/LLM analytics" else evidence, re.I):
             continue
-        matches = [row for row in clauses if not row["optional"] and re.search(pattern, row["clause"], re.I)]
+        matches = (
+            explicit_production_ai_requirements(description)
+            if label == "enterprise production AI/LLM analytics"
+            else [row for row in clauses if not row["optional"] and re.search(pattern, row["clause"], re.I)]
+        )
         unsatisfied = []
         for row in matches:
             # The same clause evaluator checks allowed alternatives; centrality
