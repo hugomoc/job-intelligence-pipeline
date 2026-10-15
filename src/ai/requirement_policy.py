@@ -152,7 +152,17 @@ def explicit_production_platform_clauses(
                 r"\b(?:hands[\s-]?on|production|build\w*|develop\w*|operat\w*|deploy\w*|deep experience)\b", clause, re.I
             ):
                 continue
-            if re.search(r"\bor\b|\band/or\b|\bequivalent\b|\bcomparable\b", clause, re.I):
+            # Closed alternatives such as "Databricks or Spark" require at
+            # least one named platform, but not Databricks specifically.
+            # Open equivalents ("or comparable lakehouse") are a separate
+            # equivalence review, not evidence of mandatory Databricks.
+            closed_choice = re.search(
+                r"\b(?:databricks\s+or\s+(?:apache\s+)?spark"
+                r"|(?:apache\s+)?spark\s+or\s+databricks"
+                r"|databricks\s+or\s+snowflake"
+                r"|snowflake\s+or\s+databricks)\b", clause, re.I,
+            )
+            if re.search(r"\bor\b|\band/or\b|\bequivalent\b|\bcomparable\b", clause, re.I) and not closed_choice:
                 continue
             # A group of example platforms is not a requirement to know every
             # vendor. E.g. BECU: (Fabric, Azure Databricks, BigQuery, Snowflake).
@@ -415,14 +425,26 @@ def validate_hard_gap_clause(gap: str, description: str, profile: ResumeProfile)
         professional = profile_fields_to_text(profile, (
             "production_skills", "professional_summary", "data_engineering_capabilities",
         ))
-        demonstrated = bool(re.search(r"\bdatabricks\b", professional, re.I))
-        checked = [dict(row, satisfied=demonstrated,
-                        allowed_groups=[], resume_evidence=["professional Databricks"] if demonstrated else [])
-                   for row in clauses]
+        def demonstrated_for_clause(clause: str) -> list[str]:
+            found = ["professional Databricks"] if re.search(r"\bdatabricks\b", professional, re.I) else []
+            if re.search(r"\bdatabricks\s+or\s+(?:apache\s+)?spark\b|\b(?:apache\s+)?spark\s+or\s+databricks\b", clause, re.I):
+                if re.search(r"\b(?:apache\s+)?spark\b|\bpyspark\b", professional, re.I):
+                    found.append("professional Spark alternative")
+            if re.search(r"\bdatabricks\s+or\s+snowflake\b|\bsnowflake\s+or\s+databricks\b", clause, re.I):
+                if re.search(r"\bsnowflake\b", professional, re.I):
+                    found.append("professional Snowflake alternative")
+            return found
+
+        checked = []
+        for row in clauses:
+            evidence = demonstrated_for_clause(row["clause"])
+            checked.append(dict(row, satisfied=bool(evidence),
+                                allowed_groups=[], resume_evidence=evidence))
+        missing = [row for row in checked if not row["satisfied"]]
         return {
-            "gap": gap, "keep_hard_gap": bool(clauses) and not demonstrated,
+            "gap": gap, "keep_hard_gap": bool(missing),
             "reason": ("mandatory Databricks production clause unsatisfied"
-                       if clauses and not demonstrated else
+                       if missing else
                        "allowed clause satisfied" if clauses else
                        "no explicit mandatory Databricks production requirement"),
             "clauses": checked, "matched_clauses": clauses,
