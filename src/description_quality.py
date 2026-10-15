@@ -11,7 +11,7 @@ SUBSTANTIAL_DESCRIPTION_WORDS = 200
 # paragraphs. Generic words such as 'experience' are deliberately weaker.
 STRONG_SECTION = re.compile(
     r"\b(?:responsibilit(?:y|ies)|requirements?|qualifications?|duties|must\s+have|"
-    r"what\s+you(?:'ll|\s+will)\s+(?:do|work\s+on|bring)|"
+    r"what\s+you(?:'ll|\s+will)?\s+(?:do|work\s+on|bring)|"
     r"what\s+we(?:'re|\s+are)\s+looking\s+for)\b", re.I,
 )
 ROLE_SECTION = re.compile(

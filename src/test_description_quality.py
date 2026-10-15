@@ -13,7 +13,7 @@ class QualityTests(unittest.TestCase):
         for heading in ("What you'll work on", 'What you will work on',
                         "What we’re looking for", 'What we are looking for',
                         'Responsibilities', 'Qualifications', 'Requirements', 'Duties',
-                        "What you'll do", 'What you will do', "What you'll bring", 'What you will bring'):
+                        "What you'll do", 'What you will do', 'What You Do', "What you'll bring", 'What you will bring', 'What You Bring'):
             with self.subTest(heading=heading):
                 self.assertTrue(assess_description_quality(heading+'\n'+BODY).full_jd)
 
