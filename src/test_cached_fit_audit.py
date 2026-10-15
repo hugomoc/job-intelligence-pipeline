@@ -1,9 +1,17 @@
 """Offline tests for deterministic audit of cached scores."""
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.audit_cached_fit import decode_list, replay, should_downgrade, needs_manual_review
 from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
+from src.fit_gap_evidence import (
+    approval_fingerprint, approved_candidates, approval_tokens, candidate_evidence,
+)
 from src.test_resume_matcher_validation import make_profile
 
 
@@ -106,6 +114,82 @@ class CachedFitAuditTests(unittest.TestCase):
         match = replay(row)
         self.assertEqual(match.recommendation, "skip")
         self.assertFalse(should_downgrade(row, match))
+
+    def test_metlife_report_quotes_saved_mandatory_dbt_cloud_clause(self):
+        row = self.row()
+        result = replay(row)
+        proof = candidate_evidence(row, result)
+        self.assertTrue(proof["all_new_gaps_have_explicit_mandatory_clause"])
+        snippets = proof["gaps"][0]["matching_saved_jd_clauses"]
+        self.assertEqual(len(snippets), 1)
+        self.assertIn("3+ years of hands-on experience using dbt Cloud", snippets[0]["text"])
+        self.assertEqual(snippets[0]["section"], "required")
+        self.assertTrue(snippets[0]["mandatory"])
+        self.assertNotIn("profile_json", proof)
+        self.assertNotIn("description", proof)
+        selected = approved_candidates([(row, result)], {approval_fingerprint(row, result)})
+        self.assertEqual(len(selected), 1)
+
+    def test_do_not_approve_nonmandatory_or_unrelated_clause(self):
+        row = self.row(description=(
+            "<h2>Requirements</h2><p>SQL and Python production pipelines.</p>"
+            "<h2>Preferred Qualifications</h2>"
+            "<p>3+ years of hands-on experience using dbt Cloud.</p>"
+        ))
+        candidate = SimpleNamespace(
+            overall_score=49, recommendation="skip", description_complete=True,
+            analysis=SimpleNamespace(hard_requirements_missing=[
+                "Major gap: 3+ years of professional dbt Cloud experience"
+            ]),
+        )
+        proof = candidate_evidence(row, candidate)
+        self.assertFalse(proof["all_new_gaps_have_explicit_mandatory_clause"])
+        self.assertFalse(proof["gaps"][0]["matching_saved_jd_clauses"][0]["mandatory"])
+        with self.assertRaisesRegex(ValueError, "no explicit"):
+            approved_candidates(
+                [(row, candidate)], {approval_fingerprint(row, candidate)}
+            )
+
+    def test_approvals_are_bound_to_exact_description_and_profile(self):
+        row = self.row()
+        match = replay(row)
+        approved = {approval_fingerprint(row, match)}
+        self.assertNotEqual(
+            approval_fingerprint(row, match),
+            approval_fingerprint(
+                {**row, "description": row["description"] + " changed"}, match
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "unknown or stale"):
+            approved_candidates(
+                [({**row, "description": row["description"] + " changed"}, match)],
+                approved,
+            )
+        with self.assertRaisesRegex(ValueError, "unknown or stale"):
+            approved_candidates([(row, match)], {"1" * 64})
+
+    def test_approval_manifest_is_required_and_validated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "approved.json"
+            with self.assertRaisesRegex(ValueError, "Could not read"):
+                approval_tokens(path)
+            for value in ({}, {"version": 1, "approved_fingerprints": []},
+                          {"version": 1, "approved_fingerprints": ["bogus"]}):
+                path.write_text(json.dumps(value))
+                with self.assertRaises(ValueError):
+                    approval_tokens(path)
+            path.write_text(json.dumps({
+                "version": 1, "approved_fingerprints": ["a" * 64]
+            }))
+            self.assertEqual(approval_tokens(path), {"a" * 64})
+
+    def test_apply_never_defaults_to_all_rows(self):
+        process = subprocess.run(
+            [sys.executable, "-m", "src.audit_cached_fit", "--apply"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("--apply requires --approved-file", process.stderr)
 
     def test_json_list_decode_is_safe(self):
         self.assertEqual(decode_list(None), [])
