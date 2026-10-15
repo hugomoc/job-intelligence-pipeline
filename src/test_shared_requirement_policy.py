@@ -696,6 +696,41 @@ class SharedRequirementPolicyTests(unittest.TestCase):
                     "exclude",
                 )
 
+    def test_production_project_tenure_not_waived_by_undated_tool_inventory(self):
+        """Regression: a generic dbt inventory must not hide John Burns' JD."""
+        p = profile(
+            production_skills=["SQL Server", "Python", "Snowflake", "LookML"],
+            tools_platforms=["dbt", "Looker", "Apache Spark"],
+            project_skills=["Personal Python API demo"],
+        )
+        j = job(
+            "<h2>What You Bring</h2><p>"
+            "3+ years in data engineering or analytics engineering, "
+            "including at least 2 years building production dbt projects.</p>"
+        )
+        missing, uncertain = required_platform_tenure_gaps(j["description"], p)
+        self.assertEqual(len(missing), 1, (missing, uncertain))
+        self.assertIn("2+ years of professional dbt", missing[0])
+        self.assertEqual(uncertain, [])
+        match = score(p, j, [])
+        self.assertEqual(match.overall_score, 49)
+        self.assertEqual(match.recommendation, "skip")
+        self.assertEqual(
+            normalize_job_eligibility(proposed([]), p, j).decision,
+            "exclude",
+        )
+        # A credible, though undated, actual professional dbt delivery
+        # assertion must still be REVIEW rather than a false hard rejection.
+        p = p.model_copy(update={
+            "production_skills": p.production_skills + [
+                "Built production dbt project models for business reporting"
+            ],
+        })
+        missing, uncertain = required_platform_tenure_gaps(j["description"], p)
+        self.assertEqual(missing, [])
+        self.assertEqual(len(uncertain), 1)
+        self.assertEqual(score(p, j, []).recommendation, "review")
+
     def test_undated_nonproject_platform_inventory_is_review_not_false_skip(self):
         for tool, clause in (
             ("LookML", "3+ years of professional Looker development experience."),
