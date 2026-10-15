@@ -166,7 +166,7 @@ def explicit_production_platform_clauses(
                 continue
             if not re.search(
                 r"\b(?:production|hands[\s-]?on|deep experience|expert\w*"
-                r"|build\w*|built|develop\w*|design\w*|operat\w*|deploy\w*|maintain\w*)\b",
+                r"|build\w*|built|develop\w*|design\w*|operat\w*|deploy\w*|maintain\w*|working)\b",
                 clause, re.I,
             ):
                 continue
@@ -471,6 +471,12 @@ def validate_hard_gap_clause(gap: str, description: str, profile: ResumeProfile)
         clause = row["clause"]
         cg = clause_groups(clause)
         alternatives = bool(re.search(r"\bor\b|such as|e\.g\.|examples? (?:include|including)|for example", clause, re.I))
+        # A parenthesized list of modern data platforms gives acceptable
+        # alternatives, not a mandate to know every listed provider.
+        if len(cg) > 1 and re.search(
+            r"\b(?:data|cloud|analytics)\s+platforms?\b.{0,50}\(", clause, re.I
+        ):
+            alternatives = True
         if re.search(r"(?:platforms?|tools?|systems?|warehouses?|databases?|environments?|services?)\s+like\b", clause, re.I):
             alternatives = True
         # A slash alone does not imply OR for unrelated compound capabilities.
