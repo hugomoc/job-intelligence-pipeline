@@ -32,6 +32,20 @@ def _aliases():
 }
 
 
+def _without_scoped_platform_preference(clause: str) -> str:
+    """Keep the main skill required when only its deployment variant is preferred.
+
+    For example, "Databricks (on AWS preferred)" requires Databricks,
+    while "(preferred)" after Databricks still makes that skill optional.
+    """
+    return re.sub(
+        r"\(\s*(?:on|in|using|with)\b[^)]*?\b(?:preferred|ideally)\b[^)]*\)",
+        "",
+        clause,
+        flags=re.I,
+    )
+
+
 def description_requirement_clauses(description: str) -> list[dict[str, Any]]:
     """Keep list/sentence boundaries and qualification-section provenance."""
     from src.ai.resume_matcher import normalize_match_text, regex_present, MANDATORY_REQUIREMENT_CONTEXT_PATTERNS
@@ -54,18 +68,22 @@ def description_requirement_clauses(description: str) -> list[dict[str, Any]]:
             continue
         heading = normalize_match_text(line).strip(" .:")
         if len(line) < 90:
-            if re.fullmatch(r"(?:minimum |required |basic )?(?:requirements|qualifications)|required(?: skills and experience)?|requirements for .+|what (?:you'll|you will) bring|what we(?:'re| are) looking for|who you are|about you", line.casefold().strip(" :")):
+            if re.fullmatch(r"(?:minimum |required |basic )?(?:requirements|qualifications)|required(?: skills and experience)?|requirements for .+|what you (?:ll |will )?bring|what we (?:re |are )looking for|who you are|about you", heading):
                 section = "required"
                 continue
             if re.search(r"preferred qualifications|desired qualifications|nice.to.have|bonus qualifications", heading):
                 section = "optional"
                 continue
-            if heading in {"responsibilities", "benefits", "about us", "about the company", "what you'll do", "what you will do", "compensation and benefits", "compensation", "how we'll take care of you", "total rewards", "our tech stack"}:
+            if heading in {"responsibilities", "benefits", "about us", "about the company", "what you ll do", "what you will do", "why you ll love it here", "why you will love it here", "compensation and benefits", "compensation", "how we ll take care of you", "total rewards", "our tech stack"}:
                 section = "other"
                 continue
         # Do not split decimal years or e.g.; alternatives stay in one clause.
         for clause in re.split(r"(?<=[.!?])\s+(?=[A-Z])|;", line):
-            optional = bool(re.search(r"\b(?:preferred|optional|nice.to.have|helpful|ideally|not required|not mandatory)\b", clause, re.I)) or section == "optional"
+            optional = (section == "optional" or bool(re.search(
+                r"\b(?:preferred|optional|nice.to.have|helpful|ideally|not required|not mandatory)\b",
+                _without_scoped_platform_preference(clause),
+                re.I,
+            )))
             mandatory = not optional and (section == "required" or regex_present(clause, MANDATORY_REQUIREMENT_CONTEXT_PATTERNS) or bool(re.search(r"\b(?:required|requires|must|mandatory|minimum|need to have|expert skills|expert knowledge)\b|\b\d+\s*\+?\s*years?\b", clause, re.I)))
             # Essential must modify candidate experience/capability, not business
             # slogans ("our mission is essential") or boilerplate.
