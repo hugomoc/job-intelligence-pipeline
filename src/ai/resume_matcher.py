@@ -1320,6 +1320,7 @@ def remove_demonstrated_missing_items(
 from src.ai.requirement_policy import (
     description_requirement_clauses, clause_groups, validate_hard_gap_clause,
     personal_fact_kind, personal_requirement_evidence,
+    required_platform_tenure_gaps,
 )
 
 
@@ -1676,6 +1677,27 @@ def build_resume_job_match(
 
     analysis = validate_missing_qualifications(analysis, resume_profile, str(job.get("description") or ""))
 
+    tenure_uncertainties: list[str] = []
+    if description_complete:
+        tenure_missing, tenure_uncertainties = required_platform_tenure_gaps(
+            str(job.get("description") or ""), resume_profile
+        )
+        if tenure_missing or tenure_uncertainties:
+            analysis = analysis.model_copy(update={
+                "hard_requirements_missing": list(dict.fromkeys(
+                    analysis.hard_requirements_missing + tenure_missing
+                )),
+                "risk_factors": list(dict.fromkeys(
+                    analysis.risk_factors + tenure_uncertainties
+                )),
+                "skills_fit": min(analysis.skills_fit, 70),
+                "summary": (
+                    "Professional platform-tenure requirement needs verification: "
+                    + "; ".join(tenure_missing + tenure_uncertainties) + ". "
+                    + analysis.summary
+                ),
+            })
+
     overall_score = calculate_overall_score(
         analysis
     )
@@ -1722,7 +1744,7 @@ def build_resume_job_match(
 
     if (
         description_complete
-        and specialization_gap_labels
+        and (specialization_gap_labels or tenure_uncertainties)
         and not analysis.hard_requirements_missing
     ):
         overall_score = min(
