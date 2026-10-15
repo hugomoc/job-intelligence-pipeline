@@ -10,6 +10,7 @@ from src.ai.requirement_policy import (
     description_requirement_clauses,
     personal_requirement_evidence,
     validate_hard_gap_clause,
+    required_platform_tenure_gaps,
 )
 from src.ai.resume_profiler import CandidateEligibilityFacts
 from src.job_admission import evaluate_job_admission
@@ -143,6 +144,80 @@ class SharedRequirementPolicyTests(unittest.TestCase):
         )
         self.assertIn("sql_server", direct["clauses"][0]["resume_evidence"])
         self.assertIn("mysql", direct["clauses"][0]["resume_evidence"])
+
+    def test_metlife_dbt_cloud_is_mandatory_professional_tenure(self):
+        p = profile(
+            project_skills=["dbt Core", "dbt transformations"],
+            tools_platforms=["dbt"],
+            production_skills=["SQL", "Python", "AWS Redshift"],
+        )
+        j = job(
+            "<h2>Required Qualifications</h2>"
+            "<p>3+ years of experience in data engineering.</p>"
+            "<p>3+ years of hands-on experience using DBT Cloud.</p>"
+            "<p>1+ years of experience with Airflow, Prefect, or Dagster.</p>",
+            "Data Analytics Engineer",
+        )
+        missing, uncertain = required_platform_tenure_gaps(j["description"], p)
+        self.assertEqual(len(missing), 1, (missing, uncertain))
+        self.assertIn("dbt Cloud", missing[0])
+        self.assertEqual(uncertain, [])
+        match = score(p, j, [])
+        self.assertEqual(match.overall_score, 49)
+        self.assertEqual(match.recommendation, "skip")
+        self.assertTrue(any("dbt Cloud" in x for x in match.analysis.hard_requirements_missing))
+        self.assertEqual(normalize_job_eligibility(proposed([]), p, j).decision, "exclude")
+
+    def test_dbt_cloud_prod_without_tenure_is_review_not_false_proof(self):
+        p = profile(production_skills=["SQL", "Python", "dbt Cloud"])
+        j = job(
+            "<h2>Required Qualifications</h2>"
+            "<p>3+ years of hands-on experience using dbt Cloud.</p>"
+        )
+        missing, uncertain = required_platform_tenure_gaps(j["description"], p)
+        self.assertEqual(missing, [])
+        self.assertEqual(len(uncertain), 1)
+        match = score(p, j, [])
+        self.assertEqual(match.overall_score, 74)
+        self.assertEqual(match.recommendation, "review")
+        self.assertTrue(any("dbt Cloud" in x for x in match.analysis.risk_factors))
+
+    def test_explicit_professional_tenure_satisfies_dbt_cloud(self):
+        p = profile(production_skills=["5+ years of production dbt Cloud development"])
+        j = job(
+            "<h2>Required Qualifications</h2>"
+            "<p>3+ years of hands-on experience using dbt Cloud.</p>"
+        )
+        self.assertEqual(required_platform_tenure_gaps(j["description"], p), ([], []))
+        match = score(p, j, [])
+        self.assertEqual(match.overall_score, 85)
+        self.assertEqual(match.recommendation, "apply")
+
+    def test_preferred_platform_and_open_alternatives_are_not_hard_tenure(self):
+        p = profile(production_skills=["SQL", "Python"])
+        for clause in (
+            "<h2>Preferred Qualifications</h2><p>3+ years of dbt Cloud experience.</p>",
+            "<h2>Required Qualifications</h2><p>3+ years experience with Snowflake or BigQuery.</p>",
+            "<h2>Required Qualifications</h2><p>3+ years data engineering experience.</p>",
+        ):
+            j = job(clause)
+            self.assertEqual(required_platform_tenure_gaps(j["description"], p), ([], []))
+            self.assertEqual(score(p, j, []).overall_score, 85)
+
+    def test_project_only_dbt_cloud_does_not_prove_production_years(self):
+        p = profile(
+            project_skills=["dbt Cloud portfolio project"],
+            tools_platforms=["dbt Cloud"],
+            production_skills=["SQL"],
+        )
+        j = job(
+            "<h2>Required Qualifications</h2>"
+            "<p>3+ years of hands-on experience using dbt Cloud.</p>"
+        )
+        missing, uncertain = required_platform_tenure_gaps(j["description"], p)
+        self.assertEqual(missing, [])
+        self.assertTrue(uncertain)
+        self.assertEqual(score(p, j, []).recommendation, "review")
 
     def test_modmed_cloud_preference_does_not_make_databricks_optional(self):
         j = job(
