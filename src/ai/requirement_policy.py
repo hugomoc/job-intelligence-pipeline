@@ -424,7 +424,7 @@ def validate_hard_gap_clause(gap: str, description: str, profile: ResumeProfile)
                        "no explicit mandatory Databricks production requirement"),
             "clauses": checked, "matched_clauses": clauses,
         }
-    if gap == "production machine-learning model deployment":
+    if "production machine-learning model deployment" in gap:
         clauses = explicit_production_platform_clauses(description, "ML deployment")
         from src.ai.resume_matcher import production_resume_text
         professional = production_resume_text(profile)
