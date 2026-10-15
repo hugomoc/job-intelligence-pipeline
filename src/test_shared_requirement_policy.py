@@ -443,6 +443,58 @@ class SharedRequirementPolicyTests(unittest.TestCase):
         self.assertEqual(normalized.decision, "exclude")
         self.assertNotIn("title family alone", normalized.reason)
 
+    def test_generic_support_agents_do_not_require_production_rag(self):
+        p = profile()
+        j = job(
+            "<h2>Required Qualifications</h2>"
+            "<p>Experience supporting customer service agents and building "
+            "data integrations for CRM tools.</p>"
+            "<p>Strong SQL, Python, and operational reporting skills required.</p>"
+        )
+        gap = "production RAG, agentic workflows, and AI tool integrations"
+        self.assertFalse(validate_hard_gap_clause(gap, j["description"], p)["keep_hard_gap"])
+        self.assertEqual(score(p, j, []).recommendation, "apply")
+        self.assertEqual(normalize_job_eligibility(proposed([gap]), p, j).decision, "eligible")
+
+    def test_optional_ai_automation_is_not_mandatory_production_rag(self):
+        p = profile()
+        j = job(
+            "<h2>Required Qualifications</h2><p>Strong Python and SQL skills.</p>"
+            "<h2>Preferred Qualifications</h2>"
+            "<p>Experience building production RAG systems or agentic AI is a plus.</p>"
+        )
+        gap = "production RAG, agentic workflows, and AI tool integrations"
+        self.assertFalse(validate_hard_gap_clause(gap, j["description"], p)["keep_hard_gap"])
+        self.assertEqual(score(p, j, []).recommendation, "apply")
+        self.assertEqual(normalize_job_eligibility(proposed([gap]), p, j).decision, "eligible")
+
+    def test_required_ai_production_ownership_remains_a_hard_gap(self):
+        p = profile(project_skills=["Personal AI chatbot using RAG and agentic workflows"])
+        j = job(
+            "<h2>Required Qualifications</h2>"
+            "<p>Hands-on experience deploying RAG and agentic AI systems to production.</p>"
+            "<p>Strong SQL data engineering and infrastructure skills.</p>"
+        )
+        gap = "production RAG, agentic workflows, and AI tool integrations"
+        self.assertTrue(validate_hard_gap_clause(gap, j["description"], p)["keep_hard_gap"])
+        match = score(p, j, [])
+        self.assertEqual(match.recommendation, "skip")
+        self.assertEqual(match.overall_score, 49)
+        self.assertEqual(normalize_job_eligibility(proposed([]), p, j).decision, "exclude")
+
+    def test_ai_requirement_must_be_in_same_mandatory_clause(self):
+        p = profile()
+        j = job(
+            "<h2>Responsibilities</h2>"
+            "<p>Team members may explore LLM and AI agents.</p>"
+            "<h2>Required Qualifications</h2>"
+            "<p>Experience deploying reliable production SQL pipelines "
+            "and building conventional Python integrations.</p>"
+        )
+        gap = "production RAG, agentic workflows, and AI tool integrations"
+        self.assertFalse(validate_hard_gap_clause(gap, j["description"], p)["keep_hard_gap"])
+        self.assertEqual(score(p, j, []).recommendation, "apply")
+
     def test_explicit_mandatory_qlik_remains_cap_and_exclusion(self):
         j = job("<h2>Requirements</h2><p>3 years using QLIK Advana</p>")
         self.assertEqual(normalize_job_eligibility(proposed(["QLIK Advana"]), profile(), j).decision, "exclude")
