@@ -241,6 +241,35 @@ def clause_groups(text: str) -> set[str]:
 def validate_hard_gap_clause(gap: str, description: str, profile: ResumeProfile) -> dict[str, Any]:
     """Model labels are pointers, never mandatory-status evidence."""
     from src.ai.resume_matcher import significant_terms, CRITICAL_CAPABILITY_SIGNALS, regex_present, profile_to_text, requirement_is_demonstrated, requirement_requires_all, profile_fields_to_text, contains_phrase
+    if AI_REQUIRED_TECH.search(gap):
+        # Model-generated RAG/agentic gaps cannot establish mandatory status.
+        # A concrete deployment requirement in the JD itself is required.
+        clauses = explicit_production_ai_requirements(description)
+        from src.ai.resume_matcher import production_resume_text
+        signal = next(
+            item for item in CRITICAL_CAPABILITY_SIGNALS
+            if item.label.startswith("production RAG,")
+        )
+        demonstrated = regex_present(
+            production_resume_text(profile), signal.production_patterns
+        )
+        checked = [
+            dict(row, satisfied=demonstrated, allowed_groups=[],
+                 resume_evidence=["production AI experience"] if demonstrated else [])
+            for row in clauses
+        ]
+        return {
+            "gap": gap,
+            "keep_hard_gap": bool(clauses) and not demonstrated,
+            "reason": (
+                "mandatory production AI clause unsatisfied"
+                if clauses and not demonstrated else
+                "allowed clause satisfied" if clauses else
+                "no explicit mandatory production AI requirement"
+            ),
+            "clauses": checked,
+            "matched_clauses": clauses,
+        }
     groups = clause_groups(gap)
     terms = significant_terms(gap) - {"production", "expert", "required", "missing", "demonstrated", "major", "gap"}
     matches = []
