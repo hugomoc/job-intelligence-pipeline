@@ -353,7 +353,16 @@ still saves the single attempted job; it is not a dry run.
 Each targeted report now contains a `jobs[].timings` breakdown: source-page
 fetch, ATS discovery, public search and total candidate fetch durations
 (in milliseconds), the number of actual candidate fetches, and blocked-host
-skips. `candidate_validation[].elapsed_ms` shows timing per candidate.
+skips. The report also measures `verified_candidate_metadata_ms` (offline
+trusted candidate preparation) and `save_attempt_ms` (DuckDB write).
+`candidate_validation[].elapsed_ms` shows timing per candidate.
+Targeted reports additionally include `queue_initial_load_ms`,
+`queue_refresh_total_ms` and `queue_loader_calls`. With a bounded
+`--max-jobs` run, the drain skips a full DuckDB queue refresh **when that
+limit is reached**, recording `queue_refresh_skipped_at_limit` and
+`remaining_unattempted_this_run`; a later invocation recomputes the actual
+targeted queue. `remaining_targeted_queue` remains the most recent full
+database snapshot and may still include the just-processed retryable posting.
 These metrics are observational and **do not** change scoring or job identity.
 
 Official resolution uses a cooperative 60-second time budget, with an 8-second
