@@ -92,6 +92,52 @@ class DrainTests(unittest.TestCase):
         self.assertEqual(stats['offline_reused'], 0)
         self.assertEqual(stats['no_candidate'], 1)
 
+    def test_indexed_fuzzy_candidates_preserve_legacy_matches_and_order(self):
+        def candidate(key, title, posting_key, *, company='Example',
+                      location='Remote', url=True):
+            return dict(record_key=key, title=title, company_name=company,
+                        location=location, verified_posting_key=posting_key,
+                        official_job_url=(
+                            f'https://boards.greenhouse.io/example/jobs/{key}'
+                            if url else None
+                        ))
+        candidates = [
+            candidate('own', 'Data Engineer', 'posting-1'),
+            candidate('duplicate', 'Data Engineer', 'posting-1'),
+            candidate('another', 'Data Engineer', 'posting-2'),
+            candidate('unverified', 'Data Engineer', ''),
+            candidate('no-url', 'Data Engineer', 'posting-3', url=False),
+            candidate('other', 'Analytics Engineer', 'posting-4'),
+        ]
+        jobs = [
+            dict(record_key='own', title='Data Engineer',
+                 company_name='Example', location='Remote'),
+            dict(record_key='new', title='Data Engineer',
+                 company_name='Example', location='Remote'),
+            dict(record_key='different', title='Analytics Engineer',
+                 company_name='Example', location='Remote'),
+            dict(record_key='missing', title='Site Reliability Engineer',
+                 company_name='Example', location='Remote'),
+        ]
+        expected = [
+            enrich_jobs.find_known_official_candidates(item, candidates)
+            for item in jobs
+        ]
+        timing = {}
+        results = enrich_jobs.annotate_known_official_candidates(jobs, candidates)
+        assert results['ambiguous'] == 2
+        assert results['single_candidate_needs_verification'] == 1
+        assert results['no_candidate'] == 1
+        for item, candidates_for_job in zip(jobs, expected):
+            keys = sorted({str(c['verified_posting_key']) for c in candidates_for_job})
+            assert item['known_official_candidate_count'] == len(keys)
+            expected_status = (
+                'no_candidate' if not keys else
+                'ambiguous' if len(keys) > 1 else
+                'single_candidate_needs_verification'
+            )
+            assert item['known_official_candidate_status'] == expected_status
+
     def test_bounded_run_does_not_reload_expensive_queue(self):
         inventory = [job('a'), job('b'), job('c')]
         calls = []

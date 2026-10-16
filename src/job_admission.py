@@ -221,9 +221,36 @@ def strength_from_count(count: int, strong_at: int = 2) -> Literal["strong", "pa
     return "weak"
 
 
+@dataclass(frozen=True)
+class PreparedResumeAdmissionSignals:
+    """Resume-only normalized inputs shared across evaluations in one batch."""
+    resume_text: str
+    production_resume_text: str
+    project_resume_text: str
+    resume_staff_scope_signals: tuple[str, ...]
+
+
+def prepare_resume_admission_signals(
+    resume_profile: Any,
+) -> PreparedResumeAdmissionSignals:
+    resume_text = resume_profile_to_text(resume_profile)
+    return PreparedResumeAdmissionSignals(
+        resume_text=resume_text,
+        production_resume_text=resume_profile_fields_to_text(
+            resume_profile, PRODUCTION_RESUME_FIELDS
+        ),
+        project_resume_text=resume_profile_fields_to_text(
+            resume_profile, PROJECT_RESUME_FIELDS
+        ),
+        resume_staff_scope_signals=tuple(staff_scope_signals(resume_text)),
+    )
+
+
 def evaluate_job_admission(
     job: dict[str, Any],
     resume_profile: Any,
+    *,
+    prepared_resume: PreparedResumeAdmissionSignals | None = None,
 ) -> JobAdmissionEvaluation:
     title = str(job.get("title") or "")
     description = str(job.get("description") or "")
@@ -241,20 +268,15 @@ def evaluate_job_admission(
             if value
         )
     )
-    resume_text = resume_profile_to_text(resume_profile)
-    production_resume_text = resume_profile_fields_to_text(
-        resume_profile,
-        PRODUCTION_RESUME_FIELDS,
-    )
-    project_resume_text = resume_profile_fields_to_text(
-        resume_profile,
-        PROJECT_RESUME_FIELDS,
-    )
+    signals = prepared_resume or prepare_resume_admission_signals(resume_profile)
+    resume_text = signals.resume_text
+    production_resume_text = signals.production_resume_text
+    project_resume_text = signals.project_resume_text
     classification = classify_job_title(title)
     family_match = role_family_strength(title)
     job_seniority_level = seniority_level_from_title(title)
     job_staff_scope_signals = staff_scope_signals(job_text)
-    resume_staff_scope_signals = staff_scope_signals(resume_text)
+    resume_staff_scope_signals = signals.resume_staff_scope_signals
 
     title_specializations = [
         signal

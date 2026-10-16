@@ -397,7 +397,15 @@ in DuckDB **before loading descriptions and running resume admission checks**.
 The status/score CTEs still retain the entire raw-job identity graph, and the
 original Python eligibility and identity checks still run. The report adds
 `queue_initial_load_phases` with initialization, SQL, description quality,
-verified-candidate metadata, and admission gate timings. Larger inventories
+verified-candidate metadata, and admission gate timings. The nested
+`verified_candidate_details` now shows candidate SQL loading, authoritative
+key-based reuse, fuzzy annotation, total trusted candidate count and jobs
+considered. Fuzzy annotation uses a per-load fingerprint index instead of
+re-normalizing every historical candidate for every queued job; this is
+only a candidate hint, not an identity assertion. Resume admission now
+normalizes the unchanged resume profile and its scope signals once per
+batch rather than for each job, while evaluating each job independently.
+A local run is still needed to determine the actual saved time. Larger inventories
 should benefit, but real elapsed time is measured on the local database.
 
 Successful Tavily/Serper URL results are cached **within the shared HTTP

@@ -830,10 +830,30 @@ def annotate_known_official_candidates(
         "no_candidate": 0,
     }
 
+    # An index keeps the exact existing fingerprint semantics, but prevents
+    # rescanning/re-normalizing all historical verified postings for each job.
+    # Candidate insertion order is preserved for choosing the first match.
+    indexed_candidates: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        if not candidate.get("verified_posting_key") or not candidate.get("official_job_url"):
+            continue
+        fingerprint = candidate_duplicate_fingerprint(
+            str(candidate.get("title") or ""),
+            str(candidate.get("company_name") or ""),
+            str(candidate.get("location") or ""),
+        )
+        indexed_candidates.setdefault(fingerprint, []).append(candidate)
+
     for job in jobs:
-        matches = find_known_official_candidates(
-            job=job,
-            candidates=candidates,
+        fingerprint = candidate_duplicate_fingerprint(
+            str(job.get("title") or ""),
+            str(job.get("company_name") or ""),
+            str(job.get("location") or ""),
+        )
+        matches = (
+            [candidate for candidate in indexed_candidates.get(fingerprint, [])
+             if candidate.get("record_key") != job.get("record_key")]
+            if fingerprint.strip("|") else []
         )
         distinct_keys = sorted(
             {
@@ -1061,27 +1081,41 @@ def reuse_authoritative_verified_descriptions_before_queue(
 def prepare_verified_candidate_metadata_before_queue(
     jobs: list[dict[str, Any]],
     minimum_words: int,
+    *,
+    timing: dict[str, float] | None = None,
 ) -> dict[str, int]:
-    """Run offline authoritative reuse and fuzzy candidate annotation."""
+    """Run offline authoritative reuse and indexed fuzzy annotation."""
+    started = time.monotonic()
     candidates = load_verified_reuse_candidates(minimum_words=minimum_words)
+    if timing is not None:
+        timing["load_verified_candidates_ms"] = round(
+            (time.monotonic() - started) * 1000, 1
+        )
+
+    started = time.monotonic()
+    offline_reused = reuse_authoritative_verified_descriptions_before_queue(
+        jobs=jobs, minimum_words=minimum_words, candidates=candidates,
+    )
+    if timing is not None:
+        timing["authoritative_reuse_ms"] = round(
+            (time.monotonic() - started) * 1000, 1
+        )
+
     stats = {
-        "offline_reused": reuse_authoritative_verified_descriptions_before_queue(
-            jobs=jobs,
-            minimum_words=minimum_words,
-            candidates=candidates,
-        ),
+        "offline_reused": offline_reused,
         "candidates_found": 0,
         "single_candidate_needs_verification": 0,
         "ambiguous": 0,
         "no_candidate": 0,
     }
-
-    stats.update(
-        annotate_known_official_candidates(
-            jobs=jobs,
-            candidates=candidates,
+    started = time.monotonic()
+    stats.update(annotate_known_official_candidates(jobs=jobs, candidates=candidates))
+    if timing is not None:
+        timing["fuzzy_annotation_ms"] = round(
+            (time.monotonic() - started) * 1000, 1
         )
-    )
+        timing["verified_candidate_count"] = len(candidates)
+        timing["jobs_considered"] = len(jobs)
     return stats
 
 
@@ -1336,11 +1370,14 @@ def load_jobs_to_enrich(
             1000 * (time.monotonic() - transform_started), 1
         )
     metadata_started = time.monotonic()
+    candidate_phases = {} if load_timing is not None else None
     prepare_verified_candidate_metadata_before_queue(
         jobs=jobs,
         minimum_words=minimum_words,
+        timing=candidate_phases,
     )
     if load_timing is not None:
+        load_timing["verified_candidate_details"] = candidate_phases
         load_timing["prepare_candidate_metadata_ms"] = round(
             1000 * (time.monotonic() - metadata_started), 1
         )
