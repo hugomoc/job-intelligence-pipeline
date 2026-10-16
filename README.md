@@ -468,3 +468,45 @@ You can audit another database copy without touching the active DB by
 providing `--database /path/to/jobs.duckdb`.
 
 
+
+### Quarantine confirmed expired LinkedIn descriptions (guarded)
+
+After reviewing `data/linkedin-expired-descriptions-audit.json`, you can quarantine
+**only** the `confirmed_expired_search_page` group without deleting postings
+or modifying any unconfirmed/likely rows. This is separate from the audit and
+must be requested explicitly. **Stop Streamlit and other DuckDB users first.**
+
+1. Review the current database against the original report (zero API credits,
+   **read-only**):
+
+```bash
+python -m src.quarantine_confirmed_linkedin_descriptions --audit-report data/linkedin-expired-descriptions-audit.json --expected-count 272 --plan-report data/linkedin-quarantine-dry-run.json
+```
+
+Inspect `ready_to_apply`, `eligible_for_quarantine` and
+`safety_failures` in the plan. The expected count is deliberately explicit.
+The command independently rechecks every current description, original and
+redirected URL, enrichment status, job identity and search-listing markers,
+against the audit record. Any changed or independently verified posting
+prevents **all** changes.
+
+2. Only after the dry run reports `ready_to_apply: true`, explicitly
+   authorize the same reviewed count. This invocation first copies the
+   **entire** closed DuckDB file under `data/quarantine/`, verifies its SHA-256
+   checksum, and refuses to proceed if a `.wal` exists. It then rechecks
+   all original descriptions and metadata and updates the confirmed records
+   in **one transaction**:
+
+```bash
+python -m src.quarantine_confirmed_linkedin_descriptions --audit-report data/linkedin-expired-descriptions-audit.json --expected-count 272 --apply --confirm-count 272 --plan-report data/linkedin-quarantine-applied.json
+```
+
+For every confirmed record, the script sets the inaccurate `raw_jobs.description`
+to NULL and updates `description_updated_at` to invalidate older cached
+scores. It changes the corresponding enrichment attempt to
+`resolution_rejected`, clears misleading extraction metadata and description
+hash, but **retains** original URLs, job record, attempted official URL/status,
+attempt counts and other history. It does not delete AI score history, call
+search APIs, reuse unsupported Workday results or automatically rescore jobs.
+The original database remains recoverable from the checksum-verified full
+backup. Resume normal jobs only after reviewing the outcome.
