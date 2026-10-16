@@ -64,7 +64,9 @@ def load_queue(retry_official_search=False):
 def process_one(job, client, search_circuit=None):
     # Refresh verified candidates between records in a batch, so newly recovered
     # authoritative descriptions can be reused under the existing provenance rules.
+    metadata_started = time.monotonic()
     metadata = prepare_verified_candidate_metadata_before_queue([job], minimum_words=80)
+    metadata_elapsed_ms = round(1000 * (time.monotonic() - metadata_started), 1)
     if metadata["offline_reused"]:
         job["drain_verified_reuse"] = True
         return EnrichmentProcessingResult(
@@ -77,12 +79,20 @@ def process_one(job, client, search_circuit=None):
         processed = process_enrichment_job(job=job, client=client, **options)
     except Exception as error:
         processed = failed_processing_result(job, error)
+    # process_enrichment_job resets run-local timing. Set the offline-prep
+    # timing after it completes so the measurement survives either path.
+    timing = job.setdefault("enrichment_timing", {})
+    timing["verified_candidate_metadata_ms"] = metadata_elapsed_ms
     # Do not catch persistence errors: stopping is safer than losing attempts.
+    save_started = time.monotonic()
     save_enrichment_attempt(job=job, result=processed.result,
                             status=processed.stored_status,
                             error_message=processed.stored_error,
                             identity_validation=processed.identity_validation,
                             official_resolution=processed.official_resolution)
+    timing["save_attempt_ms"] = round(
+        1000 * (time.monotonic() - save_started), 1
+    )
     return processed
 
 
