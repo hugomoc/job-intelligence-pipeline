@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.parse import quote
 
 import httpx
@@ -359,6 +361,78 @@ def test_blocked_employer_site_marks_blocked() -> None:
     assert resolution.official_job_url is None
 
 
+def test_blocked_same_host_is_fetched_once_per_job() -> None:
+    """BairesDev-style applicant links: avoid retrying a host after 403."""
+    urls = [
+        "https://applicants.seismic.com/job/339/243255/apply",
+        "https://applicants.seismic.com/job/960/282675/apply",
+        "https://applicants.seismic.com/job/339/162086/apply",
+    ]
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.extensions["timeout"]["read"] == 8.0
+        return httpx.Response(403, text="blocked")
+
+    job = lensa_job()
+    candidates = [
+        official_resolver.OfficialJobCandidate(url=url, label="", source="search")
+        for url in urls
+    ]
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        outcome = official_resolver.resolve_from_candidates(
+            job, client, candidates, source="search"
+        )
+
+    assert outcome.status == OFFICIAL_BLOCKED
+    assert outcome.official_job_url is None
+    assert len(requests) == 1
+    assert len(job["candidate_validation_trace"]) == 3
+    assert sum(trace["fetch_status"] == "skipped_blocked_host"
+               for trace in job["candidate_validation_trace"]) == 2
+    assert job["enrichment_timing"]["blocked_host_skips"] == 2
+    assert job["enrichment_timing"]["candidate_fetches"] == 1
+
+
+def test_budget_expiry_does_not_promote_partial_verified_candidates() -> None:
+    """Never resolve to FOUND when a competing candidate was not inspected."""
+    urls = [
+        "https://boards.greenhouse.io/seismic/jobs/123",
+        "https://boards.greenhouse.io/seismic/jobs/456",
+    ]
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        return httpx.Response(
+            200,
+            text=job_posting_html("Senior Analytics Engineer", "Seismic"),
+            headers={"content-type": "text/html"},
+        )
+
+    job = lensa_job()
+    candidates = [
+        official_resolver.OfficialJobCandidate(
+            url=url, label="", source="search"
+        ) for url in urls
+    ]
+    # Simulate time expiring immediately after evaluating the first candidate.
+    moments = iter((10.0, 10.0, 10.2, 16.0))
+    with patch.object(
+        official_resolver, "time",
+        SimpleNamespace(monotonic=lambda: next(moments))
+    ):
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            outcome = official_resolver.resolve_from_candidates(
+                job, client, candidates, source="search", deadline=15.0
+            )
+
+    assert outcome.status == official_resolver.OFFICIAL_SEARCH_DEFERRED
+    assert outcome.official_job_url is None
+    assert len(requests) == 1
+
+
 def test_identity_mismatch_rejects_official_candidate() -> None:
     official_url = "https://boards.greenhouse.io/other/jobs/123"
 
@@ -459,6 +533,8 @@ def main() -> None:
     test_ambiguous_official_matches_are_not_guessed()
     test_no_official_match_marks_not_found()
     test_blocked_employer_site_marks_blocked()
+    test_blocked_same_host_is_fetched_once_per_job()
+    test_budget_expiry_does_not_promote_partial_verified_candidates()
     test_identity_mismatch_rejects_official_candidate()
     test_dynamic_candidate_fetch_can_verify_official_job()
     test_ui_open_link_prefers_verified_official_url()
