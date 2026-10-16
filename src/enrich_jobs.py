@@ -1095,33 +1095,53 @@ def load_jobs_to_enrich(
     never_attempted_only: bool = False,
     deduplicate: bool = True,
     retry_official_search: bool = False,
+    targeted_retry_only: bool = False,
+    load_timing: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
+    # Use the exact existing Python selection/identity checks. This optional
+    # SQL prefilter only removes records the targeted transient queue could
+    # never select, before materializing their JDs/admission evaluations.
+    preparation_started = time.monotonic()
     initialize_enrichment_tables()
+    if load_timing is not None:
+        load_timing["initialize_tables_ms"] = round(
+            1000 * (time.monotonic() - preparation_started), 1
+        )
 
+    database_started = time.monotonic()
     with get_connection() as connection:
         register_exact_posting_identity_function(connection)
         cursor = connection.execute(
     """
-    WITH jobs AS (
-        SELECT
-            raw_jobs.*,
-            COALESCE(
-                NULLIF(job_fingerprint, ''),
-                record_key
-            ) AS duplicate_fingerprint,
-            exact_posting_identity(
-                source,
-                source_job_id,
-                apply_url,
-                record_key
-            ) AS exact_posting_key,
-            exact_posting_identity(
-                source,
-                source_job_id,
-                apply_url,
-                record_key
-            ) AS posting_status_key
+    WITH all_jobs AS (
+        -- Keep the complete identity graph for application status and
+        -- historical score joins, even if output jobs are scoped.
+        SELECT record_key, description_updated_at,
+            exact_posting_identity(source, source_job_id, apply_url, record_key)
+                AS posting_status_key
         FROM raw_jobs
+    ),
+    jobs AS (
+        SELECT raw_jobs.*,
+            COALESCE(NULLIF(raw_jobs.job_fingerprint, ''), raw_jobs.record_key)
+                AS duplicate_fingerprint,
+            all_jobs.posting_status_key AS exact_posting_key,
+            all_jobs.posting_status_key AS posting_status_key
+        FROM raw_jobs
+        INNER JOIN all_jobs ON raw_jobs.record_key = all_jobs.record_key
+        WHERE (? = FALSE OR EXISTS (
+            SELECT 1 FROM job_enrichment_attempts AS transient_attempt
+            WHERE transient_attempt.record_key = raw_jobs.record_key
+              AND (
+                  transient_attempt.official_url_status IN (
+                      'SEARCH_DEFERRED', 'INSUFFICIENT_IDENTITY'
+                  )
+                  OR (
+                      transient_attempt.official_url_status IN ('ERROR', 'BLOCKED')
+                      AND transient_attempt.official_url_source = 'search'
+                  )
+              )
+        ))
     ),
 
     best_rule_match AS (
@@ -1153,7 +1173,7 @@ def load_jobs_to_enrich(
                     status.record_key
             ) AS status_rank
         FROM application_status AS status
-        INNER JOIN jobs AS status_jobs
+        INNER JOIN all_jobs AS status_jobs
             ON status.record_key = status_jobs.record_key
     ),
 
@@ -1162,7 +1182,7 @@ def load_jobs_to_enrich(
             score_jobs.exact_posting_key,
             max(scores.overall_score) AS ai_score
         FROM resume_job_scores AS scores
-        INNER JOIN jobs AS score_jobs
+        INNER JOIN all_jobs AS score_jobs
             ON scores.record_key = score_jobs.record_key
         WHERE scores.description_complete = true
           AND (? IS NULL OR scores.resume_hash = ?)
@@ -1279,7 +1299,7 @@ def load_jobs_to_enrich(
         jobs.title,
         jobs.company_name
     """,
-            [resume_hash, resume_hash, MATCHER_PROMPT_VERSION, EXCLUDED_TITLE_SQL_REGEX],
+            [targeted_retry_only, resume_hash, resume_hash, MATCHER_PROMPT_VERSION, EXCLUDED_TITLE_SQL_REGEX],
     )
 
         columns = [
@@ -1290,6 +1310,11 @@ def load_jobs_to_enrich(
 
         rows = cursor.fetchall()
 
+    if load_timing is not None:
+        load_timing["load_sql_ms"] = round(
+            1000 * (time.monotonic() - database_started), 1
+        )
+    transform_started = time.monotonic()
     jobs = [
         dict(zip(columns, row))
         for row in rows
@@ -1306,10 +1331,20 @@ def load_jobs_to_enrich(
         )
         job["description_state"] = description_state(job)
 
+    if load_timing is not None:
+        load_timing["description_classification_ms"] = round(
+            1000 * (time.monotonic() - transform_started), 1
+        )
+    metadata_started = time.monotonic()
     prepare_verified_candidate_metadata_before_queue(
         jobs=jobs,
         minimum_words=minimum_words,
     )
+    if load_timing is not None:
+        load_timing["prepare_candidate_metadata_ms"] = round(
+            1000 * (time.monotonic() - metadata_started), 1
+        )
+    admission_started = time.monotonic()
 
     for job in jobs:
         job["description_state"] = description_state(job)
@@ -1322,6 +1357,10 @@ def load_jobs_to_enrich(
             keep_filtered_out=True,
         )
 
+    if load_timing is not None:
+        load_timing["admission_gate_ms"] = round(
+            1000 * (time.monotonic() - admission_started), 1
+        )
     for job in jobs:
         priority = calculate_enrichment_priority(job)
         job["enrichment_priority_score"] = priority.score
