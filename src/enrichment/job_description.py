@@ -734,6 +734,8 @@ def extract_job_description_from_html(
 def fetch_job_description(
     url: str,
     client: httpx.Client,
+    *,
+    timeout_seconds: float | None = None,
 ) -> JobDescriptionResult:
     if not is_valid_http_url(url):
         return JobDescriptionResult(
@@ -751,7 +753,10 @@ def fetch_job_description(
         )
 
     try:
-        response = client.get(url)
+        # Candidate requests use a short timeout; source/verified URLs keep their
+        # existing default unless their caller explicitly opts in.
+        response = (client.get(url) if timeout_seconds is None
+                    else client.get(url, timeout=timeout_seconds))
 
     except httpx.TimeoutException:
         return JobDescriptionResult(
