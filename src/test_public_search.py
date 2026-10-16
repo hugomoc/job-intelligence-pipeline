@@ -291,7 +291,10 @@ class SearchTests(unittest.TestCase):
                 self.assertEqual(provider_metrics(client)['tavily']['quota_exhausted'], 1)
                 circuit.search(lensa_job(), client)
                 self.assertEqual([request.url.host for request in calls].count('api.tavily.com'), 1)
-                self.assertEqual([request.url.host for request in calls].count('google.serper.dev'), 2)
+                # Serper's successful response is reused for the same query;
+                # the Tavily quota error remains uncached and its circuit open.
+                self.assertEqual([request.url.host for request in calls].count('google.serper.dev'), 1)
+                self.assertEqual(provider_metrics(client)['serper']['search_requests'], 1)
 
     def test_no_tavily_results_is_success_not_serper_fallback(self):
         with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily'}):
