@@ -1997,21 +1997,21 @@ def save_enrichment_attempt(
     # An unsuccessful official search did not supply this description.
     # Keep the fetched source's extraction provenance instead of incorrectly
     # labelling a source-page JD as "search".
-    description_source = (
-        (
-            official_resolution.official_url_source
-            if official_resolution and official_resolution.status == OFFICIAL_FOUND_VERIFIED
-            else None
+    if official_resolution and official_resolution.status == OFFICIAL_FOUND_VERIFIED:
+        # Preserve the explicit trusted provenance marker used by verified
+        # direct refetches and other authoritative reuse paths.
+        description_source = (
+            job.get("description_source")
+            or official_resolution.official_url_source
+            or result.extraction_method
         )
-        or (
-            result.extraction_method
-            if final_status == "enriched"
-            and (not official_resolution or official_resolution.status != OFFICIAL_FOUND_VERIFIED)
-            else None
+    else:
+        # A failed official search never supplied a newly saved source JD.
+        description_source = (
+            (result.extraction_method if final_status == "enriched" else None)
+            or job.get("description_source")
+            or result.extraction_method
         )
-        or job.get("description_source")
-        or result.extraction_method
-    )
     posting_status = job.get("posting_status") or "unknown"
     reused_description = bool(job.get("reused_description"))
 
