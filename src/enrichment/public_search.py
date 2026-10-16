@@ -4,6 +4,7 @@ import os
 import httpx
 
 SERPER_URL = "https://google.serper.dev/search"
+TAVILY_URL = "https://api.tavily.com/search"
 
 class PublicSearchError(RuntimeError):
     def __init__(self, provider, category):
@@ -21,8 +22,20 @@ class SearchResponse:
     untrusted_results: tuple[dict, ...] = ()
 
 
+def available_providers():
+    """Tavily first, Serper only as fallback; no automatic DDG scraping."""
+    if os.environ.get("PUBLIC_SEARCH_PROVIDER", "").strip().lower() == "duckduckgo":
+        # Explicit legacy diagnostic opt-in only; never automatic.
+        return ("duckduckgo",)
+    return tuple(
+        provider for provider, name in (
+            ("tavily", "TAVILY_API_KEY"), ("serper", "SERPER_API_KEY")
+        ) if os.environ.get(name, "").strip()
+    )
+
+
 def selected_provider():
-    return "serper" if os.environ.get("SERPER_API_KEY", "").strip() else "duckduckgo"
+    return next(iter(available_providers()), "none")
 
 
 def provider_metrics(client):
@@ -84,3 +97,64 @@ def serper_search(query, client):
     audit = tuple({"url": row.get("link", ""), "title": row.get("title", "")}
                   for row in organic if isinstance(row, dict))
     return SearchResponse(urls, len(organic), audit)
+
+def tavily_search(query, client):
+    """One basic Tavily search (=1 credit); discovery URLs only."""
+    key = os.environ.get("TAVILY_API_KEY", "").strip()
+    if not key:
+        metric(client, "tavily", "auth_configuration")
+        raise PublicSearchError("tavily", "auth_configuration")
+    metric(client, "tavily", "search_requests")
+    try:
+        response = client.post(
+            TAVILY_URL,
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "query": query, "search_depth": "basic",
+                "max_results": 10, "topic": "general",
+                "include_answer": False, "include_raw_content": False,
+                "auto_parameters": False,
+            },
+            follow_redirects=False,
+        )
+    except httpx.RequestError:
+        metric(client, "tavily", "transient_error")
+        raise PublicSearchError("tavily", "transient_error") from None
+
+    if response.status_code in {402, 432, 433}:
+        category = "quota_exhausted"
+    elif response.status_code in {401, 403, 400, 422}:
+        category = "auth_configuration"
+    elif response.status_code == 429:
+        category = "rate_limit"
+    elif response.status_code >= 500 or 300 <= response.status_code < 400:
+        category = "transient_error"
+    elif response.status_code >= 400:
+        category = "auth_configuration"
+    else:
+        category = None
+    if category:
+        metric(client, "tavily", category)
+        raise PublicSearchError("tavily", category)
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        metric(client, "tavily", "transient_error")
+        raise PublicSearchError("tavily", "transient_error")
+
+    metric(client, "tavily", "successful_responses")
+    hits = payload["results"]
+    if not hits:
+        metric(client, "tavily", "no_result_searches")
+    urls = tuple(dict.fromkeys(
+        item["url"] for item in hits
+        if isinstance(item, dict) and isinstance(item.get("url"), str)
+    ))
+    audit = tuple(
+        {"url": item.get("url", ""), "title": item.get("title", "")}
+        for item in hits if isinstance(item, dict)
+    )
+    return SearchResponse(urls, len(hits), audit)
