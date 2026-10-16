@@ -20,6 +20,7 @@ from src.enrich_jobs import (
     EnrichmentProcessingResult,
 )
 from src.enrichment.official_job_resolver import OFFICIAL_FOUND_VERIFIED, PublicSearchCircuit
+from src.enrichment.public_search import provider_metrics
 
 
 class RateLimitGuard:
@@ -120,6 +121,14 @@ def drain(client, *, batch_size=250, delay=0.5, max_jobs=None,
         report['elapsed_seconds'] = round(time.monotonic() - started, 2)
         report['rate_limit_responses'] = guard.total
         report['search_circuit'] = search_circuit.summary()
+        metrics = provider_metrics(client) if client is not None else {}
+        report['provider_metrics'] = metrics
+        report['public_search_requests'] = sum(
+            int(item.get('search_requests', 0)) for item in metrics.values()
+        )
+        report['public_search_requests_per_processed_job'] = round(
+            report['public_search_requests'] / report['processed'], 3
+        ) if report['processed'] else 0.0
         if checkpoint:
             write_report(checkpoint, report)
 
