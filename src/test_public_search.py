@@ -221,6 +221,7 @@ class SearchTests(unittest.TestCase):
             'https://www.pfizer.com/about/careers',
             'https://www.dice.com/jobs/q-Analytics%20Engineer-jobs',
             'https://www.dice.com/job-detail/992c0a89-bda6-41a2-b205-b34b2b7dc4eb',
+            'https://www.point32health.org/careers/join-our-team',
             'https://jobs.ashbyhq.com/Acme',
         ]
         for url in bad:
