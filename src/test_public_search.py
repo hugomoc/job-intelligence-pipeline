@@ -14,7 +14,7 @@ URL = 'https://boards.greenhouse.io/seismic/jobs/123'
 
 class SearchTests(unittest.TestCase):
     def setUp(self):
-        env = patch.dict(os.environ, {'SERPER_API_KEY': 'mock-secret'})
+        env = patch.dict(os.environ, {'SERPER_API_KEY': 'mock-secret', 'TAVILY_API_KEY': '', 'PUBLIC_SEARCH_PROVIDER': ''})
         env.start(); self.addCleanup(env.stop)
 
     def client(self, status=200, payload=None, page=None, transport_error=False):
@@ -51,7 +51,7 @@ class SearchTests(unittest.TestCase):
             self.assertEqual(trace_job['public_search_trace']['organic_results'][0]['title'], 'Senior Analytics Engineer')
             self.assertTrue(trace_job['public_search_trace']['organic_results'][0]['candidate'])
         with patch.dict(os.environ, {'SERPER_API_KEY': ''}):
-            self.assertEqual(selected_provider(), 'duckduckgo')
+            self.assertEqual(selected_provider(), 'none')
 
     def resolve(self, client):
         with patch.object(resolver, 'discover_ats_candidates', return_value=[]):
@@ -120,7 +120,7 @@ class SearchTests(unittest.TestCase):
 
     def test_duckduckgo_challenge_does_not_disable_serper(self):
         circuit = resolver.PublicSearchCircuit(threshold=1)
-        with patch.dict(os.environ, {'SERPER_API_KEY': ''}), \
+        with patch.dict(os.environ, {'SERPER_API_KEY': '', 'PUBLIC_SEARCH_PROVIDER': 'duckduckgo'}), \
              httpx.Client(transport=httpx.MockTransport(lambda r:httpx.Response(200,text='Bots use DuckDuckGo too'))) as client:
             with self.assertRaises(PermissionError): circuit.search(lensa_job(), client)
             self.assertTrue(circuit.open)
@@ -128,6 +128,89 @@ class SearchTests(unittest.TestCase):
             self.assertFalse(circuit.open)
             self.assertEqual(len(circuit.search(lensa_job(), client)), 1)
         self.assertTrue(circuit.states['duckduckgo']['open'])
+
+    def tavily_client(self, tavily_status=200, tavily_payload=None, serper_status=200):
+        requests = []
+        def handler(request):
+            requests.append(request)
+            if request.url.host == 'api.tavily.com':
+                self.assertNotIn('x-api-key', request.headers)
+                self.assertEqual(request.headers.get('authorization'), 'Bearer mock-tavily')
+                return httpx.Response(
+                    tavily_status, json=tavily_payload if tavily_payload is not None
+                    else {'results': [{'url': URL, 'title': 'Seismic opening'}]}
+                )
+            if request.url.host == 'google.serper.dev':
+                self.assertEqual(request.headers.get('x-api-key'), 'mock-secret')
+                self.assertNotIn('authorization', request.headers)
+                return httpx.Response(serper_status, json={
+                    'organic': [{'link': URL, 'title': 'Seismic opening'}]
+                })
+            self.assertNotIn('authorization', request.headers)
+            self.assertNotIn('x-api-key', request.headers)
+            return httpx.Response(200, text=job_posting_html('Senior Analytics Engineer', 'Seismic'),
+                                  headers={'content-type': 'text/html'})
+        return httpx.Client(transport=httpx.MockTransport(handler)), requests
+
+    def test_tavily_primary_basic_search_one_credit_no_identity_from_title(self):
+        from src.enrichment.public_search import available_providers
+        with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily'}):
+            self.assertEqual(available_providers(), ('tavily', 'serper'))
+            client, calls = self.tavily_client()
+            with client:
+                candidate = resolver.search_candidates(lensa_job(), client)
+                self.assertEqual(len(candidate), 1)
+                self.assertIsNone(candidate[0].title)
+                self.assertIsNone(candidate[0].company)
+                request = calls[0]
+                payload = json.loads(request.content)
+                self.assertEqual(payload['search_depth'], 'basic')
+                self.assertFalse(payload['auto_parameters'])
+                self.assertEqual(payload['max_results'], 10)
+                self.assertEqual(request.url.host, 'api.tavily.com')
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(provider_metrics(client)['tavily']['search_requests'], 1)
+                self.assertEqual(provider_metrics(client).get('serper'), None)
+
+    def test_tavily_quota_falls_back_to_serper_for_same_job(self):
+        with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily'}):
+            client, calls = self.tavily_client(tavily_status=432, tavily_payload={'detail': {'error': 'plan limit'}})
+            with client:
+                circuit = resolver.PublicSearchCircuit()
+                job = lensa_job()
+                results = circuit.search(job, client)
+                self.assertEqual(len(results), 1)
+                self.assertEqual([request.url.host for request in calls],
+                                 ['api.tavily.com', 'google.serper.dev'])
+                self.assertEqual(job['public_search_trace']['provider'], 'serper')
+                self.assertEqual(job['public_search_trace']['attempted_providers'], ['tavily', 'serper'])
+                self.assertTrue(circuit.state('tavily')['open'])
+                self.assertFalse(circuit.open)
+                self.assertEqual(provider_metrics(client)['tavily']['quota_exhausted'], 1)
+                circuit.search(lensa_job(), client)
+                self.assertEqual([request.url.host for request in calls].count('api.tavily.com'), 1)
+                self.assertEqual([request.url.host for request in calls].count('google.serper.dev'), 2)
+
+    def test_no_tavily_results_is_success_not_serper_fallback(self):
+        with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily'}):
+            client, calls = self.tavily_client(tavily_payload={'results': []})
+            with client:
+                circuit = resolver.PublicSearchCircuit()
+                self.assertEqual(circuit.search(lensa_job(), client), [])
+                self.assertEqual(len(calls), 1)
+                self.assertFalse(circuit.open)
+                self.assertEqual(provider_metrics(client)['tavily']['no_result_searches'], 1)
+
+    def test_tavily_redirect_does_not_leak_bearer_to_another_host(self):
+        with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily', 'SERPER_API_KEY': ''}):
+            called = []
+            def handler(request):
+                called.append(request.url.host)
+                return httpx.Response(302, headers={'location': 'https://wrong.example/jobs'})
+            with httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True) as client:
+                with self.assertRaises(PublicSearchError):
+                    resolver.search_candidates(lensa_job(), client)
+            self.assertEqual(called, ['api.tavily.com'])
 
     def test_redirect_never_forwards_key(self):
         called=[]
