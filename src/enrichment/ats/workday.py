@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import quote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -193,3 +194,77 @@ def discover_candidates(
         job=job,
         candidates=candidates[:MAX_ATS_RESULTS],
     )
+
+
+def discover_from_search_homepage(
+    job: dict,
+    client: httpx.Client,
+    root_url: str,
+) -> list[OfficialJobCandidate]:
+    """Read a known Workday tenant's public CXS listing for exact job leads.
+
+    A search result landing on a Workday homepage supplies only the tenant and
+    public career-site slug. CXS posting titles/links are untrusted hints;
+    final resolution still fetches and independently validates the posting.
+    """
+    parsed = urlparse(root_url)
+    host = (parsed.hostname or "").casefold()
+    if (parsed.scheme != "https" or not
+            (host.endswith(".myworkdayjobs.com") or
+             host.endswith(".myworkdaysite.com"))):
+        return []
+    tenant = host.split(".")[0]
+    segments = [part for part in parsed.path.strip("/").split("/") if part]
+    if segments and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", segments[0]):
+        segments = segments[1:]
+    # The search hit must be a career-site root; a posting URL is already
+    # handled by ordinary candidate resolution.
+    if len(segments) != 1 or not tenant:
+        return []
+    site = segments[0]
+    key = (host, site.casefold(), str(job.get("title") or "").strip().casefold())
+    cache = getattr(client, "_workday_listing_cache", None)
+    if cache is None:
+        cache = {}
+        client._workday_listing_cache = cache
+    if key in cache:
+        return list(cache[key])
+
+    endpoint = (
+        f"https://{host}/wday/cxs/{quote(tenant, safe='')}/"
+        f"{quote(site, safe='')}/jobs"
+    )
+    try:
+        response = client.post(
+            endpoint,
+            json={"appliedFacets": {}, "limit": 20, "offset": 0,
+                  "searchText": str(job.get("title") or "")},
+            timeout=8.0, follow_redirects=False,
+        )
+        if response.status_code != 200:
+            return []
+        payload = response.json()
+    except (httpx.RequestError, ValueError):
+        return []
+
+    postings = payload.get("jobPostings") if isinstance(payload, dict) else None
+    if not isinstance(postings, list):
+        return []
+    base = f"https://{host}/en-US/{site}"
+    candidates = []
+    for posting in postings[:20]:
+        if not isinstance(posting, dict):
+            continue
+        path = posting.get("externalPath")
+        if not isinstance(path, str) or not path.startswith("/job/"):
+            continue
+        candidate = make_candidate(
+            url=base + path, title=posting.get("title"),
+            company=job.get("company_name"),
+            location=posting.get("locationsText"), source=SOURCE,
+        )
+        if candidate:
+            candidates.append(candidate)
+    ranked = filter_and_rank_candidates(job, candidates, max_results=5)
+    cache[key] = tuple(ranked)
+    return ranked
