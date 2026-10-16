@@ -8,7 +8,9 @@ from tempfile import TemporaryDirectory
 
 import duckdb
 
-from src.audit_linkedin_expired_descriptions import audit, CLASS_CONFIRMED
+from src.audit_linkedin_expired_descriptions import (
+    audit, CLASS_CONFIRMED, CLASS_HIGH_CONFIDENCE,
+)
 from src.quarantine_confirmed_linkedin_descriptions import (
     apply_quarantine, load_confirmed_manifest, make_plan, make_backup,
 )
@@ -74,6 +76,124 @@ def prepare(temp: Path):
     audit_path.write_text(json.dumps(report))
     assert report["counts"][CLASS_CONFIRMED] == 2
     return database, audit_path
+
+
+GENERIC_RESULTS = (
+    "Get notified about new Senior Data Engineer jobs in United States . "
+    "Sign in to create job alert 11,000+ Senior Data Engineer Jobs in "
+    "United States. Sr. Data Engineer Carrot San Francisco Be an early "
+    "applicant Actively Hiring."
+) * 5
+SPANISH_RESULTS = (
+    "Get notified about new Ingeniero jobs in Spain . Sign in to create job "
+    "alert 11,000+ Ingeniero Jobs in Spain. SIEM Engineer Madrid."
+) * 5
+
+
+def prepare_second_pass(temp: Path):
+    db_path, report_path = prepare(temp)
+    with duckdb.connect(str(db_path)) as db:
+        extra = [
+            ("second-not-improved", GENERIC_RESULTS, EXPIRED, "not_improved"),
+            ("second-blocked", GENERIC_RESULTS, EXPIRED, "blocked"),
+            ("second-spanish", SPANISH_RESULTS,
+             "https://es.linkedin.com/jobs/ingeniero-empleos?trk=expired_jd_redirect",
+             "enriched"),
+            ("second-reset", GENERIC_RESULTS,
+             "https://www.linkedin.com/jobs/view/123/", "blocked"),
+        ]
+        for key, description, redirect, status in extra:
+            db.execute(
+                "INSERT INTO raw_jobs VALUES (?,?,?,?,?,?,NULL)",
+                [key, "linkedin", "Senior Data Engineer", "Acme",
+                 "https://www.linkedin.com/jobs/view/123/", description],
+            )
+            db.execute(
+                "INSERT INTO job_enrichment_attempts VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [key, redirect, status, "identity validation not required for this source",
+                 "search", "OFFICIAL_NOT_FOUND", None, "previous failed try",
+                 len(description.split()), "html_selector", "stale-hash",
+                 1.0, 1.0, 1.0, None, None, None, False,
+                 None, None, 4],
+            )
+    report = audit(db_path)
+    assert report["counts"][CLASS_CONFIRMED] == 2
+    assert report["counts"][CLASS_HIGH_CONFIDENCE] == 4
+    report_path.write_text(json.dumps(report))
+    return db_path, report_path
+
+
+def test_second_pass_quarantines_only_high_confidence_across_statuses() -> None:
+    with TemporaryDirectory() as root:
+        temp = Path(root)
+        db_path, manifest_path = prepare_second_pass(temp)
+        before = digest(db_path)
+        plan, _ = make_plan(
+            db_path, manifest_path, 4, target_class=CLASS_HIGH_CONFIDENCE
+        )
+        assert plan["ready_to_apply"]
+        assert plan["target_class"] == CLASS_HIGH_CONFIDENCE
+        assert plan["eligible_for_quarantine"] == 4
+        assert digest(db_path) == before
+        result = apply_quarantine(
+            db_path, manifest_path, 4, temp / "backups",
+            target_class=CLASS_HIGH_CONFIDENCE,
+        )
+        assert result["changed_raw_jobs"] == 4
+        assert result["changed_enrichment_attempts"] == 4
+        assert Path(result["backup_file"]).exists()
+        assert digest(Path(result["backup_file"])) == before
+        with duckdb.connect(str(db_path), read_only=True) as db:
+            changed = db.execute("""
+                SELECT r.record_key, r.description, r.description_updated_at,
+                       a.status, a.description_source, a.description_hash,
+                       a.attempt_count
+                FROM raw_jobs AS r
+                JOIN job_enrichment_attempts AS a USING(record_key)
+                WHERE r.record_key LIKE 'second-%'
+                ORDER BY r.record_key
+            """).fetchall()
+            assert len(changed) == 4
+            assert all(
+                r[1] is None and r[2] is not None
+                and r[3] == "resolution_rejected"
+                and r[4] is None and r[5] is None and r[6] == 4
+                for r in changed
+            )
+            untouched = db.execute("""
+                SELECT COUNT(*) FROM raw_jobs
+                WHERE record_key LIKE 'confirmed-%'
+                  AND description IS NOT NULL
+            """).fetchone()[0]
+            assert untouched == 2
+
+
+def test_second_pass_refuses_changed_status_or_verified_posting() -> None:
+    with TemporaryDirectory() as root:
+        temp = Path(root)
+        db_path, manifest_path = prepare_second_pass(temp)
+        with duckdb.connect(str(db_path)) as db:
+            db.execute("""
+                UPDATE job_enrichment_attempts
+                SET verified_posting_key = 'greenhouse:321'
+                WHERE record_key = 'second-reset'
+            """)
+        plan, _ = make_plan(
+            db_path, manifest_path, 4, target_class=CLASS_HIGH_CONFIDENCE,
+        )
+        assert not plan["ready_to_apply"]
+        assert plan["safety_failures"]
+        try:
+            apply_quarantine(
+                db_path, manifest_path, 4, temp / "backups",
+                target_class=CLASS_HIGH_CONFIDENCE,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Second pass cannot clear independently verified records")
+        assert not (temp / "backups").exists()
 
 
 def digest(path: Path) -> str:
@@ -202,6 +322,8 @@ def test_existing_wal_prevents_unsafe_file_copy() -> None:
 
 
 def main():
+    test_second_pass_quarantines_only_high_confidence_across_statuses()
+    test_second_pass_refuses_changed_status_or_verified_posting()
     test_dry_run_is_byte_identical_and_reports_two_targets()
     test_apply_creates_full_backup_and_changes_only_confirmed()
     test_manifest_drift_or_present_verified_key_aborts_before_backup()
