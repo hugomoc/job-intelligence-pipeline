@@ -27,6 +27,7 @@ from src.enrichment.job_description import (
     count_words,
     create_http_client,
     fetch_job_description,
+    is_unsafe_linkedin_posting_redirect,
 )
 from src.enrichment.job_identity import (
     JobIdentityValidation,
@@ -309,6 +310,7 @@ def requires_identity_validation(
 
     return (
         source in AGGREGATOR_SOURCES_REQUIRING_IDENTITY
+        or source == "linkedin"
         or "jobleads.com" in final_url
         or "lensa.com" in final_url
     )
@@ -341,6 +343,17 @@ def validate_enrichment_identity(
     job: dict[str, Any],
     result: JobDescriptionResult,
 ) -> JobIdentityValidation:
+    # Defensive second boundary: even if an alternate extraction path
+    # produces a long page, an expired/search redirect cannot be a JD.
+    if is_unsafe_linkedin_posting_redirect(job.get("apply_url"), result.final_url):
+        return JobIdentityValidation(
+            accepted=False,
+            confidence=0.0,
+            title_similarity=None,
+            company_similarity=None,
+            occupation_match=None,
+            reason="original LinkedIn posting redirected to generic/expired or different job page",
+        )
     location_status, location_reason = location_compatibility(
         job.get("location"), result.resolved_location, result.resolved_location_source
     )
@@ -1973,13 +1986,22 @@ def save_enrichment_attempt(
         or description_hash(result.description)
         or None
     )
+    # An unsuccessful official search did not supply this description.
+    # Keep the fetched source's extraction provenance instead of incorrectly
+    # labelling a source-page JD as "search".
     description_source = (
-        job.get("description_source")
-        or (
+        (
             official_resolution.official_url_source
-            if official_resolution
+            if official_resolution and official_resolution.status == OFFICIAL_FOUND_VERIFIED
             else None
         )
+        or (
+            result.extraction_method
+            if final_status == "enriched"
+            and (not official_resolution or official_resolution.status != OFFICIAL_FOUND_VERIFIED)
+            else None
+        )
+        or job.get("description_source")
         or result.extraction_method
     )
     posting_status = job.get("posting_status") or "unknown"
