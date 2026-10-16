@@ -18,6 +18,7 @@ import duckdb
 
 from src.audit_linkedin_expired_descriptions import (
     CLASS_CONFIRMED,
+    CLASS_HIGH_CONFIDENCE,
     classify_row,
     load_rows,
 )
@@ -25,6 +26,8 @@ from src.database import DATABASE_PATH
 
 
 AUDIT_TYPE = "stored_linkedin_description_redirects"
+ALLOWED_TARGET_CLASSES = (CLASS_CONFIRMED, CLASS_HIGH_CONFIDENCE)
+ALLOWED_SECOND_PASS_STATUSES = frozenset(("enriched", "blocked", "not_improved"))
 QUARANTINE_REASON = (
     "Quarantined confirmed contamination: expired LinkedIn posting "
     "redirected to unrelated job-search listings."
@@ -34,7 +37,11 @@ IDENTITY_REASON = (
 )
 
 
-def load_confirmed_manifest(report_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def load_confirmed_manifest(
+    report_path: Path, *, target_class: str = CLASS_CONFIRMED
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if target_class not in ALLOWED_TARGET_CLASSES:
+        raise ValueError("Unsupported quarantine classification")
     audit = json.loads(report_path.read_text())
     if audit.get("audit") != AUDIT_TYPE or audit.get("read_only") is not True:
         raise ValueError("Input is not the expected read-only LinkedIn audit report")
@@ -43,10 +50,10 @@ def load_confirmed_manifest(report_path: Path) -> tuple[dict[str, Any], list[dic
         raise ValueError("Audit findings are missing")
     confirmed = [
         row for row in findings
-        if row.get("classification") == CLASS_CONFIRMED
+        if row.get("classification") == target_class
     ]
-    if audit.get("counts", {}).get(CLASS_CONFIRMED) != len(confirmed):
-        raise ValueError("Audit confirmed count does not match individual findings")
+    if audit.get("counts", {}).get(target_class) != len(confirmed):
+        raise ValueError("Audit class count does not match individual findings")
     keys = [row.get("record_key") for row in confirmed]
     if not all(isinstance(key, str) and key for key in keys):
         raise ValueError("Missing record key in confirmed audit findings")
@@ -75,15 +82,20 @@ def row_signature(row: dict[str, Any]) -> str:
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
-def matching_failures(stored: dict[str, Any] | None, manifest: dict[str, Any]) -> list[str]:
+def matching_failures(
+    stored: dict[str, Any] | None,
+    manifest: dict[str, Any],
+    *,
+    target_class: str = CLASS_CONFIRMED,
+) -> list[str]:
     if stored is None:
         return ["row missing or description already cleared"]
     actual = classify_row(stored)
     failures = []
-    if actual["classification"] != CLASS_CONFIRMED:
-        failures.append(f"no longer confirmed ({actual['classification']})")
+    if actual["classification"] != target_class:
+        failures.append(f"no longer matches targeted class ({actual['classification']})")
     for key in (
-        "record_key", "title", "company", "original_url", "final_url",
+        "record_key", "source", "title", "company", "original_url", "final_url",
         "attempt_status", "official_status", "description_source",
         "description_words", "description_characters", "description_preview",
     ):
@@ -95,8 +107,11 @@ def matching_failures(stored: dict[str, Any] | None, manifest: dict[str, Any]) -
         failures.append("verified posting key present; manual review required")
     if actual["official_status"] == "FOUND_VERIFIED":
         failures.append("official verification present; manual review required")
-    if actual["attempt_status"] != "enriched":
-        failures.append("attempt is not enriched")
+    if target_class == CLASS_CONFIRMED and actual["attempt_status"] != "enriched":
+        failures.append("first-pass attempt is not enriched")
+    if (target_class == CLASS_HIGH_CONFIDENCE
+            and actual["attempt_status"] not in ALLOWED_SECOND_PASS_STATUSES):
+        failures.append("second-pass attempt status is outside reviewed cases")
     return failures
 
 
@@ -104,17 +119,21 @@ def make_plan(
     db_path: Path,
     report_path: Path,
     expected_count: int,
+    *,
+    target_class: str = CLASS_CONFIRMED,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     if expected_count < 1:
         raise ValueError("Expected count must be positive")
-    audit, confirmed = load_confirmed_manifest(report_path)
+    audit, confirmed = load_confirmed_manifest(
+        report_path, target_class=target_class
+    )
     rows = {row["record_key"]: row for row in load_rows(db_path)}
     issues = []
     signatures = {}
     for finding in confirmed:
         key = finding["record_key"]
         row = rows.get(key)
-        failures = matching_failures(row, finding)
+        failures = matching_failures(row, finding, target_class=target_class)
         if failures:
             issues.append({"record_key": key, "problems": failures})
         elif row is not None:
@@ -123,11 +142,12 @@ def make_plan(
         issues.append({
             "record_key": None,
             "problems": [
-                f"Expected {expected_count} confirmed records but audit contains {len(confirmed)}"
+                f"Expected {expected_count} {target_class} records but audit contains {len(confirmed)}"
             ],
         })
     plan = {
         "operation": "quarantine_confirmed_expired_linkedin_descriptions",
+        "target_class": target_class,
         "mode": "dry_run",
         "database": str(db_path),
         "audit_report": str(report_path),
@@ -141,12 +161,13 @@ def make_plan(
         "record_keys": sorted(signatures),
         "other_audit_categories_untouched": {
             key: value for key, value in audit.get("counts", {}).items()
-            if key != CLASS_CONFIRMED
+            if key != target_class
         },
         "note": (
             "Review only. No database changes in dry-run. Applying clears only "
-            "these confirmed descriptions, retains posting/attempt histories, "
-            "and updates description_updated_at so historical scores are stale."
+            "descriptions in the explicitly targeted class, retains posting and "
+            "attempt history, and updates description_updated_at so historical "
+            "scores are stale."
         ),
     }
     return plan, signatures
@@ -197,6 +218,8 @@ def recheck_in_transaction(
     keys: list[str],
     signatures: dict[str, str],
     manifest_by_key: dict[str, dict[str, Any]],
+    *,
+    target_class: str = CLASS_CONFIRMED,
 ) -> None:
     placeholders = ", ".join("?" for _ in keys)
     cursor = connection.execute(
@@ -217,7 +240,9 @@ def recheck_in_transaction(
         raise RuntimeError("Some audited records disappeared before cleanup")
     for key in keys:
         row = rows[key]
-        if row_signature(row) != signatures[key] or matching_failures(row, manifest_by_key[key]):
+        if row_signature(row) != signatures[key] or matching_failures(
+            row, manifest_by_key[key], target_class=target_class
+        ):
             raise RuntimeError(f"Record changed since preflight: {key}")
 
 
@@ -226,21 +251,29 @@ def apply_quarantine(
     audit_report: Path,
     expected_count: int,
     backup_dir: Path,
+    *,
+    target_class: str = CLASS_CONFIRMED,
 ) -> dict[str, Any]:
-    plan, signatures = make_plan(db_path, audit_report, expected_count)
+    plan, signatures = make_plan(
+        db_path, audit_report, expected_count, target_class=target_class
+    )
     if not plan["ready_to_apply"]:
         raise ValueError("Safety checks failed; no records changed. Run dry-run and inspect its report.")
 
     # Never create the backup until all read-only eligibility checks pass.
     backup_path, backup_hash = make_backup(db_path, backup_dir)
-    _, manifest = load_confirmed_manifest(audit_report)
+    _, manifest = load_confirmed_manifest(
+        audit_report, target_class=target_class
+    )
     by_key = {item["record_key"]: item for item in manifest}
     keys = sorted(signatures)
 
     with duckdb.connect(str(db_path)) as connection:
         connection.execute("BEGIN TRANSACTION")
         try:
-            recheck_in_transaction(connection, keys, signatures, by_key)
+            recheck_in_transaction(
+                connection, keys, signatures, by_key, target_class=target_class
+            )
             raw_count = 0
             attempt_count = 0
             for key in keys:
@@ -272,10 +305,14 @@ def apply_quarantine(
                         reused_description = FALSE,
                         matched_prior_record_key = NULL,
                         matched_prior_source = NULL
-                    WHERE record_key = ? AND status = 'enriched'
+                    WHERE record_key = ? AND status = ?
                       AND verified_posting_key IS NULL
                     RETURNING record_key
-                    """, [QUARANTINE_REASON, IDENTITY_REASON, key],
+                    """, [
+                        (QUARANTINE_REASON if target_class == CLASS_CONFIRMED
+                         else "Quarantined: high-confidence generic LinkedIn job-results page."),
+                        IDENTITY_REASON, key, by_key[key]["attempt_status"],
+                    ],
                 ).fetchall())
             if raw_count != expected_count or attempt_count != expected_count:
                 raise RuntimeError(
@@ -304,6 +341,11 @@ def main() -> None:
     parser.add_argument("--audit-report", type=Path, required=True)
     parser.add_argument("--expected-count", type=int, required=True)
     parser.add_argument(
+        "--target-class", choices=ALLOWED_TARGET_CLASSES,
+        default=CLASS_CONFIRMED,
+        help="Explicitly select confirmed first pass or high-confidence second pass.",
+    )
+    parser.add_argument(
         "--plan-report", type=Path,
         default=DATABASE_PATH.parent / "linkedin-quarantine-plan.json",
     )
@@ -318,13 +360,20 @@ def main() -> None:
         parser.error("--apply requires --confirm-count matching --expected-count")
 
     plan = (
-        apply_quarantine(args.database, args.audit_report, args.expected_count, args.backup_dir)
+        apply_quarantine(
+            args.database, args.audit_report, args.expected_count,
+            args.backup_dir, target_class=args.target_class,
+        )
         if args.apply
-        else make_plan(args.database, args.audit_report, args.expected_count)[0]
+        else make_plan(
+            args.database, args.audit_report, args.expected_count,
+            target_class=args.target_class,
+        )[0]
     )
     args.plan_report.parent.mkdir(parents=True, exist_ok=True)
     args.plan_report.write_text(json.dumps(plan, indent=2, default=str) + "\n")
-    print("Confirmed LinkedIn quarantine:", plan["mode"])
+    print("LinkedIn quarantine:", plan["mode"])
+    print("Target class:", plan["target_class"])
     print("Audited records:", plan["confirmed_in_audit"])
     print("Eligible records:", plan["eligible_for_quarantine"])
     print("Safety failures:", len(plan["safety_failures"]))

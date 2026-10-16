@@ -510,3 +510,48 @@ attempt counts and other history. It does not delete AI score history, call
 search APIs, reuse unsupported Workday results or automatically rescore jobs.
 The original database remains recoverable from the checksum-verified full
 backup. Resume normal jobs only after reviewing the outcome.
+
+### Second-pass high-confidence LinkedIn listings cleanup (PR #26)
+
+The original audit treated generic LinkedIn sign-in/alert chrome as potentially
+contaminated, even when the stored page was an individual job posting.
+The updated audit identifies a narrower `high_confidence_search_results_page`
+category by the **generic search-results header, alert-creation text, and
+numbered jobs-in-location listing**, independent of the most recent enrichment
+attempt status. Legitimate individual job pages with sign-in prompts but
+without that listing header remain in the review-only categories. It also
+recognizes generic Spanish-region LinkedIn listings if the visible results-page
+text has the same structural format.
+
+Do **not** reuse the original 1,323-record audit for this second cleanup.
+After stopping Streamlit and all DuckDB users, generate a fresh report:
+
+```bash
+python -m src.audit_linkedin_expired_descriptions --report data/linkedin-expired-descriptions-pass2.json
+```
+
+For the local snapshot reviewed on October 16, 2026, the expected new category
+contains **41** records (36 with expired redirects and 5 with a later
+reset-to-job-page URL). Counts might differ if the database has changed. If
+the new count is not exactly 41, stop and review the report before continuing.
+The next command only reads the database and writes a dry-run JSON plan:
+
+```bash
+python -m src.quarantine_confirmed_linkedin_descriptions --audit-report data/linkedin-expired-descriptions-pass2.json --target-class high_confidence_search_results_page --expected-count 41 --plan-report data/linkedin-pass2-dry-run.json
+```
+
+If and **only if** all 41 records pass independent content, URL, status,
+source and verified-key checks (`ready_to_apply: true`, zero safety failures),
+run the explicit opt-in command:
+
+```bash
+python -m src.quarantine_confirmed_linkedin_descriptions --audit-report data/linkedin-expired-descriptions-pass2.json --target-class high_confidence_search_results_page --expected-count 41 --apply --confirm-count 41 --plan-report data/linkedin-pass2-applied.json
+```
+
+The code refuses `.wal` files, creates a new SHA-256-checked full database
+backup, revalidates every candidate in a single transaction, and clears only
+this explicitly selected class. It handles historical `enriched`,
+`not_improved`, and `blocked` attempt statuses without trusting them as
+proof of a correct JD. The original job rows, URLs, source attempts, and
+historical score rows remain; clearing descriptions and bumping their
+timestamps makes previously cached scores stale. Zero paid API requests.
