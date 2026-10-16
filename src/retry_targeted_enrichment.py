@@ -15,12 +15,17 @@ from src.drain_enrichment_backlog import drain, RateLimitGuard, write_report, pr
 from src.enrichment.public_search import selected_provider, provider_metrics
 
 
-def load_targeted_queue(resume_hash):
+def load_targeted_queue(resume_hash, *, load_timing=None):
+    # Targeted runs need transient failed official resolutions only. The
+    # optional SQL prefilter avoids loading/scoring every historical raw job.
     with get_connection() as c:
-        size=c.execute('select count(*) from raw_jobs').fetchone()[0]
+        size=c.execute('select count(*) from job_enrichment_attempts WHERE '
+            "official_url_status IN ('SEARCH_DEFERRED', 'INSUFFICIENT_IDENTITY') "
+            "OR (official_url_status IN ('ERROR', 'BLOCKED') AND official_url_source = 'search')"
+        ).fetchone()[0]
     jobs=load_jobs_to_enrich(limit=max(1,size),minimum_words=80,source=None,
         retry_failed=False,force=False,resume_hash=resume_hash,deduplicate=False,
-        retry_official_search=True)
+        retry_official_search=True,targeted_retry_only=True,load_timing=load_timing)
     selected = select_targeted_retries(jobs)
     for job in selected:
         # Explicit selective retries may repeat a failed source attempt.
@@ -80,13 +85,16 @@ def main():
         excluded={j['record_key'] for j in json.loads(a.exclude_report.read_text()).get('jobs',[])}
     latest_targeted_count = [0]
     queue_load_ms = []
+    queue_load_phases = []
     def loader():
         started = time.monotonic()
+        phases = {}
         try:
-            current = load_targeted_queue(rh)
+            current = load_targeted_queue(rh, load_timing=phases)
             latest_targeted_count[0] = len(current)
             return [j for j in current if j['record_key'] not in excluded]
         finally:
+            queue_load_phases.append(phases)
             queue_load_ms.append(round(
                 1000 * (time.monotonic() - started), 1
             ))
@@ -144,6 +152,7 @@ def main():
                       jobs=per_job,provider_metrics=provider_metrics(client),
                       remaining_targeted_queue=latest_targeted_count[0],provider_circuits=circuit.states,
                       queue_initial_load_ms=queue_load_ms[0] if queue_load_ms else None,
+                      queue_initial_load_phases=queue_load_phases[0] if queue_load_phases else {},
                       queue_refresh_total_ms=round(sum(queue_load_ms[1:]), 1),
                       queue_loader_calls=len(queue_load_ms),
                       remaining_unattempted_this_run=result.get('remaining', {}).get('eligible_for_enrichment'))
