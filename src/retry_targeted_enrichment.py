@@ -48,7 +48,7 @@ def probe_search(jobs, client, search=search_candidates):
                 trace=job.get('public_search_trace', {})
                 healthy=bool(candidates) or bool(trace.get('healthy')) or bool(page.get('valid_results_page'))
                 probes.append(dict(record_key=job['record_key'],healthy=healthy,
-                                   candidates=len(candidates),provider=selected_provider(),**page))
+                                   candidates=len(candidates),provider=trace.get('provider', selected_provider()),**page))
                 if not healthy:return False,probes
             except Exception as error:
                 probes.append(dict(record_key=job['record_key'],healthy=False,error=str(error)))
@@ -64,10 +64,13 @@ def main():
     p.add_argument('--delay',type=float,default=0.75);p.add_argument('--resume-hash')
     p.add_argument('--max-jobs',type=int, help='Hard bound on completed attempts, for staged live validation.')
     p.add_argument('--exclude-report',type=Path,help='Skip records already attempted in an earlier staged report.')
-    p.add_argument('--require-serper',action='store_true',help='Refuse live retries unless SERPER_API_KEY selects Serper.')
+    p.add_argument('--require-serper',action='store_true',help='Require Serper as primary (legacy).')
+    p.add_argument('--require-tavily',action='store_true',help='Require Tavily as primary.')
     a=p.parse_args()
     if a.require_serper and selected_provider()!='serper':
-        p.error('Serper is required but SERPER_API_KEY is not configured; no attempts changed')
+        p.error('Serper is required as primary; remove TAVILY_API_KEY or use --require-tavily')
+    if a.require_tavily and selected_provider()!='tavily':
+        p.error('Tavily is required as primary; configure TAVILY_API_KEY; no attempts changed')
     if a.batch_size<1 or a.delay<0 or (a.max_jobs is not None and a.max_jobs<1):p.error('Invalid batch size/delay')
     rh=a.resume_hash or load_latest_resume_hash(get_model_name())
     if not rh:p.error('No cached resume')
@@ -104,7 +107,8 @@ def main():
             official=processed.official_resolution
             trace=job.get('public_search_trace', {})
             per_job.append(dict(record_key=job['record_key'],title=job['title'],
-                company=job['company_name'],serper_called=trace.get('provider')=='serper',
+                company=job['company_name'],serper_called='serper' in trace.get('attempted_providers', []),
+                tavily_called='tavily' in trace.get('attempted_providers', []),
                 search_candidates=trace.get('candidates',0),search=trace,
                 chosen_candidate_url=official.official_job_url if official else None,
                 identity_validation=official.official_url_validation_reason if official else

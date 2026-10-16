@@ -258,7 +258,16 @@ def run_description_enrichment(
                 rate_limit_guard=guard,
             )
 
+        from src.enrichment.public_search import provider_metrics
+        counts = provider_metrics(client)
+        tavily_calls = int(counts.get("tavily", {}).get("search_requests", 0))
+        serper_calls = int(counts.get("serper", {}).get("search_requests", 0))
         log_lines.extend(batch_summary.log_lines)
+        log_lines.append(
+            f"Public search API calls: Tavily={tavily_calls}; "
+            f"Serper={serper_calls}; total={tavily_calls + serper_calls}; "
+            f"enrichment jobs processed={batch_summary.jobs_processed}"
+        )
 
         rule_matches_refreshed = 0
 

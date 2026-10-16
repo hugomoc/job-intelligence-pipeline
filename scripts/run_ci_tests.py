@@ -121,7 +121,10 @@ def run_test(test_path: str) -> None:
     environment["PYTHONPATH"] = str(REPO_ROOT)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["RUN_LIVE_EMAIL_TESTS"] = "0"
-    environment["SERPER_API_KEY"] = ""  # Offline legacy fixtures must not use local .env credentials.
+    environment["SERPER_API_KEY"] = ""  # Offline fixtures must not use local credentials.
+    environment["TAVILY_API_KEY"] = ""
+    # Legacy HTML search fixtures opt in to DDG explicitly; production never does.
+    environment["PUBLIC_SEARCH_PROVIDER"] = "duckduckgo"
 
     subprocess.run(
         [sys.executable, test_path],

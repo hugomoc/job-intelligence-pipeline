@@ -18,7 +18,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from src.enrichment.public_search import (
-    PublicSearchError, selected_provider, serper_search, metric,
+    PublicSearchError, selected_provider, available_providers, serper_search, tavily_search, metric,
 )
 from src.browser.playwright_client import PlaywrightClient
 from src.enrichment.ats import (
@@ -55,7 +55,7 @@ class SearchDeferredError(RuntimeError):
 
 
 class PublicSearchCircuit:
-    """Independent provider circuits; direct ATS discovery is unaffected."""
+    """Try Tavily, then Serper; independently disable unhealthy providers."""
     def __init__(self, threshold: int = 5):
         self.threshold = threshold
         self.states = {}
@@ -69,31 +69,45 @@ class PublicSearchCircuit:
 
     @property
     def open(self):
-        return self.state()["open"]
+        configured = available_providers()
+        return not configured or all(self.state(provider)["open"] for provider in configured)
 
     @open.setter
     def open(self, value):
         self.state()["open"] = value
 
     def search(self, job, client):
-        provider = selected_provider()
-        state = self.state(provider)
-        if state["open"]:
+        attempted = False
+        last_error = None
+        for provider in available_providers():
+            state = self.state(provider)
+            if state["open"]:
+                continue
+            attempted = True
+            self.calls += 1
+            state["calls"] += 1
+            try:
+                candidates = search_candidates(job, client, provider=provider)
+            except Exception as error:
+                self.errors += 1
+                state["errors"] += 1
+                state["consecutive_errors"] += 1
+                state["open"] = (getattr(error, "stop_provider", False)
+                                 or state["consecutive_errors"] >= self.threshold)
+                if not isinstance(error, PublicSearchError):
+                    raise
+                last_error = error
+                continue
+            state["consecutive_errors"] = 0
+            return candidates
+        if not attempted:
             self.deferred += 1
-            raise SearchDeferredError(f"{provider} public search deferred: provider circuit is open")
-        self.calls += 1
-        state["calls"] += 1
-        try:
-            candidates = search_candidates(job, client)
-        except Exception as error:
-            self.errors += 1
-            state["errors"] += 1
-            state["consecutive_errors"] += 1
-            state["open"] = (getattr(error, "stop_provider", False)
-                             or state["consecutive_errors"] >= self.threshold)
-            raise
-        state["consecutive_errors"] = 0
-        return candidates
+            raise SearchDeferredError("public search deferred: no available configured providers")
+        # No provider succeeded. Avoid masking an actual provider error.
+        if last_error is not None:
+            raise last_error
+        self.deferred += 1
+        raise SearchDeferredError("public search deferred: all providers unavailable")
 
     def summary(self):
         return {"opened": self.open, "calls_attempted": self.calls,
@@ -395,31 +409,54 @@ def duckduckgo_candidates(
     )
 
 
-def search_candidates(job: dict, client: httpx.Client) -> list[OfficialJobCandidate]:
-    """Select Serper when configured; legacy DuckDuckGo remains optional.
+def search_candidates(
+    job: dict, client: httpx.Client, provider: str | None = None
+) -> list[OfficialJobCandidate]:
+    """Only official/ATS URLs become untrusted candidates, never inferred identity.
 
-    Search metadata is discovery-only. In particular, Serper cannot fill in
-    missing posting title/company on a fetched page during identity validation.
+    Direct callers use Tavily then Serper. A shared circuit supplies one provider
+    at a time and prevents repeated attempts against unavailable providers.
     """
-    provider = selected_provider()
-    job["public_search_trace"] = {"provider": provider, "healthy": False,
-                                  "candidates": 0}
+    if provider is None:
+        previous_error = None
+        for name in available_providers():
+            try:
+                return search_candidates(job, client, provider=name)
+            except PublicSearchError as error:
+                previous_error = error
+        if previous_error:
+            raise previous_error
+        raise SearchDeferredError("public search unavailable: configure TAVILY_API_KEY or SERPER_API_KEY")
+
+    trace = job.get("public_search_trace") or {}
+    attempted = [*trace.get("attempted_providers", []), provider]
+    job["public_search_trace"] = {
+        "provider": provider, "attempted_providers": attempted,
+        "healthy": False, "candidates": 0,
+    }
     title = str(job.get("title") or "").strip()
     company = str(job.get("company_name") or "").strip()
     if not title or not company:
         return []
     if provider == "duckduckgo":
         candidates = duckduckgo_candidates(job, client)
-    else:
+    elif provider in {"serper", "tavily"}:
+        query = f'{company} {title} jobs'
+        job["public_search_trace"]["query"] = query
         try:
-            query = f'{company} {title} jobs'
-            job["public_search_trace"]["query"] = query
-            response = serper_search(query, client)
+            response = (
+                tavily_search(query, client) if provider == "tavily"
+                else serper_search(query, client)
+            )
         except PublicSearchError as error:
             job["public_search_trace"]["error_category"] = error.category
             raise
-        candidates = [OfficialJobCandidate(url=url, label="", source=ats_type_for_url(url) or "search")
-                      for url in response.urls if looks_like_official_or_ats_url(url, company)][:MAX_SEARCH_RESULTS]
+        candidates = [
+            OfficialJobCandidate(
+                url=url, label="", source=ats_type_for_url(url) or "search"
+            )
+            for url in response.urls if looks_like_official_or_ats_url(url, company)
+        ][:MAX_SEARCH_RESULTS]
         audit = []
         for hit in response.untrusted_results:
             url = hit["url"]
@@ -428,8 +465,12 @@ def search_candidates(job: dict, client: httpx.Client) -> list[OfficialJobCandid
                           "candidate": eligible,
                           "discovery_reason": "candidate-only; requires fetched posting identity" if eligible
                           else "non-official/non-ATS domain or no employer careers/job path"})
-        job["public_search_trace"].update(healthy=True, search_results=response.result_count,
-                                          organic_results=audit)
+        job["public_search_trace"].update(
+            healthy=True, search_results=response.result_count,
+            organic_results=audit,
+        )
+    else:
+        raise ValueError("Unknown configured search provider")
     job["public_search_trace"]["candidates"] = len(candidates)
     return candidates
 
