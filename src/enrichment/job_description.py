@@ -60,6 +60,14 @@ BLOCK_PAGE_PHRASES = (
 )
 
 
+LINKEDIN_POSTING_DESCRIPTION_SELECTORS = (
+    ".show-more-less-html__markup",
+    ".description__text",
+    ".jobs-description__content",
+    "#job-details",
+    "[data-test-id='job-details-description']",
+)
+
 DESCRIPTION_SELECTORS = (
     "#jobDescriptionText",
     "[data-testid='jobDescriptionText']",
@@ -436,9 +444,79 @@ def extract_json_ld_job_metadata(
     return {}
 
 
+def linkedin_posting_id(url: str | None) -> str | None:
+    """Require a numeric LinkedIn individual-posting URL, not a search page."""
+    parsed = urlparse(str(url or ""))
+    host = (parsed.hostname or "").casefold()
+    if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+        return None
+    match = re.fullmatch(r"/jobs/view/(?:[A-Za-z0-9_-]+-)?(\d+)/?", parsed.path)
+    return match.group(1) if match else None
+
+
+def extract_linkedin_posting_metadata(
+    soup: BeautifulSoup, url: str
+) -> dict[str, str | None]:
+    """Read only job-owned visible top-card fields on a specific posting URL.
+
+    No title/company is inferred from the original job record, OG title,
+    search snippets, job recommendations, or a generic LinkedIn results page.
+    """
+    posting_id = linkedin_posting_id(url)
+    if posting_id is None:
+        return {}
+
+    canonical = soup.find("link", rel="canonical")
+    if canonical and canonical.get("href"):
+        canonical_id = linkedin_posting_id(str(canonical.get("href")))
+        if canonical_id != posting_id:
+            return {}
+
+    title_element = soup.select_one(
+        "h1.top-card-layout__title, "
+        "h1.topcard__title, "
+        "h1.job-details-jobs-unified-top-card__job-title"
+    )
+    company_element = soup.select_one(
+        "a.topcard__org-name-link, "
+        "a.top-card-layout__company-url, "
+        ".job-details-jobs-unified-top-card__company-name a"
+    )
+    if title_element is None or company_element is None:
+        return {}
+
+    title = normalize_description_text(title_element.get_text(" ", strip=True))
+    company = normalize_description_text(company_element.get_text(" ", strip=True))
+    if not title or not company:
+        return {}
+
+    return {
+        "title": title,
+        "company": company,
+        "title_source": "linkedin_posting_top_card",
+        "company_source": "linkedin_posting_top_card",
+    }
+
+
 def extract_ats_metadata(soup: BeautifulSoup, url: str) -> dict:
     """Read posting-owned metadata only; never receives expected job fields."""
     metadata = extract_json_ld_job_metadata(soup)
+    visible = extract_linkedin_posting_metadata(soup, url)
+    if visible:
+        # If structured metadata contradicts the visible posting top card,
+        # never combine the fields into an apparently trustworthy identity.
+        if (
+            metadata.get("title")
+            and metadata["title"].casefold() != visible["title"].casefold()
+        ) or (
+            metadata.get("company")
+            and metadata["company"].casefold() != visible["company"].casefold()
+        ):
+            visible = {}
+        for field in ("title", "company"):
+            if visible and not metadata.get(field):
+                metadata[field] = visible[field]
+                metadata[field + "_source"] = visible[field + "_source"]
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     greenhouse = host in {"job-boards.greenhouse.io", "boards.greenhouse.io"}
@@ -536,10 +614,11 @@ def extract_json_ld_description(
 
 def extract_selector_description(
     soup: BeautifulSoup,
+    selectors: tuple[str, ...] = DESCRIPTION_SELECTORS,
 ) -> str:
     candidates: list[str] = []
 
-    for selector in DESCRIPTION_SELECTORS:
+    for selector in selectors:
         try:
             elements = soup.select(selector)
         except Exception:
@@ -654,8 +733,17 @@ def extract_job_description_from_html(
         count_words(description)
         < MINIMUM_USEFUL_DESCRIPTION_WORDS
     ):
+        # When LinkedIn lacks JobPosting JSON-LD and identity comes from
+        # a visible top card, its article/main may include unrelated jobs.
+        # Only accept an explicitly posting-owned description container.
+        selectors = (
+            LINKEDIN_POSTING_DESCRIPTION_SELECTORS
+            if metadata.get("title_source") == "linkedin_posting_top_card"
+            or metadata.get("company_source") == "linkedin_posting_top_card"
+            else DESCRIPTION_SELECTORS
+        )
         selector_description = (
-            extract_selector_description(soup)
+            extract_selector_description(soup, selectors)
         )
 
         if (

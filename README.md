@@ -439,6 +439,19 @@ candidate validation. These guards do not automatically modify existing
 local descriptions saved by an older run: audit or back them up and correct
 them separately if they came from an expired redirect.
 
+When a valid individual LinkedIn URL returns HTTP 200 but omits
+`JobPosting` JSON-LD title/employer metadata, the source may still contain
+the actual visible job top card. The extractor now reads posting-owned
+`h1.top-card-layout__title` and employer-link elements **only** for specific
+`/jobs/view/<numeric-id>` URLs, rejecting conflicting canonical posting
+IDs. It will only accept a description from the posting's own description
+container when using this fallback, never from a generic `main` with
+recommendations or navigation. The fetched company/title still go through
+normal identity validation; source URL, expected title, snippets, and
+`og:title` are not substituted for missing posting metadata. LinkedIn
+pages without usable posting-owned metadata still reject safely.
+
+
 ### Offline audit: expired LinkedIn descriptions (read-only)
 
 To scan **all stored nonempty LinkedIn descriptions** for expired-job
