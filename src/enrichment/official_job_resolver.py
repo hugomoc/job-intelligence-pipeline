@@ -730,6 +730,7 @@ def resolve_from_candidates(
 
     verified_jobs: list[VerifiedOfficialJob] = []
     blocked_count = 0
+    skipped_count = 0
     blocked_hosts: set[str] = set()
     last_rejection_reason: str | None = None
 
@@ -745,8 +746,9 @@ def resolve_from_candidates(
                 resolved_title=None, resolved_company=None, resolved_location=None,
             )
         host = hostname(candidate.url)
-        if host and host in blocked_hosts:
+        if host and host in blocked_hosts and not ats_type_for_url(candidate.url):
             blocked_count += 1
+            skipped_count += 1
             timing["blocked_host_skips"] = timing.get("blocked_host_skips", 0) + 1
             job["candidate_validation_trace"].append({
                 "url": candidate.url, "accepted": False,
@@ -811,6 +813,17 @@ def resolve_from_candidates(
             official_url_source=source, official_url_resolved_at=now_utc(),
             official_url_confidence=None,
             official_url_validation_reason="official resolution time budget exceeded; retry safely",
+            resolved_title=None, resolved_company=None, resolved_location=None,
+        )
+
+    if verified_jobs and skipped_count:
+        # Do not promote a match when another potentially competing posting
+        # was skipped rather than actually fetched and checked.
+        return OfficialJobResolutionResult(
+            status=OFFICIAL_SEARCH_DEFERRED, official_job_url=None,
+            official_url_source=source, official_url_resolved_at=now_utc(),
+            official_url_confidence=None,
+            official_url_validation_reason="potential competing posting skipped on blocked host",
             resolved_title=None, resolved_company=None, resolved_location=None,
         )
 
