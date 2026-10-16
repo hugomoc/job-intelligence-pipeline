@@ -389,3 +389,32 @@ python -m src.retry_targeted_enrichment --require-tavily --max-jobs 1 --batch-si
 
 Review timings and API request counts before choosing any broader retries.
 
+#### Targeted retry SQL, low-credit searches and exact posting leads
+
+Targeted transient-retry runs now prefilter `SEARCH_DEFERRED` and
+`INSUFFICIENT_IDENTITY`, plus search-origin `BLOCKED`/`ERROR`,
+in DuckDB **before loading descriptions and running resume admission checks**.
+The status/score CTEs still retain the entire raw-job identity graph, and the
+original Python eligibility and identity checks still run. The report adds
+`queue_initial_load_phases` with initialization, SQL, description quality,
+verified-candidate metadata, and admission gate timings. Larger inventories
+should benefit, but real elapsed time is measured on the local database.
+
+Successful Tavily/Serper URL results are cached **within the shared HTTP
+client for that run**, keyed by provider and normalized query. The cache stores
+URLs and untrusted search titles as discovery/ranking hints; failed responses
+are never cached, and each distinct posting record must still pass fetched
+identity validation. Provider request metrics count actual paid API requests,
+not cache hits; `jobs[].search.cache_hit` records individual reuse.
+
+Search candidates must have a specific posting URL. ATS roots, corporate
+career homepages and Dice job categories are excluded, though they remain in
+the report's audit-only organic search results. When a search reveals an
+actual employer Workday tenant homepage (for example, a `myworkdayjobs.com`
+career site), the resolver can perform one bounded public Workday CXS listing
+query for an exact title and discover specific candidate links **without a
+second Tavily search**. These are still just leads: it will never accept the
+CXS title, Tavily title, or snippet instead of fetched job metadata and the
+existing strict identity validator. Closed/blocked or missing CXS listings
+remain unverified, and no JD is fabricated.
+
