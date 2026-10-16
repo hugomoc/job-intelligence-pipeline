@@ -2147,6 +2147,16 @@ def test_expired_linkedin_redirect_rejected_even_if_extractor_reports_enriched()
     assert "redirected" in result.identity_validation.reason
     update.assert_not_called()
     assert result.official_resolution.status == OFFICIAL_NOT_FOUND
+    with patch.object(enrich_jobs, "get_connection") as connections:
+        try:
+            save_enrichment_attempt(
+                job=job, result=fake_result, status="enriched",
+            )
+        except ValueError as error:
+            assert "LinkedIn posting redirect" in str(error)
+        else:
+            raise AssertionError("Unsafe redirect must fail before persistence")
+        connections.assert_not_called()
 
 
 def test_valid_linkedin_posting_requires_fetched_identity() -> None:
