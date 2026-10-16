@@ -426,3 +426,16 @@ CXS title, Tavily title, or snippet instead of fetched job metadata and the
 existing strict identity validator. Closed/blocked or missing CXS listings
 remain unverified, and no JD is fabricated.
 
+LinkedIn individual-posting links can redirect to expired-job search/category
+pages (for example, `/jobs/lead-data-analyst-jobs?trk=expired_jd_redirect`).
+Even a 1,000-word page in that situation is **not** a job description for the
+original posting. Source fetching rejects such redirects before extracting
+HTML; the enrichment boundary independently rejects them even when alternate
+extractors report `enriched`. LinkedIn source descriptions now require
+fetched title/company evidence, and an unsuccessful employer/ATS lookup can
+no longer label a source-page description as coming from `search`. Generic
+employer `/careers/join-our-team` URLs also cannot enter official posting
+candidate validation. These guards do not automatically modify existing
+local descriptions saved by an older run: audit or back them up and correct
+them separately if they came from an expired redirect.
+
