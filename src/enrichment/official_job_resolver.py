@@ -304,6 +304,12 @@ def looks_like_individual_posting_url(url: str) -> bool:
     if not segments:
         return False
     path = parsed.path.casefold()
+    # Corporate careers navigation is not an individual requisition, even
+    # when its final slug contains words such as "join our team".
+    if any(part in {"join-our-team", "join-us", "work-with-us",
+                    "our-team", "life-at", "career-opportunities"}
+           for part in segments):
+        return False
     if (
         re.search(r"/jobs?/(?:q[-_/]|search|category|categories|browse|filter)", path)
         or any(part in {"job-search", "search-jobs", "jobsearch", "job-listings",
