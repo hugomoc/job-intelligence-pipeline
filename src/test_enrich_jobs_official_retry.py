@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import httpx
+from unittest.mock import patch
 
 from src import database
 from src import enrich_jobs
@@ -20,7 +21,9 @@ from src.enrich_jobs import (
     process_enrichment_job,
     save_enrichment_attempt,
 )
-from src.enrichment.job_description import JobDescriptionResult
+from src.enrichment.job_description import (
+    JobDescriptionResult, fetch_job_description, is_unsafe_linkedin_posting_redirect,
+)
 from src.enrichment.official_job_resolver import (
     OFFICIAL_FOUND_VERIFIED,
     OFFICIAL_NOT_FOUND,
@@ -2070,7 +2073,112 @@ def test_targeted_retry_sql_scope_preserves_selected_records_and_status() -> Non
     with_temp_database(scenario)
 
 
+def test_expired_linkedin_redirect_cannot_be_extracted_as_a_job() -> None:
+    original = "https://www.linkedin.com/jobs/view/4470007344/"
+    expired = ("https://www.linkedin.com/jobs/lead-data-analyst-jobs"
+               "?trk=expired_jd_redirect")
+    fake_html = job_posting_html(
+        title="Lead Data Analyst", company="Unrelated Employer",
+        description=DESCRIPTION,
+    )
+    with mock_client({
+        original: httpx.Response(302, headers={"location": expired}),
+        expired: httpx.Response(
+            200, text=fake_html, headers={"content-type": "text/html"},
+        ),
+    }) as client:
+        fetched = fetch_job_description(original, client)
+    assert fetched.status == "no_description"
+    assert fetched.word_count == 0
+    assert fetched.description == ""
+    assert fetched.final_url == expired
+    assert "redirected" in str(fetched.error_message)
+
+    assert is_unsafe_linkedin_posting_redirect(original, expired)
+    assert is_unsafe_linkedin_posting_redirect(
+        original, "https://www.linkedin.com/jobs/search/?keywords=data",
+    )
+    assert is_unsafe_linkedin_posting_redirect(
+        original, "https://www.linkedin.com/jobs/view/1234567890/",
+    )
+    assert not is_unsafe_linkedin_posting_redirect(
+        original, "https://www.linkedin.com/jobs/view/4470007344/?trk=email",
+    )
+
+
+def test_expired_linkedin_redirect_rejected_even_if_extractor_reports_enriched() -> None:
+    original = "https://www.linkedin.com/jobs/view/4470007344/"
+    expired = ("https://www.linkedin.com/jobs/lead-data-analyst-jobs"
+               "?trk=expired_jd_redirect")
+    fake_result = JobDescriptionResult(
+        requested_url=original, final_url=expired,
+        status="enriched", http_status=200,
+        extraction_method="html_selector", description=DESCRIPTION,
+        word_count=len(DESCRIPTION.split()), error_message=None,
+    )
+    job = {
+        "record_key": "linkedin-expired-identity",
+        "source": "linkedin",
+        "title": "Sr Business Data Analyst",
+        "company_name": "Point32Health",
+        "location": "United States (Remote)",
+        "apply_url": original,
+        "current_word_count": 76,
+        "needs_description_enrichment": True,
+        "description": "Thin original alert",
+    }
+    not_found = OfficialJobResolutionResult(
+        status=OFFICIAL_NOT_FOUND, official_job_url=None,
+        official_url_source="search",
+        official_url_resolved_at=datetime.now(timezone.utc),
+        official_url_confidence=None,
+        official_url_validation_reason="no matching official posting",
+        resolved_title=None, resolved_company=None, resolved_location=None,
+    )
+    with patch.object(enrich_jobs, "fetch_job_description", return_value=fake_result), \\
+         patch.object(enrich_jobs, "resolve_official_job", return_value=not_found), \\
+         patch.object(enrich_jobs, "update_job_description") as update:
+        with httpx.Client() as client:
+            result = process_enrichment_job(job, client)
+    assert not result.updated
+    assert result.stored_status == "resolution_rejected"
+    assert result.identity_validation is not None
+    assert not result.identity_validation.accepted
+    assert "redirected" in result.identity_validation.reason
+    update.assert_not_called()
+    assert result.official_resolution.status == OFFICIAL_NOT_FOUND
+
+
+def test_valid_linkedin_posting_requires_fetched_identity() -> None:
+    original = "https://www.linkedin.com/jobs/view/4470007344/"
+    base = {
+        "source": "linkedin", "title": "Sr Business Data Analyst",
+        "company_name": "Point32Health", "location": "United States (Remote)",
+        "apply_url": original,
+    }
+    missing_metadata = JobDescriptionResult(
+        requested_url=original, final_url=original,
+        status="enriched", http_status=200, extraction_method="html_selector",
+        description=DESCRIPTION, word_count=len(DESCRIPTION.split()),
+        error_message=None,
+    )
+    validation = enrich_jobs.validate_enrichment_identity(base, missing_metadata)
+    assert not validation.accepted
+    assert validation.reason == "resolved identity metadata unavailable"
+    valid_metadata = JobDescriptionResult(
+        **{**missing_metadata.__dict__,
+           "resolved_title": "Sr Business Data Analyst",
+           "resolved_company": "Point32Health",
+           "resolved_location": "United States (Remote)",
+           "resolved_location_source": "job_posting"},
+    )
+    assert enrich_jobs.validate_enrichment_identity(base, valid_metadata).accepted
+
+
 def main() -> None:
+    test_expired_linkedin_redirect_cannot_be_extracted_as_a_job()
+    test_expired_linkedin_redirect_rejected_even_if_extractor_reports_enriched()
+    test_valid_linkedin_posting_requires_fetched_identity()
     test_targeted_retry_sql_scope_preserves_selected_records_and_status()
     test_previous_failed_lensa_attempt_with_null_official_status_is_selected()
     test_found_verified_is_not_selected_again_for_official_resolution()
