@@ -21,6 +21,7 @@ from bs4 import BeautifulSoup
 
 from src.enrichment.public_search import (
     PublicSearchError, selected_provider, available_providers, serper_search, tavily_search, metric,
+    cached_response,
 )
 from src.browser.playwright_client import PlaywrightClient
 from src.enrichment.ats import (
@@ -292,35 +293,60 @@ def company_domain_tokens(company_name: str | None) -> set[str]:
     }
 
 
+def looks_like_individual_posting_url(url: str) -> bool:
+    """Require an individual job URL, not an ATS root or generic career page.
+
+    This is discovery filtering only, not independent identity evidence.
+    """
+    parsed = urlparse(url)
+    segments = [part.casefold() for part in parsed.path.strip("/").split("/") if part]
+    if not segments:
+        return False
+    path = parsed.path.casefold()
+    if (
+        re.search(r"/jobs?/(?:q[-_/]|search|category|categories|browse|filter)", path)
+        or any(part in {"job-search", "search-jobs", "jobsearch", "job-listings",
+                        "all-jobs", "search-results"} for part in segments)
+    ):
+        return False
+
+    ats = ats_type_for_url(url)
+    if ats in {"workday", "greenhouse", "icims"}:
+        return any(part in {"job", "jobs", "job-detail", "details"}
+                   and i + 1 < len(segments) for i, part in enumerate(segments))
+    if ats in {"lever", "ashby", "smartrecruiters"}:
+        return len(segments) >= 2 and segments[-1] not in {
+            "jobs", "job", "careers", "openings", "search"
+        }
+
+    if re.search(r"/(?:job|jobs|job-detail|requisition|posting|positions?)/[^/]+", path):
+        return True
+    # Support employer /careers/specific-opening paths, not /about/careers.
+    return (len(segments) >= 2 and segments[0] in {"career", "careers"}
+            and segments[-1] not in {
+                "jobs", "openings", "teams", "digital", "engineering", "all"
+            })
+
+
 def looks_like_official_or_ats_url(
     url: str,
     company_name: str | None,
 ) -> bool:
-    if not is_valid_http_url(url):
+    if not is_valid_http_url(url) or is_aggregator_domain(url):
         return False
 
-    if is_aggregator_domain(url):
+    # Dice is an external job board even when its name appears as employer.
+    host = hostname(url)
+    if host == "dice.com" or host.endswith(".dice.com"):
+        return False
+    if not looks_like_individual_posting_url(url):
         return False
 
     if ats_type_for_url(url):
         return True
 
-    parsed = urlparse(url)
-    host = parsed.netloc.casefold().removeprefix("www.")
-    path = parsed.path.casefold()
     company_tokens = company_domain_tokens(company_name)
-
-    host_matches_company = any(
-        token in host
-        for token in company_tokens
-    )
-    path_suggests_careers = any(
-        word in path
-        for word in CAREER_PATH_WORDS
-    )
-
-    return host_matches_company and path_suggests_careers
-
+    return any(token in host for token in company_tokens)
 
 def unwrap_search_url(url: str) -> str:
     parsed = urlparse(url)
@@ -449,6 +475,9 @@ def search_candidates(
         query_title = re.sub(r"\s*\|\s*$", "", title).strip() or title
         query = f'{company} {query_title} jobs'
         job["public_search_trace"]["query"] = query
+        job["public_search_trace"]["cache_hit"] = cached_response(
+            client, provider, query
+        ) is not None
         search_started = time.monotonic()
         try:
             response = (
@@ -464,9 +493,13 @@ def search_candidates(
                 timing.get("public_search_ms", 0)
                 + 1000 * (time.monotonic() - search_started), 1
             )
+        # Search titles are untrusted ranking hints only; fetched posting
+        # metadata is still required by validate_candidate_result().
+        hints = {hit["url"]: str(hit.get("title") or "") for hit in response.untrusted_results}
         candidates = [
             OfficialJobCandidate(
-                url=url, label="", source=ats_type_for_url(url) or "search"
+                url=url, label=hints.get(url, ""),
+                source=ats_type_for_url(url) or "search"
             )
             for url in response.urls if looks_like_official_or_ats_url(url, company)
         ][:MAX_SEARCH_RESULTS]
