@@ -395,6 +395,38 @@ def test_blocked_same_host_is_fetched_once_per_job() -> None:
     assert job["enrichment_timing"]["candidate_fetches"] == 1
 
 
+def test_blocked_host_skip_cannot_create_false_verified_match() -> None:
+    blocked_urls = [
+        "https://applicants.seismic.com/job/1/apply",
+        "https://applicants.seismic.com/job/2/apply",
+    ]
+    verified_url = "https://boards.greenhouse.io/seismic/jobs/123"
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.host == "applicants.seismic.com":
+            return httpx.Response(403, text="blocked")
+        return httpx.Response(
+            200, text=job_posting_html("Senior Analytics Engineer", "Seismic"),
+            headers={"content-type": "text/html"},
+        )
+
+    job = lensa_job()
+    candidates = [
+        official_resolver.OfficialJobCandidate(url=url, label="", source="search")
+        for url in [*blocked_urls, verified_url]
+    ]
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        outcome = official_resolver.resolve_from_candidates(
+            job, client, candidates, source="search"
+        )
+
+    assert outcome.status == official_resolver.OFFICIAL_SEARCH_DEFERRED
+    assert outcome.official_job_url is None
+    assert len(requests) == 2
+
+
 def test_budget_expiry_does_not_promote_partial_verified_candidates() -> None:
     """Never resolve to FOUND when a competing candidate was not inspected."""
     urls = [
@@ -534,6 +566,7 @@ def main() -> None:
     test_no_official_match_marks_not_found()
     test_blocked_employer_site_marks_blocked()
     test_blocked_same_host_is_fetched_once_per_job()
+    test_blocked_host_skip_cannot_create_false_verified_match()
     test_budget_expiry_does_not_promote_partial_verified_candidates()
     test_identity_mismatch_rejects_official_candidate()
     test_dynamic_candidate_fetch_can_verify_official_job()
