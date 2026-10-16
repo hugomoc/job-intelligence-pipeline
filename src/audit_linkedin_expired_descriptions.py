@@ -52,14 +52,14 @@ def has_generic_search_results_header(description: str) -> bool:
     Job pages also have "Set alert" and "New to LinkedIn" boilerplate.
     Those phrases alone must never trigger this high-confidence category.
     """
-    prefix = re.sub(r"\\s+", " ", str(description or "")[:900]).casefold().strip()
+    prefix = re.sub(r"\s+", " ", str(description or "")[:900]).casefold().strip()
     if not prefix.startswith("get notified about new "):
         return False
     if "sign in to create job alert" not in prefix[:270]:
         return False
     return bool(
         re.search(
-            r"\\b[\\d,]+\\s*\\+?\\s+.{1,100}?\\bjobs in [a-z]",
+            r"\b[\d,]+\s*\+?\s+.{1,100}?\bjobs in [a-z]",
             prefix[:500],
         )
     )
