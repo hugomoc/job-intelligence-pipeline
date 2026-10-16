@@ -33,7 +33,7 @@ class RateLimitGuard:
     def observe(self, response):
         limited = response.status_code == 429
         host = getattr(getattr(response, "request", None), "url", None)
-        if host is not None and (host.host.endswith("duckduckgo.com") or host.host == "google.serper.dev"):
+        if host is not None and (host.host.endswith("duckduckgo.com") or host.host in {"google.serper.dev", "api.tavily.com"}):
             # Public-search throttling opens its own circuit, not the global one.
             return
         self.total += int(limited)
