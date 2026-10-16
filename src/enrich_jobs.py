@@ -986,9 +986,12 @@ def reuse_verified_description(
 def reuse_authoritative_verified_descriptions_before_queue(
     jobs: list[dict[str, Any]],
     minimum_words: int,
+    *,
+    candidates: list[dict[str, Any]] | None = None,
 ) -> int:
     """Reuse descriptions only when the new record has authoritative identity."""
-    candidates = load_verified_reuse_candidates(minimum_words=minimum_words)
+    if candidates is None:
+        candidates = load_verified_reuse_candidates(minimum_words=minimum_words)
 
     if not candidates:
         return 0
@@ -1065,6 +1068,7 @@ def prepare_verified_candidate_metadata_before_queue(
         "offline_reused": reuse_authoritative_verified_descriptions_before_queue(
             jobs=jobs,
             minimum_words=minimum_words,
+            candidates=candidates,
         ),
         "candidates_found": 0,
         "single_candidate_needs_verification": 0,
