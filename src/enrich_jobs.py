@@ -1179,7 +1179,7 @@ def load_jobs_to_enrich(
 
     scored_jobs AS (
         SELECT DISTINCT
-            score_jobs.exact_posting_key,
+            score_jobs.posting_status_key,
             max(scores.overall_score) AS ai_score
         FROM resume_job_scores AS scores
         INNER JOIN all_jobs AS score_jobs
@@ -1191,7 +1191,7 @@ def load_jobs_to_enrich(
               score_jobs.description_updated_at,
               TIMESTAMPTZ '1970-01-01 00:00:00+00'
           )
-        GROUP BY score_jobs.exact_posting_key
+        GROUP BY score_jobs.posting_status_key
     )
 
     SELECT
