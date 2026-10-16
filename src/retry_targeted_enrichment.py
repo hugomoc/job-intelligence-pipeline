@@ -1,6 +1,7 @@
 """Retry only relevant missing-JD postings after a small public-search health probe."""
 import argparse
 import json
+import time
 from pathlib import Path
 from bs4 import BeautifulSoup
 from src.database import get_connection
@@ -78,10 +79,17 @@ def main():
     if a.exclude_report:
         excluded={j['record_key'] for j in json.loads(a.exclude_report.read_text()).get('jobs',[])}
     latest_targeted_count = [0]
+    queue_load_ms = []
     def loader():
-        current = load_targeted_queue(rh)
-        latest_targeted_count[0] = len(current)
-        return [j for j in current if j['record_key'] not in excluded]
+        started = time.monotonic()
+        try:
+            current = load_targeted_queue(rh)
+            latest_targeted_count[0] = len(current)
+            return [j for j in current if j['record_key'] not in excluded]
+        finally:
+            queue_load_ms.append(round(
+                1000 * (time.monotonic() - started), 1
+            ))
     jobs=loader()
     report=dict(resume_hash=rh,targeted_postings=len(jobs),processed=0,
                 descriptions_updated=0,official_resolved=0)
@@ -134,7 +142,11 @@ def main():
                      retry_official_search=True,stop_on_search_unavailable=True,emit=lambda line:print(line,flush=True))
         result.update(targeted_postings=report['targeted_postings'],health_probes=probes,
                       jobs=per_job,provider_metrics=provider_metrics(client),
-                      remaining_targeted_queue=latest_targeted_count[0],provider_circuits=circuit.states)
+                      remaining_targeted_queue=latest_targeted_count[0],provider_circuits=circuit.states,
+                      queue_initial_load_ms=queue_load_ms[0] if queue_load_ms else None,
+                      queue_refresh_total_ms=round(sum(queue_load_ms[1:]), 1),
+                      queue_loader_calls=len(queue_load_ms),
+                      remaining_unattempted_this_run=result.get('remaining', {}).get('eligible_for_enrichment'))
         write_report(a.report,result)
 
 if __name__=='__main__':main()
