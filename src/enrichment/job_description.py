@@ -450,7 +450,7 @@ def linkedin_posting_id(url: str | None) -> str | None:
     host = (parsed.hostname or "").casefold()
     if host != "linkedin.com" and not host.endswith(".linkedin.com"):
         return None
-    match = re.fullmatch(r"/jobs/view/(\d+)/?", parsed.path)
+    match = re.fullmatch(r"/jobs/view/(?:[A-Za-z0-9_-]+-)?(\d+)/?", parsed.path)
     return match.group(1) if match else None
 
 
