@@ -342,3 +342,41 @@ This can make real Tavily calls and persist the five attempted enrichment
 records, so inspect the report before running a large backlog. Never paste
 API keys in logs or chat. A Serper fallback will spend Serper credits.
 
+#### Faster targeted retries and safe diagnostics
+
+For `--max-jobs 1`, the targeted retry command **skips its two redundant
+search-provider health probes**, so a job that reaches public search normally
+uses one Tavily basic request (or an additional Serper request if Tavily fails).
+Direct verified/source/ATS reuse may use no public-search requests. This mode
+still saves the single attempted job; it is not a dry run.
+
+Each targeted report now contains a `jobs[].timings` breakdown: source-page
+fetch, ATS discovery, public search and total candidate fetch durations
+(in milliseconds), the number of actual candidate fetches, and blocked-host
+skips. `candidate_validation[].elapsed_ms` shows timing per candidate.
+These metrics are observational and **do not** change scoring or job identity.
+
+Official resolution uses a cooperative 60-second time budget, with an 8-second
+HTTP timeout for individual official candidate-page requests. If checking all
+candidates would overrun the budget, resolution is deferred rather than
+accepting a partial candidate set. This is **not a hard 60-second process
+timeout**: a single in-flight request, dynamic browser render, or source fetch
+can still overrun the budget. The normal source/verified URL behavior is
+unchanged.
+
+When an official host rejects a candidate request with 401/403/429, later
+non-ATS URLs on that same hostname are skipped **for that one job only**.
+If those skips leave potentially competing postings unchecked, resolution
+is deferred instead of claiming a unique match. Shared ATS hosts are exempt
+from this shortcut. The normal fetched-page identity/ambiguity checks are
+unchanged. Alert-card trailing `|` separators are removed only from public
+search queries; the stored posting title and identity are unchanged.
+
+Example bounded live validation (stop Streamlit before using DuckDB write tools):
+
+```sh
+python -m src.retry_targeted_enrichment --require-tavily --max-jobs 1 --batch-size 1 --delay 0.75 --report data/tavily-single-diagnostic.json
+```
+
+Review timings and API request counts before choosing any broader retries.
+

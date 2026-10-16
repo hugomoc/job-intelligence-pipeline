@@ -9,6 +9,8 @@ the existing job-identity validator confirms that it is the same posting.
 from __future__ import annotations
 
 import asyncio
+import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
@@ -154,6 +156,8 @@ CAREER_PATH_WORDS = {
 
 MAX_SEARCH_RESULTS = 12
 MAX_CANDIDATE_FETCHES = 5
+OFFICIAL_RESOLUTION_BUDGET_SECONDS = 60.0
+CANDIDATE_HTTP_TIMEOUT_SECONDS = 8.0
 AMBIGUOUS_CONFIDENCE_MARGIN = 0.05
 DYNAMIC_RENDER_WAIT_MS = 1_500
 
@@ -441,8 +445,11 @@ def search_candidates(
     if provider == "duckduckgo":
         candidates = duckduckgo_candidates(job, client)
     elif provider in {"serper", "tavily"}:
-        query = f'{company} {title} jobs'
+        # Strip alert-card separators only; never rewrite stored identity.
+        query_title = re.sub(r"\s*\|\s*$", "", title).strip() or title
+        query = f'{company} {query_title} jobs'
         job["public_search_trace"]["query"] = query
+        search_started = time.monotonic()
         try:
             response = (
                 tavily_search(query, client) if provider == "tavily"
@@ -451,6 +458,12 @@ def search_candidates(
         except PublicSearchError as error:
             job["public_search_trace"]["error_category"] = error.category
             raise
+        finally:
+            timing = job.setdefault("enrichment_timing", {})
+            timing["public_search_ms"] = round(
+                timing.get("public_search_ms", 0)
+                + 1000 * (time.monotonic() - search_started), 1
+            )
         candidates = [
             OfficialJobCandidate(
                 url=url, label="", source=ats_type_for_url(url) or "search"
@@ -534,7 +547,9 @@ def fetch_candidate_description(
     *,
     require_full_jd: bool = False,
 ) -> JobDescriptionResult:
-    result = fetch_job_description(candidate.url, client)
+    result = fetch_job_description(
+        candidate.url, client, timeout_seconds=CANDIDATE_HTTP_TIMEOUT_SECONDS
+    )
 
     incomplete = False
     if require_full_jd and result.status == "enriched":
@@ -690,8 +705,11 @@ def resolve_from_candidates(
     client: httpx.Client,
     candidates: Iterable[OfficialJobCandidate],
     source: str,
+    *,
+    deadline: float | None = None,
 ) -> OfficialJobResolutionResult:
     job.setdefault("candidate_validation_trace", [])
+    timing = job.setdefault("enrichment_timing", {})
     ranked = ranked_candidates(
         job,
         candidates,
@@ -712,15 +730,48 @@ def resolve_from_candidates(
 
     verified_jobs: list[VerifiedOfficialJob] = []
     blocked_count = 0
+    skipped_count = 0
+    blocked_hosts: set[str] = set()
     last_rejection_reason: str | None = None
 
     for candidate in ranked:
-        result = fetch_candidate_description(candidate, client)
+        # A partially checked candidate set cannot establish a unique match:
+        # defer and retry rather than select an unchecked competitor.
+        if deadline is not None and time.monotonic() >= deadline:
+            return OfficialJobResolutionResult(
+                status=OFFICIAL_SEARCH_DEFERRED, official_job_url=None,
+                official_url_source=source, official_url_resolved_at=now_utc(),
+                official_url_confidence=None,
+                official_url_validation_reason="official resolution time budget exceeded; retry safely",
+                resolved_title=None, resolved_company=None, resolved_location=None,
+            )
+        host = hostname(candidate.url)
+        if host and host in blocked_hosts and not ats_type_for_url(candidate.url):
+            blocked_count += 1
+            skipped_count += 1
+            timing["blocked_host_skips"] = timing.get("blocked_host_skips", 0) + 1
+            job["candidate_validation_trace"].append({
+                "url": candidate.url, "accepted": False,
+                "fetch_status": "skipped_blocked_host",
+                "reason": "another URL on this host was blocked for this job",
+                "elapsed_ms": 0,
+            })
+            continue
 
+        fetch_started = time.monotonic()
+        result = fetch_candidate_description(candidate, client)
+        elapsed_ms = round(1000 * (time.monotonic() - fetch_started), 1)
+        timing["candidate_fetch_ms"] = round(
+            timing.get("candidate_fetch_ms", 0) + elapsed_ms, 1
+        )
+        timing["candidate_fetches"] = timing.get("candidate_fetches", 0) + 1
         if result.status == "blocked":
             job["candidate_validation_trace"].append({"url": candidate.url, "accepted": False,
-                "fetch_status": result.status, "reason": "identity not evaluated: posting fetch blocked"})
+                "fetch_status": result.status, "elapsed_ms": elapsed_ms,
+                "reason": "identity not evaluated: posting fetch blocked"})
             blocked_count += 1
+            if host:
+                blocked_hosts.add(host)
             continue
 
         verified = validate_candidate_result(
@@ -731,6 +782,7 @@ def resolve_from_candidates(
 
         job["candidate_validation_trace"].append({"url": candidate.url,
             "accepted": verified is not None, "fetch_status": result.status,
+            "elapsed_ms": elapsed_ms,
             "reason": verified.validation.reason if verified else "fetched posting did not pass existing identity validation",
             "http_status": result.http_status, "word_count": result.word_count,
             "resolved_title": result.resolved_title, "resolved_company": result.resolved_company})
@@ -752,6 +804,28 @@ def resolve_from_candidates(
             continue
 
         verified_jobs.append(verified)
+
+    # Do not return even a seemingly valid match if there are unchecked
+    # candidates due to deadline expiry; ambiguity must remain detectable.
+    if deadline is not None and time.monotonic() >= deadline:
+        return OfficialJobResolutionResult(
+            status=OFFICIAL_SEARCH_DEFERRED, official_job_url=None,
+            official_url_source=source, official_url_resolved_at=now_utc(),
+            official_url_confidence=None,
+            official_url_validation_reason="official resolution time budget exceeded; retry safely",
+            resolved_title=None, resolved_company=None, resolved_location=None,
+        )
+
+    if verified_jobs and skipped_count:
+        # Do not promote a match when another potentially competing posting
+        # was skipped rather than actually fetched and checked.
+        return OfficialJobResolutionResult(
+            status=OFFICIAL_SEARCH_DEFERRED, official_job_url=None,
+            official_url_source=source, official_url_resolved_at=now_utc(),
+            official_url_confidence=None,
+            official_url_validation_reason="potential competing posting skipped on blocked host",
+            resolved_title=None, resolved_company=None, resolved_location=None,
+        )
 
     if verified_jobs:
         chosen = choose_verified_candidate(verified_jobs)
@@ -802,7 +876,10 @@ def resolve_official_job(
     client: httpx.Client,
     search_circuit: PublicSearchCircuit | None = None,
 ) -> OfficialJobResolutionResult:
-    """Discover direct ATS postings before using the optional public-search circuit."""
+    """Discover direct ATS postings first, under a cooperative per-job budget."""
+    timing = job.setdefault("enrichment_timing", {})
+    deadline = time.monotonic() + OFFICIAL_RESOLUTION_BUDGET_SECONDS
+    ats_started = time.monotonic()
     try:
         ats_candidates = discover_ats_candidates(
             job=job,
@@ -810,6 +887,10 @@ def resolve_official_job(
         )
     except Exception:
         ats_candidates = []
+    finally:
+        timing["ats_discovery_ms"] = round(
+            1000 * (time.monotonic() - ats_started), 1
+        )
 
     if ats_candidates:
         ats_result = resolve_from_candidates(
@@ -817,13 +898,24 @@ def resolve_official_job(
             client=client,
             candidates=ats_candidates,
             source="ats",
+            deadline=deadline,
         )
 
         if ats_result.status in {
             OFFICIAL_FOUND_VERIFIED,
             OFFICIAL_AMBIGUOUS,
+            OFFICIAL_SEARCH_DEFERRED,
         }:
             return ats_result
+
+    if time.monotonic() >= deadline:
+        return OfficialJobResolutionResult(
+            status=OFFICIAL_SEARCH_DEFERRED, official_job_url=None,
+            official_url_source="search", official_url_resolved_at=now_utc(),
+            official_url_confidence=None,
+            official_url_validation_reason="official resolution time budget exceeded before public search",
+            resolved_title=None, resolved_company=None, resolved_location=None,
+        )
 
     try:
         candidates = (search_circuit.search(job, client) if search_circuit
@@ -868,4 +960,5 @@ def resolve_official_job(
         client=client,
         candidates=candidates,
         source="search",
+        deadline=deadline,
     )
