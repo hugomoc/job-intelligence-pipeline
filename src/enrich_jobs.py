@@ -2352,6 +2352,8 @@ def process_enrichment_job(
     defer_description_write: bool = False,
 ) -> EnrichmentProcessingResult:
     """Fetch/validate a description, falling back to official pages if needed."""
+    # Run-local only: diagnostics never become identity evidence or AI input.
+    job["enrichment_timing"] = {}
     needs_description = bool(
         job.get(
             "needs_description_enrichment",
@@ -2366,6 +2368,7 @@ def process_enrichment_job(
         return fetch_verified_official_description(
             job, client, persist=not defer_description_write
         )
+    source_started = time.monotonic()
     if needs_description:
         source_result = fetch_job_description(
             url=job["apply_url"],
@@ -2373,6 +2376,9 @@ def process_enrichment_job(
         )
     else:
         source_result = existing_description_result(job)
+    job["enrichment_timing"]["source_fetch_ms"] = round(
+        1000 * (time.monotonic() - source_started), 1
+    )
 
     result = source_result
     updated = False
@@ -2445,9 +2451,15 @@ def process_enrichment_job(
         )
     ):
         options = {"search_circuit": search_circuit} if search_circuit is not None else {}
-        official_resolution = resolve_official_job(
-            job=job, client=client, **options,
-        )
+        resolution_started = time.monotonic()
+        try:
+            official_resolution = resolve_official_job(
+                job=job, client=client, **options,
+            )
+        finally:
+            job["enrichment_timing"]["official_resolution_ms"] = round(
+                1000 * (time.monotonic() - resolution_started), 1
+            )
 
         if (
             official_resolution.status == OFFICIAL_FOUND_VERIFIED
