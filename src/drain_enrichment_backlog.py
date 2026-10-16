@@ -190,7 +190,22 @@ def drain(client, *, batch_size=250, delay=0.5, max_jobs=None,
                     break
                 if delay:
                     sleeper(delay)
-            queue = loader()
+            # A bounded run has already exhausted its job budget. Reloading
+            # the full DuckDB candidate inventory cannot change this run's
+            # outcome and may cost minutes on large historical databases.
+            # Unprocessed entries from the initial snapshot remain available
+            # as an accurate "remaining in this run" count.
+            limit_reached = max_jobs is not None and report['processed'] >= max_jobs
+            if limit_reached:
+                queue = [job for job in queue if job["record_key"] not in seen]
+                report['queue_refresh_skipped_at_limit'] = True
+            else:
+                refresh_started = time.monotonic()
+                queue = loader()
+                report['queue_refresh_seconds'] = round(
+                    report.get('queue_refresh_seconds', 0)
+                    + time.monotonic() - refresh_started, 3
+                )
             emit(f"Batch {report['batches']}: processed={batch_processed}; descriptions found={batch_updated}; "
                  f"blocked={statuses.get('blocked', 0)}; no description={statuses.get('no_description', 0)}; "
                  f"fetch errors={statuses.get('fetch_error', 0)}; remaining never attempted={len(pending_jobs(queue))}")
@@ -201,7 +216,7 @@ def drain(client, *, batch_size=250, delay=0.5, max_jobs=None,
                 break
             if retry_official_search:
                 queue = [job for job in queue if job['record_key'] not in seen]
-            if max_jobs is not None and report['processed'] >= max_jobs:
+            if limit_reached:
                 report['stop_reason'] = 'max_jobs reached' if candidates(queue) else None
                 break
         report['remaining'] = summarize_enrichment_queue(queue)
