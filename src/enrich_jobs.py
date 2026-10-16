@@ -1179,7 +1179,7 @@ def load_jobs_to_enrich(
 
     scored_jobs AS (
         SELECT DISTINCT
-            score_jobs.posting_status_key,
+            score_jobs.posting_status_key AS exact_posting_key,
             max(scores.overall_score) AS ai_score
         FROM resume_job_scores AS scores
         INNER JOIN all_jobs AS score_jobs
