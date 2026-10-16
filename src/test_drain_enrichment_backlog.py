@@ -80,6 +80,34 @@ class DrainTests(unittest.TestCase):
         self.assertEqual(report['remaining_never_attempted_needing_jd'], 2)
         self.assertEqual(report['stop_reason'], 'max_jobs reached')
 
+    def test_bounded_run_does_not_reload_expensive_queue(self):
+        inventory = [job('a'), job('b'), job('c')]
+        calls = []
+        completed = []
+        connection = unittest.mock.MagicMock()
+        connection.__enter__.return_value.execute.return_value.fetchone.return_value = None
+
+        def loader():
+            calls.append('load')
+            return [dict(item) for item in inventory]
+
+        def processor(item, client):
+            completed.append(item['record_key'])
+            return result()
+
+        with patch.object(drain, 'get_connection', return_value=connection):
+            report = drain.drain(
+                None, loader=loader, processor=processor, max_jobs=1,
+                batch_size=1, emit=lambda line: None,
+                sleeper=lambda seconds: None,
+            )
+        self.assertEqual(calls, ['load'])
+        self.assertEqual(completed, ['a'])
+        self.assertEqual(report['processed'], 1)
+        self.assertEqual(report['remaining']['eligible_for_enrichment'], 2)
+        self.assertTrue(report['queue_refresh_skipped_at_limit'])
+        self.assertEqual(report['stop_reason'], 'max_jobs reached')
+
     def test_rate_limit_guard_consecutive_and_rolling(self):
         guard = drain.RateLimitGuard()
         for _ in range(5):
