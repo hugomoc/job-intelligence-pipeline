@@ -731,6 +731,41 @@ def extract_job_description_from_html(
     )
 
 
+def is_unsafe_linkedin_posting_redirect(
+    requested_url: str | None,
+    final_url: str | None,
+) -> bool:
+    """Reject LinkedIn expired/search redirects and different posting IDs.
+
+    The search page can contain a very long `main` element that looks like a
+    JD by word count alone. Its text is not evidence for the requested job.
+    """
+    requested = urlparse(str(requested_url or ""))
+    final = urlparse(str(final_url or ""))
+    final_host = (final.hostname or "").casefold()
+    if final_host != "linkedin.com" and not final_host.endswith(".linkedin.com"):
+        return False
+
+    path = final.path.rstrip("/").casefold()
+    if "expired_jd_redirect" in final.query.casefold():
+        return True
+    if (
+        path in {"/jobs", "/jobs/search"}
+        or re.fullmatch(r"/jobs/[^/]+-jobs", path)
+        or path.startswith(("/jobs/search/", "/jobs/collections/",
+                             "/jobs/job-alerts"))
+    ):
+        return True
+
+    # A redirect to a different LinkedIn job ID cannot establish that the
+    # fetched description still represents the original exact posting.
+    original_id = re.fullmatch(r"/jobs/view/(\d+)/?", requested.path)
+    resolved_id = re.fullmatch(r"/jobs/view/(\d+)/?", final.path)
+    if original_id and resolved_id and original_id.group(1) != resolved_id.group(1):
+        return True
+    return False
+
+
 def fetch_job_description(
     url: str,
     client: httpx.Client,
@@ -789,6 +824,21 @@ def fetch_job_description(
 
     final_url = str(response.url)
     http_status = response.status_code
+
+    if is_unsafe_linkedin_posting_redirect(url, final_url):
+        return JobDescriptionResult(
+            requested_url=url,
+            final_url=final_url,
+            status="no_description",
+            http_status=http_status,
+            extraction_method=None,
+            description="",
+            word_count=0,
+            error_message=(
+                "Original LinkedIn posting redirected to a generic, expired, "
+                "or different job page; do not reuse that page as its JD."
+            ),
+        )
 
     if http_status in {
         401,

@@ -27,6 +27,7 @@ from src.enrichment.job_description import (
     count_words,
     create_http_client,
     fetch_job_description,
+    is_unsafe_linkedin_posting_redirect,
 )
 from src.enrichment.job_identity import (
     JobIdentityValidation,
@@ -309,6 +310,7 @@ def requires_identity_validation(
 
     return (
         source in AGGREGATOR_SOURCES_REQUIRING_IDENTITY
+        or source == "linkedin"
         or "jobleads.com" in final_url
         or "lensa.com" in final_url
     )
@@ -341,6 +343,17 @@ def validate_enrichment_identity(
     job: dict[str, Any],
     result: JobDescriptionResult,
 ) -> JobIdentityValidation:
+    # Defensive second boundary: even if an alternate extraction path
+    # produces a long page, an expired/search redirect cannot be a JD.
+    if is_unsafe_linkedin_posting_redirect(job.get("apply_url"), result.final_url):
+        return JobIdentityValidation(
+            accepted=False,
+            confidence=0.0,
+            title_similarity=None,
+            company_similarity=None,
+            occupation_match=None,
+            reason="original LinkedIn posting redirected to generic/expired or different job page",
+        )
     location_status, location_reason = location_compatibility(
         job.get("location"), result.resolved_location, result.resolved_location_source
     )
@@ -1934,6 +1947,14 @@ def save_enrichment_attempt(
     )
 
     final_status = status or result.status
+    if (final_status == "enriched"
+            and is_unsafe_linkedin_posting_redirect(
+                job.get("apply_url") or result.requested_url, result.final_url
+            )):
+        raise ValueError(
+            "Cannot persist an enriched description from an expired, generic, "
+            "or different LinkedIn posting redirect"
+        )
 
     final_error = (
         error_message
@@ -1973,15 +1994,24 @@ def save_enrichment_attempt(
         or description_hash(result.description)
         or None
     )
-    description_source = (
-        job.get("description_source")
-        or (
-            official_resolution.official_url_source
-            if official_resolution
-            else None
+    # An unsuccessful official search did not supply this description.
+    # Keep the fetched source's extraction provenance instead of incorrectly
+    # labelling a source-page JD as "search".
+    if official_resolution and official_resolution.status == OFFICIAL_FOUND_VERIFIED:
+        # Preserve the explicit trusted provenance marker used by verified
+        # direct refetches and other authoritative reuse paths.
+        description_source = (
+            job.get("description_source")
+            or official_resolution.official_url_source
+            or result.extraction_method
         )
-        or result.extraction_method
-    )
+    else:
+        # A failed official search never supplied a newly saved source JD.
+        description_source = (
+            (result.extraction_method if final_status == "enriched" else None)
+            or job.get("description_source")
+            or result.extraction_method
+        )
     posting_status = job.get("posting_status") or "unknown"
     reused_description = bool(job.get("reused_description"))
 
