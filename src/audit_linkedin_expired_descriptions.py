@@ -19,6 +19,7 @@ from src.database import DATABASE_PATH
 from src.enrichment.job_description import is_unsafe_linkedin_posting_redirect
 
 CLASS_CONFIRMED = "confirmed_expired_search_page"
+CLASS_HIGH_CONFIDENCE = "high_confidence_search_results_page"
 CLASS_LIKELY = "likely_search_results_contamination"
 CLASS_REDIRECT_REVIEW = "review_unsafe_posting_redirect"
 CLASS_IDENTITY_REVIEW = "review_legacy_unverified_linkedin"
@@ -45,6 +46,25 @@ def search_page_evidence(description: str) -> list[str]:
     return sorted(set(matched))
 
 
+def has_generic_search_results_header(description: str) -> bool:
+    """Identify generic listings without mistaking genuine job-page chrome.
+
+    Job pages also have "Set alert" and "New to LinkedIn" boilerplate.
+    Those phrases alone must never trigger this high-confidence category.
+    """
+    prefix = re.sub(r"\\s+", " ", str(description or "")[:900]).casefold().strip()
+    if not prefix.startswith("get notified about new "):
+        return False
+    if "sign in to create job alert" not in prefix[:270]:
+        return False
+    return bool(
+        re.search(
+            r"\\b[\\d,]+\\s*\\+?\\s+.{1,100}?\\bjobs in [a-z]",
+            prefix[:500],
+        )
+    )
+
+
 def classify_row(row: dict[str, Any]) -> dict[str, Any]:
     description = str(row.get("description") or "")
     requested_url = str(row.get("apply_url") or "")
@@ -62,6 +82,12 @@ def classify_row(row: dict[str, Any]) -> dict[str, Any]:
     if rejected_redirect and status == "enriched" and text_is_listing:
         classification = CLASS_CONFIRMED
         reason = "Enrichment saved text from an expired/generic LinkedIn redirect; text contains multiple search-listing markers."
+    elif has_generic_search_results_header(description):
+        classification = CLASS_HIGH_CONFIDENCE
+        reason = (
+            "Stored text begins with a generic LinkedIn job-results header and "
+            "numbered listing, rather than the requested individual posting."
+        )
     elif text_is_listing:
         classification = CLASS_LIKELY
         reason = "Stored description contains multiple LinkedIn job-search listing markers; inspect original provenance."
@@ -95,7 +121,10 @@ def classify_row(row: dict[str, Any]) -> dict[str, Any]:
         "description_source": row.get("description_source"),
         "description_words": len(description.split()),
         "description_characters": len(description),
-        "evidence_markers": markers,
+        "evidence_markers": (
+            sorted(set(markers + ["generic results-list header and job-count"]))
+            if has_generic_search_results_header(description) else markers
+        ),
         "description_preview": re.sub(r"\s+", " ", description).strip()[:200],
     }
 
@@ -139,9 +168,10 @@ def build_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     priority = {
         CLASS_CONFIRMED: 0,
-        CLASS_LIKELY: 1,
-        CLASS_REDIRECT_REVIEW: 2,
-        CLASS_IDENTITY_REVIEW: 3,
+        CLASS_HIGH_CONFIDENCE: 1,
+        CLASS_LIKELY: 2,
+        CLASS_REDIRECT_REVIEW: 3,
+        CLASS_IDENTITY_REVIEW: 4,
     }
     flagged.sort(key=lambda item: (
         priority[item["classification"]], str(item["company"] or ""),
@@ -157,7 +187,7 @@ def build_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "counts": {
             classification: counts[classification]
             for classification in (
-                CLASS_CONFIRMED, CLASS_LIKELY,
+                CLASS_CONFIRMED, CLASS_HIGH_CONFIDENCE, CLASS_LIKELY,
                 CLASS_REDIRECT_REVIEW, CLASS_IDENTITY_REVIEW,
                 CLASS_NO_SIGNAL,
             )
