@@ -1,4 +1,4 @@
-from src.job_admission import evaluate_job_admission
+from src.job_admission import evaluate_job_admission, prepare_resume_admission_signals
 
 
 RESUME_PROFILE = {
@@ -502,7 +502,34 @@ def test_project_only_skill_is_not_production_match() -> None:
     assert "dbt" not in result.matched_resume_signals
 
 
+def test_prepared_resume_signals_preserve_exact_admission_results() -> None:
+    profiles = [
+        RESUME_PROFILE,
+        {**RESUME_PROFILE, "production_skills": ["Python", "SQL"],
+         "project_skills": ["Databricks", "dbt"]},
+    ]
+    titles = [
+        "Senior Analytics Engineer with dbt",
+        "Forward Deployed Data Engineer IV, Databricks",
+        "Staff Data Engineer",
+        "Senior Data Engineer Snowflake SQL Python",
+        "Software Engineering Manager",
+    ]
+    for profile in profiles:
+        prepared = prepare_resume_admission_signals(profile)
+        for title in titles:
+            job = {"title": title, "company_name": "Test Employer",
+                   "location": "Remote",
+                   "description": "Data pipelines and SQL analytics modeling."}
+            baseline = evaluate_job_admission(job=job, resume_profile=profile)
+            cached = evaluate_job_admission(
+                job=job, resume_profile=profile, prepared_resume=prepared,
+            )
+            assert cached == baseline, title
+
+
 def main() -> None:
+    test_prepared_resume_signals_preserve_exact_admission_results()
     test_includes_supported_data_engineering_title()
     test_includes_supported_analytics_engineering_title()
     test_excludes_forward_deployed_databricks_gap()
