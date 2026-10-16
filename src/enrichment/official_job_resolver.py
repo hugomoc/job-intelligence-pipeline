@@ -111,8 +111,7 @@ class PublicSearchCircuit:
 
     def summary(self):
         return {"opened": self.open, "calls_attempted": self.calls,
-                "errors": self.errors, "jobs_deferred": self.deferred,
-                "provider_states": self.states}
+                "errors": self.errors, "jobs_deferred": self.deferred}
 
 
 from src.job_domains import THIRD_PARTY_DOMAINS
