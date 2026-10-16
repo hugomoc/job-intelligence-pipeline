@@ -43,7 +43,7 @@ class SearchTests(unittest.TestCase):
             self.assertEqual(lensa_job().get('verified_posting_key'), None)
             self.assertIsNone(candidates[0].title)
             self.assertIsNone(candidates[0].company)
-            self.assertEqual(candidates[0].label, '')
+            self.assertEqual(candidates[0].label, 'Senior Analytics Engineer')
             self.assertNotIn('official_job_url', lensa_job())
             trace_job=lensa_job()
             resolver.search_candidates(trace_job,client)
@@ -186,6 +186,94 @@ class SearchTests(unittest.TestCase):
             self.assertEqual(job['title'], 'Senior Analytics Engineer |')
             self.assertEqual(job['public_search_trace']['query'], payload['query'])
 
+    def test_tavily_same_query_is_one_request_and_identity_remains_independent(self):
+        with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily'}):
+            client, calls = self.tavily_client()
+            with client:
+                first = lensa_job()
+                second = dict(lensa_job(), record_key='another-aggregator-record')
+                a = resolver.search_candidates(first, client)
+                b = resolver.search_candidates(second, client)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(len(a), 1)
+                self.assertEqual(len(b), 1)
+                self.assertIsNone(b[0].title)
+                self.assertIsNone(b[0].company)
+                self.assertTrue(second['public_search_trace']['cache_hit'])
+                self.assertFalse(first['public_search_trace']['cache_hit'])
+                self.assertEqual(provider_metrics(client)['tavily']['search_requests'], 1)
+
+    def test_search_does_not_cache_provider_errors(self):
+        with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily'}):
+            client, calls = self.tavily_client(
+                tavily_status=429, tavily_payload={'detail': 'rate limit'})
+            with client:
+                for _ in range(2):
+                    with self.assertRaises(PublicSearchError):
+                        resolver.search_candidates(lensa_job(), client, provider='tavily')
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(provider_metrics(client)['tavily']['search_requests'], 2)
+
+    def test_search_rejects_generic_career_and_job_category_urls(self):
+        bad = [
+            'https://pfizer.wd1.myworkdayjobs.com/PfizerCareers',
+            'https://www.pfizer.com/about/careers/careers-digital',
+            'https://www.pfizer.com/about/careers',
+            'https://www.dice.com/jobs/q-Analytics%20Engineer-jobs',
+            'https://www.dice.com/job-detail/992c0a89-bda6-41a2-b205-b34b2b7dc4eb',
+            'https://jobs.ashbyhq.com/Acme',
+        ]
+        for url in bad:
+            self.assertFalse(resolver.looks_like_official_or_ats_url(url, 'Pfizer'),
+                             url)
+        good = [
+            'https://pfizer.wd1.myworkdayjobs.com/en-US/PfizerCareers/job/Austin/Data-Engineer_R123',
+            'https://boards.greenhouse.io/seismic/jobs/123',
+            'https://careers.seismic.com/jobs/123',
+            'https://jobs.ashbyhq.com/acme/abc-123',
+        ]
+        for url in good:
+            self.assertTrue(resolver.looks_like_official_or_ats_url(url, 'Seismic'),
+                            url)
+
+    def test_workday_homepage_can_discover_specific_posting_without_extra_tavily(self):
+        root = 'https://pfizer.wd1.myworkdayjobs.com/PfizerCareers'
+        posting = ('https://pfizer.wd1.myworkdayjobs.com/en-US/PfizerCareers/'
+                   'job/New-York/Medical-Analytics-Data-Engineer_R123')
+        endpoint = 'https://pfizer.wd1.myworkdayjobs.com/wday/cxs/pfizer/PfizerCareers/jobs'
+        calls = []
+        def handle(request):
+            calls.append(str(request.url))
+            if request.url.host == 'api.tavily.com':
+                return httpx.Response(200, json={'results': [{
+                    'title': 'Pfizer Careers', 'url': root
+                }]})
+            if str(request.url) == endpoint:
+                query = json.loads(request.content)
+                self.assertEqual(query['searchText'], 'Medical Analytics Data Engineer')
+                return httpx.Response(200, json={'jobPostings': [
+                    {'title': 'Medical Analytics Data Engineer',
+                     'externalPath': '/job/New-York/Medical-Analytics-Data-Engineer_R123',
+                     'locationsText': 'Remote'}
+                ]})
+            if str(request.url) == posting:
+                return httpx.Response(200, text=job_posting_html(
+                    'Medical Analytics Data Engineer', 'Pfizer'),
+                    headers={'content-type': 'text/html'})
+            raise AssertionError(str(request.url))
+        with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily'}), \
+             patch.object(resolver, 'discover_ats_candidates', return_value=[]), \
+             httpx.Client(transport=httpx.MockTransport(handle)) as client:
+            job = dict(lensa_job(), title='Medical Analytics Data Engineer',
+                       company_name='Pfizer')
+            outcome = resolver.resolve_official_job(job, client,
+                                                   resolver.PublicSearchCircuit())
+            self.assertEqual(outcome.status, resolver.OFFICIAL_FOUND_VERIFIED)
+            self.assertEqual(outcome.official_job_url, posting)
+            self.assertEqual(len([url for url in calls if 'api.tavily.com' in url]), 1)
+            self.assertEqual(len([url for url in calls if '/wday/cxs/' in url]), 1)
+            self.assertNotIn(root, calls)
+
     def test_tavily_quota_falls_back_to_serper_for_same_job(self):
         with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily'}):
             client, calls = self.tavily_client(tavily_status=432, tavily_payload={'detail': {'error': 'plan limit'}})
@@ -203,7 +291,10 @@ class SearchTests(unittest.TestCase):
                 self.assertEqual(provider_metrics(client)['tavily']['quota_exhausted'], 1)
                 circuit.search(lensa_job(), client)
                 self.assertEqual([request.url.host for request in calls].count('api.tavily.com'), 1)
-                self.assertEqual([request.url.host for request in calls].count('google.serper.dev'), 2)
+                # Serper's successful response is reused for the same query;
+                # the Tavily quota error remains uncached and its circuit open.
+                self.assertEqual([request.url.host for request in calls].count('google.serper.dev'), 1)
+                self.assertEqual(provider_metrics(client)['serper']['search_requests'], 1)
 
     def test_no_tavily_results_is_success_not_serper_fallback(self):
         with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily'}):

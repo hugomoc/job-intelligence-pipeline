@@ -2035,7 +2035,43 @@ def test_legacy_untrusted_key_does_not_seed_offline_reuse() -> None:
     with_temp_database(scenario)
 
 
+def test_targeted_retry_sql_scope_preserves_selected_records_and_status() -> None:
+    def scenario() -> None:
+        for key, status in [
+            ("retry-deferred", "SEARCH_DEFERRED"),
+            ("retry-insufficient", "INSUFFICIENT_IDENTITY"),
+            ("not-targeted", "OFFICIAL_NOT_FOUND"),
+        ]:
+            insert_raw_job(
+                key, source="lensa", title="Senior Analytics Engineer",
+                company_name="Seismic",
+                apply_url=f"https://lensa.com/jobs/{key}",
+            )
+            insert_attempt(key, source="lensa", official_status=status)
+        kwargs = dict(
+            limit=20, minimum_words=80, source=None, retry_failed=False,
+            force=False, retry_official_search=True, deduplicate=False,
+        )
+        baseline = load_jobs_to_enrich(**kwargs)
+        phases: dict[str, float] = {}
+        scoped = load_jobs_to_enrich(
+            **kwargs, targeted_retry_only=True, load_timing=phases
+        )
+        assert [job["record_key"] for job in scoped] == [
+            job["record_key"] for job in baseline
+        ]
+        assert {job["record_key"] for job in scoped} == {
+            "retry-deferred", "retry-insufficient"
+        }
+        assert all(job["needs_official_resolution"] for job in scoped)
+        assert "load_sql_ms" in phases
+        assert "admission_gate_ms" in phases
+
+    with_temp_database(scenario)
+
+
 def main() -> None:
+    test_targeted_retry_sql_scope_preserves_selected_records_and_status()
     test_previous_failed_lensa_attempt_with_null_official_status_is_selected()
     test_found_verified_is_not_selected_again_for_official_resolution()
     test_official_not_found_recently_is_in_cooldown()
