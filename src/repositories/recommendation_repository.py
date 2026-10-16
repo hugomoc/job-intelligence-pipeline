@@ -27,7 +27,7 @@ from src.description_quality import (
     MINIMUM_FULL_DESCRIPTION_WORDS,
     assess_description_quality,
 )
-from src.job_admission import evaluate_job_admission
+from src.job_admission import evaluate_job_admission, prepare_resume_admission_signals
 from src.job_title_filter import (
     EXCLUDED_TITLE_SQL_REGEX,
     classify_job_title,
@@ -1363,6 +1363,9 @@ def apply_admission_gate(
             job["description_state"] = description_state(job)
         return jobs
 
+    # The profile never changes across jobs in this admission pass. Avoid
+    # repeatedly normalizing it and calculating resume-only scope signals.
+    prepared_resume = prepare_resume_admission_signals(resume_profile)
     admitted_jobs: list[dict[str, Any]] = []
     preserved_statuses = set(preserve_statuses) | {"applied", "removed"}
 
@@ -1371,6 +1374,7 @@ def apply_admission_gate(
         evaluation = evaluate_job_admission(
             job=job,
             resume_profile=resume_profile,
+            prepared_resume=prepared_resume,
         )
 
         job["admission_decision"] = evaluation.admission_decision
