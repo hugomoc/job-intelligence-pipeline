@@ -30,6 +30,7 @@ CI_TESTS = [
     "src/test_ats_adapters.py",
     "src/test_ats_metadata.py",
     "src/test_audit_verified_posting_keys.py",
+    "src/test_audit_linkedin_expired_descriptions.py",
     "src/test_bebee_parser.py",
     "src/test_builtin_parser.py",
     "src/test_config.py",
