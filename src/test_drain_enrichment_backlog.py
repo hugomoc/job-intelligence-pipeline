@@ -80,6 +80,18 @@ class DrainTests(unittest.TestCase):
         self.assertEqual(report['remaining_never_attempted_needing_jd'], 2)
         self.assertEqual(report['stop_reason'], 'max_jobs reached')
 
+    def test_offline_verified_candidates_loaded_once_per_preparation(self):
+        with patch.object(
+            enrich_jobs, 'load_verified_reuse_candidates',
+            return_value=[],
+        ) as candidates:
+            stats = enrich_jobs.prepare_verified_candidate_metadata_before_queue(
+                [job('no-authoritative-identity')], minimum_words=80
+            )
+        candidates.assert_called_once_with(minimum_words=80)
+        self.assertEqual(stats['offline_reused'], 0)
+        self.assertEqual(stats['no_candidate'], 1)
+
     def test_bounded_run_does_not_reload_expensive_queue(self):
         inventory = [job('a'), job('b'), job('c')]
         calls = []
