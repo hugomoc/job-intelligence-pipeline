@@ -1947,6 +1947,14 @@ def save_enrichment_attempt(
     )
 
     final_status = status or result.status
+    if (final_status == "enriched"
+            and is_unsafe_linkedin_posting_redirect(
+                job.get("apply_url") or result.requested_url, result.final_url
+            )):
+        raise ValueError(
+            "Cannot persist an enriched description from an expired, generic, "
+            "or different LinkedIn posting redirect"
+        )
 
     final_error = (
         error_message
