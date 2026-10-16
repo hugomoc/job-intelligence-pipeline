@@ -27,6 +27,7 @@ from src.browser.playwright_client import PlaywrightClient
 from src.enrichment.ats import (
     OfficialJobCandidate,
     discover_ats_candidates,
+    workday,
 )
 from src.enrichment.job_description import (
     JobDescriptionResult,
@@ -987,6 +988,31 @@ def resolve_official_job(
             resolved_location=None,
             error_message=f"{type(error).__name__}: {error}",
         )
+
+    # Tavily may find the employer's real Workday career-site homepage
+    # rather than a specific posting. Query that public tenant's CXS listing
+    # without extra Tavily credits, then fetch/validate matching postings.
+    # Untrusted search data never becomes accepted title/company evidence.
+    seen_urls = {candidate.url for candidate in candidates}
+    search_trace = job.get("public_search_trace") or {}
+    workday_homepages = [
+        hit["url"] for hit in search_trace.get("organic_results", [])
+        if ats_type_for_url(hit.get("url", "")) == "workday"
+        and not looks_like_individual_posting_url(hit.get("url", ""))
+    ][:1]
+    for homepage in workday_homepages:
+        if time.monotonic() >= deadline:
+            break
+        lead_started = time.monotonic()
+        leads = workday.discover_from_search_homepage(job, client, homepage)
+        timing["workday_listing_discovery_ms"] = round(
+            1000 * (time.monotonic() - lead_started), 1
+        )
+        search_trace["workday_listing_candidates_found"] = len(leads)
+        for lead in leads:
+            if lead.url not in seen_urls:
+                candidates.append(lead)
+                seen_urls.add(lead.url)
 
     return resolve_from_candidates(
         job=job,
