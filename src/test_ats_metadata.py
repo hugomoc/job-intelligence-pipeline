@@ -67,6 +67,24 @@ class MetadataTests(unittest.TestCase):
         )
         self.assertTrue(validation.accepted, validation.reason)
 
+    def test_linkedin_title_slug_canonical_must_match_numeric_posting_id(self):
+        url = "https://www.linkedin.com/jobs/view/4478490210/"
+        canonical = (
+            "https://www.linkedin.com/jobs/view/"
+            "senior-analytics-engineer-at-wake-forest-university-4478490210"
+        )
+        html = (
+            "<head><link rel='canonical' href='" + canonical + "'></head>"
+            "<h1 class='top-card-layout__title'>Senior Analytics Engineer</h1>"
+            "<a class='topcard__org-name-link'>Wake Forest University</a>"
+            "<div class='show-more-less-html__markup'>"
+            + ("Build SQL models and Python data pipelines. " * 18)
+            + "</div>"
+        )
+        parsed = result(url, html)
+        self.assertEqual(parsed.resolved_company, "Wake Forest University")
+        self.assertEqual(parsed.status, "enriched")
+
     def test_linkedin_missing_posting_description_rejects_generic_main(self):
         url = "https://www.linkedin.com/jobs/view/4478490210/"
         page = (
