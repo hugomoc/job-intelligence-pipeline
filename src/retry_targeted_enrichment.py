@@ -91,7 +91,13 @@ def main():
     per_job=[]
     with create_http_client() as client:
         client.event_hooks.setdefault('response',[]).append(guard.observe)
-        healthy,probes=probe_search(jobs,client)
+        # A one-job test already exercises the provider; avoid two extra
+        # credit-consuming health probes for the same single-job validation.
+        if a.max_jobs == 1:
+            healthy,probes = bool(jobs),[]
+            report['health_probes_skipped'] = 'single-job live validation'
+        else:
+            healthy,probes = probe_search(jobs,client)
         report['health_probes']=probes
         report['provider_metrics']=provider_metrics(client)
         if not healthy:
@@ -107,6 +113,7 @@ def main():
             official=processed.official_resolution
             trace=job.get('public_search_trace', {})
             per_job.append(dict(record_key=job['record_key'],title=job['title'],
+                timings=job.get('enrichment_timing', {}),
                 company=job['company_name'],serper_called='serper' in trace.get('attempted_providers', []),
                 tavily_called='tavily' in trace.get('attempted_providers', []),
                 search_candidates=trace.get('candidates',0),search=trace,
