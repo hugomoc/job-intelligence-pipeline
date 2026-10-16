@@ -2175,10 +2175,57 @@ def test_valid_linkedin_posting_requires_fetched_identity() -> None:
     assert enrich_jobs.validate_enrichment_identity(base, valid_metadata).accepted
 
 
+def test_unverified_official_search_cannot_claim_source_description_provenance() -> None:
+    def scenario() -> None:
+        key = "description-source-from-linkedin"
+        original = "https://www.linkedin.com/jobs/view/4470007344/"
+        insert_raw_job(
+            key, source="linkedin", title="Sr Business Data Analyst",
+            company_name="Point32Health", apply_url=original,
+        )
+        source_result = JobDescriptionResult(
+            requested_url=original, final_url=original,
+            status="enriched", http_status=200,
+            extraction_method="html_selector", description=DESCRIPTION,
+            word_count=len(DESCRIPTION.split()), error_message=None,
+            resolved_title="Sr Business Data Analyst",
+            resolved_company="Point32Health",
+        )
+        job = {
+            "record_key": key, "source": "linkedin", "apply_url": original,
+            "title": "Sr Business Data Analyst",
+            "company_name": "Point32Health",
+        }
+        validation = enrich_jobs.validate_enrichment_identity(job, source_result)
+        assert validation.accepted
+        unresolved = OfficialJobResolutionResult(
+            status=OFFICIAL_NOT_FOUND, official_job_url=None,
+            official_url_source="search",
+            official_url_resolved_at=datetime.now(timezone.utc),
+            official_url_confidence=None,
+            official_url_validation_reason="official company mismatch",
+            resolved_title=None, resolved_company=None, resolved_location=None,
+        )
+        save_enrichment_attempt(
+            job=job, result=source_result, status="enriched",
+            identity_validation=validation, official_resolution=unresolved,
+        )
+        with database.get_connection() as connection:
+            row = connection.execute(
+                "SELECT description_source, official_url_source, "
+                "verified_posting_key FROM job_enrichment_attempts "
+                "WHERE record_key = ?", [key],
+            ).fetchone()
+        assert row == ("html_selector", "search", None)
+
+    with_temp_database(scenario)
+
+
 def main() -> None:
     test_expired_linkedin_redirect_cannot_be_extracted_as_a_job()
     test_expired_linkedin_redirect_rejected_even_if_extractor_reports_enriched()
     test_valid_linkedin_posting_requires_fetched_identity()
+    test_unverified_official_search_cannot_claim_source_description_provenance()
     test_targeted_retry_sql_scope_preserves_selected_records_and_status()
     test_previous_failed_lensa_attempt_with_null_official_status_is_selected()
     test_found_verified_is_not_selected_again_for_official_resolution()
