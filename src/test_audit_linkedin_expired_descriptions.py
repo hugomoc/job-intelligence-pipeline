@@ -8,9 +8,9 @@ from tempfile import TemporaryDirectory
 import duckdb
 
 from src.audit_linkedin_expired_descriptions import (
-    CLASS_CONFIRMED, CLASS_IDENTITY_REVIEW, CLASS_LIKELY,
+    CLASS_CONFIRMED, CLASS_HIGH_CONFIDENCE, CLASS_IDENTITY_REVIEW, CLASS_LIKELY,
     CLASS_NO_SIGNAL, CLASS_REDIRECT_REVIEW, audit,
-    classify_row, search_page_evidence,
+    classify_row, search_page_evidence, has_generic_search_results_header,
 )
 
 
@@ -138,7 +138,60 @@ def test_scan_uses_readonly_connection_and_ignores_empty_rows() -> None:
         assert result["findings"][0]["record_key"] == "bad"
 
 
+GENERIC_RESULTS = (
+    "Get notified about new Senior Data Engineer jobs in United States . "
+    "Sign in to create job alert 11,000+ Senior Data Engineer Jobs in "
+    "United States. Sr. Data Engineer Carrot San Francisco Be an early "
+    "applicant Actively Hiring."
+)
+SPANISH_RESULTS = (
+    "Get notified about new Ingeniero jobs in Spain . Sign in to create "
+    "job alert 11,000+ Ingeniero Jobs in Spain. SIEM Engineer Madrid."
+)
+
+
+def test_generic_results_header_recognized_despite_stale_attempt_status() -> None:
+    for status in ("not_improved", "blocked", "enriched"):
+        finding = classify_row(row(
+            description=GENERIC_RESULTS, attempt_status=status,
+            final_url="https://www.linkedin.com/jobs/view/4470007344/",
+        ))
+        assert finding["classification"] == CLASS_HIGH_CONFIDENCE
+        assert "generic results-list header and job-count" in finding["evidence_markers"]
+    assert has_generic_search_results_header(GENERIC_RESULTS)
+
+
+def test_expired_spanish_linkedin_search_results_are_detected() -> None:
+    finding = classify_row(row(
+        description=SPANISH_RESULTS, attempt_status="enriched",
+        final_url="https://es.linkedin.com/jobs/ingeniero-empleos?trk=expired_jd_redirect",
+    ))
+    assert finding["classification"] == CLASS_HIGH_CONFIDENCE
+    assert has_generic_search_results_header(SPANISH_RESULTS)
+
+
+def test_job_page_chrome_not_sufficient_to_quarantine() -> None:
+    genuine_page = (
+        "Senior Data Engineer 9amHealth United States "
+        "Join or sign in to find your next job Join to apply for the Senior "
+        "Data Engineer role at 9amHealth. New to LinkedIn? Join now. "
+        "Get notified when a new job is posted. Set alert. "
+        "Sign in to set job alerts. "
+        "Design dbt models and Snowflake pipelines for health analytics."
+    )
+    finding = classify_row(row(
+        description=genuine_page,
+        final_url="https://www.linkedin.com/jobs/view/4470007344/",
+        identity_validation_reason="identity accepted",
+    ))
+    assert finding["classification"] != CLASS_HIGH_CONFIDENCE
+    assert not has_generic_search_results_header(genuine_page)
+
+
 def main() -> None:
+    test_generic_results_header_recognized_despite_stale_attempt_status()
+    test_expired_spanish_linkedin_search_results_are_detected()
+    test_job_page_chrome_not_sufficient_to_quarantine()
     test_exact_point32health_example_is_confirmed()
     test_long_linkedin_job_listing_text_is_flagged_without_redirect()
     test_redirect_alone_needs_review_not_proven_contamination()
