@@ -2135,9 +2135,11 @@ def test_expired_linkedin_redirect_rejected_even_if_extractor_reports_enriched()
         official_url_validation_reason="no matching official posting",
         resolved_title=None, resolved_company=None, resolved_location=None,
     )
-    with patch.object(enrich_jobs, "fetch_job_description", return_value=fake_result), \\
-         patch.object(enrich_jobs, "resolve_official_job", return_value=not_found), \\
-         patch.object(enrich_jobs, "update_job_description") as update:
+    with (
+        patch.object(enrich_jobs, "fetch_job_description", return_value=fake_result),
+        patch.object(enrich_jobs, "resolve_official_job", return_value=not_found),
+        patch.object(enrich_jobs, "update_job_description") as update,
+    ):
         with httpx.Client() as client:
             result = process_enrichment_job(job, client)
     assert not result.updated
