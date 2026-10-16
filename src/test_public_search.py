@@ -174,6 +174,18 @@ class SearchTests(unittest.TestCase):
                 self.assertEqual(provider_metrics(client)['tavily']['search_requests'], 1)
                 self.assertEqual(provider_metrics(client).get('serper'), None)
 
+    def test_alert_separator_is_removed_only_from_query(self):
+        with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily'}):
+            client, calls = self.tavily_client()
+            job = lensa_job()
+            job['title'] = 'Senior Analytics Engineer |'
+            with client:
+                resolver.search_candidates(job, client)
+            payload = json.loads(calls[0].content)
+            self.assertEqual(payload['query'], 'Seismic Senior Analytics Engineer jobs')
+            self.assertEqual(job['title'], 'Senior Analytics Engineer |')
+            self.assertEqual(job['public_search_trace']['query'], payload['query'])
+
     def test_tavily_quota_falls_back_to_serper_for_same_job(self):
         with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily'}):
             client, calls = self.tavily_client(tavily_status=432, tavily_payload={'detail': {'error': 'plan limit'}})
