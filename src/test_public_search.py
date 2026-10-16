@@ -94,7 +94,9 @@ class SearchTests(unittest.TestCase):
                     circuit.search(lensa_job(), client)
                 self.assertEqual(len(self.requests), 1)
             with patch.dict(os.environ, {'SERPER_API_KEY': ''}):
-                self.assertFalse(circuit.open)
+                # No configured paid provider means deferred; DDG is NOT automatic.
+                self.assertTrue(circuit.open)
+                self.assertEqual(selected_provider(), 'none')
 
     def test_rate_limit_and_network_server_errors_retryable(self):
         for status, network, category in [(429,False,'rate_limit'),(503,False,'transient_error'),(200,True,'transient_error')]:
