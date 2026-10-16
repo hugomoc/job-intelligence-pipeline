@@ -44,6 +44,26 @@ def provider_metrics(client):
     return client.public_search_metrics
 
 
+def cache_key(provider, query):
+    return (provider, " ".join(str(query).split()).casefold())
+
+
+def cached_response(client, provider, query):
+    # Per HTTP client / per run. Only successful search responses are stored:
+    # API failures must continue through the normal provider fallback.
+    return getattr(client, "_public_search_response_cache", {}).get(
+        cache_key(provider, query)
+    )
+
+
+def save_cached_response(client, provider, query, response):
+    cache = getattr(client, "_public_search_response_cache", None)
+    if cache is None:
+        cache = {}
+        client._public_search_response_cache = cache
+    cache[cache_key(provider, query)] = response
+
+
 def metric(client, provider, name):
     counters = provider_metrics(client).setdefault(provider, {name: 0 for name in (
         "search_requests", "successful_responses", "no_result_searches",
@@ -57,6 +77,9 @@ def serper_search(query, client):
     if not key:
         metric(client, "serper", "auth_configuration")
         raise PublicSearchError("serper", "auth_configuration")
+    prior = cached_response(client, "serper", query)
+    if prior is not None:
+        return prior
     metric(client, "serper", "search_requests")
     try:
         # Request-scoped header; never set it on the shared ATS/source client.
@@ -96,7 +119,9 @@ def serper_search(query, client):
                              if isinstance(row, dict) and isinstance(row.get("link"), str)))
     audit = tuple({"url": row.get("link", ""), "title": row.get("title", "")}
                   for row in organic if isinstance(row, dict))
-    return SearchResponse(urls, len(organic), audit)
+    output = SearchResponse(urls, len(organic), audit)
+    save_cached_response(client, "serper", query, output)
+    return output
 
 def tavily_search(query, client):
     """One basic Tavily search (=1 credit); discovery URLs only."""
@@ -104,6 +129,9 @@ def tavily_search(query, client):
     if not key:
         metric(client, "tavily", "auth_configuration")
         raise PublicSearchError("tavily", "auth_configuration")
+    prior = cached_response(client, "tavily", query)
+    if prior is not None:
+        return prior
     metric(client, "tavily", "search_requests")
     try:
         response = client.post(
@@ -157,4 +185,6 @@ def tavily_search(query, client):
         {"url": item.get("url", ""), "title": item.get("title", "")}
         for item in hits if isinstance(item, dict)
     )
-    return SearchResponse(urls, len(hits), audit)
+    output = SearchResponse(urls, len(hits), audit)
+    save_cached_response(client, "tavily", query, output)
+    return output
