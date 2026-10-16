@@ -439,3 +439,33 @@ candidate validation. These guards do not automatically modify existing
 local descriptions saved by an older run: audit or back them up and correct
 them separately if they came from an expired redirect.
 
+### Offline audit: expired LinkedIn descriptions (read-only)
+
+To scan **all stored nonempty LinkedIn descriptions** for expired-job
+redirects, generic search-results text, and legacy source-identity bypasses,
+stop Streamlit/other DuckDB writers and run:
+
+```bash
+python -m src.audit_linkedin_expired_descriptions \\
+  --report data/linkedin-expired-descriptions-audit.json
+```
+
+The scanner opens the existing DuckDB in `read_only=True` mode and makes
+**zero Tavily, Serper, or other HTTP requests**. It does not migrate, alter,
+delete, quarantine, or score any row. A JSON report contains classified
+findings, exact record keys, URL provenance, counts, evidence markers, and
+only a 200-character description preview. It does **not** export full JDs.
+
+Classes are `confirmed_expired_search_page` (unsafe enriched LinkedIn redirect
+**and** multiple generic listing markers), `likely_search_results_contamination`
+(listing markers without matching redirect proof), `review_unsafe_posting_redirect`,
+and `review_legacy_unverified_linkedin` (an old identity bypass). Only the
+first is strong combined evidence; other classes require manual review before
+any cleanup. `no_known_contamination_signal` is **not** proof that a posting
+is correct. Export the report and inspect flagged records before considering
+separate, backed-up repairs.
+
+You can audit another database copy without touching the active DB by
+providing `--database /path/to/jobs.duckdb`.
+
+
