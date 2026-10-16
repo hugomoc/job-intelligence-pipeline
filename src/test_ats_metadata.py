@@ -32,6 +32,112 @@ class MetadataTests(unittest.TestCase):
         self.assertFalse(v.accepted)
         self.assertIsNone(result(W,'<main>Senior Data Engineer</main>').resolved_company)
 
+    def test_linkedin_visible_posting_top_card_recovers_identity_without_jsonld(self):
+        url = "https://www.linkedin.com/jobs/view/4478490210/"
+        description = (
+            "Build analytics models and data pipelines with SQL and Python. "
+            "Collaborate with university stakeholders to implement reliable "
+            "cloud analytics solutions with AWS, dbt and Power BI. "
+        ) * 12
+        page = (
+            "<html><head><link rel='canonical' href='" + url + "'></head>"
+            "<body><main>"
+            "<h1 class='top-card-layout__title'>Senior Analytics Engineer</h1>"
+            "<a class='topcard__org-name-link'>Wake Forest University</a>"
+            "<div class='show-more-less-html__markup'><h2>Responsibilities</h2>"
+            + description + "</div>"
+            "<section class='related-jobs'>"
+            + ("Unrelated jobs in United States. " * 250)
+            + "</section></main></body></html>"
+        )
+        parsed = result(url, page)
+        self.assertEqual(parsed.status, "enriched")
+        self.assertEqual(parsed.extraction_method, "html_selector")
+        self.assertEqual(parsed.resolved_title, "Senior Analytics Engineer")
+        self.assertEqual(parsed.resolved_company, "Wake Forest University")
+        self.assertEqual(parsed.resolved_title_source, "linkedin_posting_top_card")
+        self.assertEqual(parsed.resolved_company_source, "linkedin_posting_top_card")
+        self.assertIn("cloud analytics solutions", parsed.description)
+        self.assertNotIn("Unrelated jobs", parsed.description)
+        validation = validate_job_identity(
+            original_title="Senior Analytics Engineer",
+            original_company="Wake Forest University",
+            resolved_title=parsed.resolved_title,
+            resolved_company=parsed.resolved_company,
+        )
+        self.assertTrue(validation.accepted, validation.reason)
+
+    def test_linkedin_missing_posting_description_rejects_generic_main(self):
+        url = "https://www.linkedin.com/jobs/view/4478490210/"
+        page = (
+            "<main><h1 class='top-card-layout__title'>Senior Analytics Engineer</h1>"
+            "<a class='topcard__org-name-link'>Wake Forest University</a>"
+            + ("Unrelated Senior Engineer roles. Apply now. " * 150)
+            + "</main>"
+        )
+        parsed = result(url, page)
+        self.assertEqual(parsed.status, "no_description")
+        self.assertEqual(parsed.word_count, 0)
+        self.assertEqual(parsed.resolved_company, "Wake Forest University")
+
+    def test_linkedin_search_page_cannot_claim_posting_header(self):
+        url = "https://www.linkedin.com/jobs/senior-analytics-engineer-jobs"
+        html = (
+            "<main><h1 class='top-card-layout__title'>Senior Analytics Engineer</h1>"
+            "<a class='topcard__org-name-link'>Wake Forest University</a>"
+            "<div class='show-more-less-html__markup'>"
+            + ("Senior Engineer job descriptions from unrelated companies. " * 15)
+            + "</div></main>"
+        )
+        parsed = result(url, html)
+        self.assertIsNone(parsed.resolved_title)
+        self.assertIsNone(parsed.resolved_company)
+
+    def test_linkedin_different_canonical_id_blocks_dom_metadata(self):
+        url = "https://www.linkedin.com/jobs/view/4478490210/"
+        html = (
+            "<head><link rel='canonical' "
+            "href='https://www.linkedin.com/jobs/view/9991230000/'></head>"
+            "<main><h1 class='top-card-layout__title'>Senior Analytics Engineer</h1>"
+            "<a class='topcard__org-name-link'>Wake Forest University</a>"
+            "<div class='show-more-less-html__markup'>"
+            + ("Build pipelines with SQL and Python. " * 20)
+            + "</div></main>"
+        )
+        parsed = result(url, html)
+        self.assertIsNone(parsed.resolved_title)
+        self.assertIsNone(parsed.resolved_company)
+
+    def test_linkedin_og_meta_only_is_not_independent_identity(self):
+        url = "https://www.linkedin.com/jobs/view/4478490210/"
+        page = (
+            "<head><meta property='og:title' "
+            "content='Senior Analytics Engineer at Wake Forest University'></head>"
+            "<main>" + ("Build pipelines with SQL and Python. " * 30) + "</main>"
+        )
+        parsed = result(url, page)
+        self.assertIsNone(parsed.resolved_title)
+        self.assertIsNone(parsed.resolved_company)
+
+    def test_linkedin_wrong_employer_is_still_rejected(self):
+        url = "https://www.linkedin.com/jobs/view/4478490210/"
+        description = "Build SQL data pipelines and develop Python analytics solutions. " * 12
+        html = (
+            "<h1 class='top-card-layout__title'>Senior Analytics Engineer</h1>"
+            "<a class='topcard__org-name-link'>Wrong University</a>"
+            "<div class='show-more-less-html__markup'>"
+            + description + "</div>"
+        )
+        parsed = result(url, html)
+        verdict = validate_job_identity(
+            original_title="Senior Analytics Engineer",
+            original_company="Wake Forest University",
+            resolved_title=parsed.resolved_title,
+            resolved_company=parsed.resolved_company,
+        )
+        self.assertFalse(verdict.accepted)
+        self.assertIn("company mismatch", verdict.reason)
+
     def test_generic_careers_does_not_gain_identity(self):
         r=result('https://www.themesoft.com/careers/','<h1>Careers at Themesoft</h1><main>Explore jobs</main>')
         self.assertIsNone(r.resolved_title)
