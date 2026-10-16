@@ -288,33 +288,57 @@ This keeps API keys, local email-derived data, resumes, and generated artifacts 
 - Add dashboard metrics for daily new jobs, scored jobs, applied jobs, and removed jobs.
 
 
-### Official job discovery: Serper
+### Official job discovery: Tavily first, Serper backup
 
-Configure `SERPER_API_KEY` locally in `.env` (never commit its value). Public
-search selects Serper when the key is configured; DuckDuckGo is the legacy
-fallback when it is absent. A Serper failure does not automatically switch to
-DuckDuckGo. Each provider has its own circuit. Auth/configuration and exhausted
-quota stop that provider immediately; 429/network/server failures remain
-retryable and open its circuit only after repeated failures.
+Configure `TAVILY_API_KEY` locally in `.env` to use Tavily as the primary
+public-search provider. Keep `SERPER_API_KEY` as the secondary provider.
+Never commit either secret to GitHub.
 
-Source URLs, trusted verified reuse, and direct ATS discovery still precede
-public search. Results discover URLs only: Serper titles/snippets do not supply
-posting identity. Existing fetched-page identity, exact/verified posting keys,
-provenance, status and JD/AI cache rules remain authoritative.
-
-Use bounded validation before a larger retry pass:
-
-```sh
-python -m src.retry_targeted_enrichment --require-serper --max-jobs 5 --batch-size 5 --delay 0.75 --report data/serper-live-5.json
-python -m src.retry_targeted_enrichment --require-serper --max-jobs 20 --batch-size 20 --delay 0.75 --exclude-report data/serper-live-5.json --report data/serper-live-next-20.json
+```dotenv
+TAVILY_API_KEY=tvly-your-key-here
+SERPER_API_KEY=your-existing-serper-key
 ```
 
-These commands validate 25 distinct postings in total; they do not score jobs
-or drain the remaining queue. Review both reports before a larger pass. Serper queries use unquoted company and title terms plus `jobs`, so alert-title
-decorations do not force an exact phrase match. Reports
-contain the exact query, organic result titles/domains/URLs (audit only), per-posting candidate decisions and per-provider request/response,
-no-result, error, verified-resolution and FULL_JD recovery metrics, including
-health-probe queries. They never contain the API key or raw provider error bodies.
-Completed attempts persist individually; `--exclude-report` prevents repeating
-records from an earlier staged test. Search failures retain retryable resolution
-statuses, and good FULL_JDs/current scores remain excluded from targeted retries.
+The first available configured provider is Tavily, followed by Serper. A
+Tavily **quota, authentication, rate-limit or server/network error** causes a
+retry with Serper for that job. Separate per-provider circuits suppress
+repeated failed requests within a run. A normal successful Tavily response
+(even zero results) does **not** consume a Serper search. When neither key is
+configured, public search is deferred. DuckDuckGo is no longer an automatic
+fallback; it can be enabled explicitly for legacy diagnosis with
+`PUBLIC_SEARCH_PROVIDER=duckduckgo` (not recommended for actual runs).
+
+Tavily is called via its official HTTPS search endpoint with
+`search_depth=basic`, `max_results=10`, `auto_parameters=false`, and no
+answer/raw-content extraction. The Researcher plan provides 1,000 credits
+per calendar month; each basic search consumes one credit.
+See https://docs.tavily.com/documentation/api-credits and
+https://www.tavily.com/pricing for current limits.
+
+Source URLs, verified cache, and direct ATS discovery precede public search.
+Search results supply candidate URLs **only**. Neither Tavily nor Serper
+titles/snippets are trusted as job-posting identity: a fetched official page
+must pass the same company/title/identity checks. No AI fit scores or
+confirmed application URLs change solely from search metadata.
+
+#### Measure actual API calls, not job counts
+
+The normal automatic enrichment limit is 25 jobs, but the number of paid
+searches is usually lower when direct pages or ATS adapters succeed.
+Every targeted retry report contains `provider_metrics` for Tavily and Serper,
+including `search_requests` and `successful_responses`. The enrichment
+drain report also saves `public_search_requests`,
+`public_search_requests_per_processed_job` and per-provider request counts.
+The numbers include health-probe requests when a run performs probes.
+Do not assume that the number of jobs equals credits consumed.
+
+Run a small staged live validation **after** configuring the Tavily key:
+
+```sh
+python -m src.retry_targeted_enrichment --require-tavily --max-jobs 5 --batch-size 5 --delay 0.75 --report data/tavily-test-5.json
+```
+
+This can make real Tavily calls and persist the five attempted enrichment
+records, so inspect the report before running a large backlog. Never paste
+API keys in logs or chat. A Serper fallback will spend Serper credits.
+
