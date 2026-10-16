@@ -446,8 +446,7 @@ redirects, generic search-results text, and legacy source-identity bypasses,
 stop Streamlit/other DuckDB writers and run:
 
 ```bash
-python -m src.audit_linkedin_expired_descriptions \\
-  --report data/linkedin-expired-descriptions-audit.json
+python -m src.audit_linkedin_expired_descriptions --report data/linkedin-expired-descriptions-audit.json
 ```
 
 The scanner opens the existing DuckDB in `read_only=True` mode and makes
