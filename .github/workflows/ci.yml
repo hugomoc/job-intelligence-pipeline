@@ -36,7 +36,7 @@ jobs:
           python -m pip install -r requirements.txt
 
       - name: Compile Python files
-        run: python -m compileall -q src scripts streamlit_app.py
+        run: python -m compileall -q src scripts ops streamlit_app.py
 
       - name: Run deterministic offline tests
         run: python scripts/run_ci_tests.py

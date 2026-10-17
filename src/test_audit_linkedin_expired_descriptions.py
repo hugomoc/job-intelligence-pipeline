@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 import duckdb
 
-from src.audit_linkedin_expired_descriptions import (
+from ops.audit_linkedin_expired_descriptions import (
     CLASS_CONFIRMED, CLASS_HIGH_CONFIDENCE, CLASS_IDENTITY_REVIEW, CLASS_LIKELY,
     CLASS_NO_SIGNAL, CLASS_REDIRECT_REVIEW, audit,
     classify_row, search_page_evidence, has_generic_search_results_header,

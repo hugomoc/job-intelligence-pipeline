@@ -19,8 +19,8 @@ from zoneinfo import ZoneInfo
 import duckdb
 
 from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
-from src.audit_49_scores import gap_evidence, local_day, read_scores
-from src.audit_cached_fit import decode_list, replay, update_one
+from ops.audit_49_scores import gap_evidence, local_day, read_scores
+from ops.audit_cached_fit import decode_list, replay, update_one
 from src.ai.resume_profiler import ResumeProfile
 from src.database import DATABASE_PATH
 

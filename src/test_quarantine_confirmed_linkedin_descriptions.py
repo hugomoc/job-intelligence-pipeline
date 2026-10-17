@@ -8,10 +8,10 @@ from tempfile import TemporaryDirectory
 
 import duckdb
 
-from src.audit_linkedin_expired_descriptions import (
+from ops.audit_linkedin_expired_descriptions import (
     audit, CLASS_CONFIRMED, CLASS_HIGH_CONFIDENCE,
 )
-from src.quarantine_confirmed_linkedin_descriptions import (
+from ops.quarantine_confirmed_linkedin_descriptions import (
     apply_quarantine, load_confirmed_manifest, make_plan, make_backup,
 )
 

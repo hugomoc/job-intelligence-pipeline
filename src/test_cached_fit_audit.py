@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.audit_cached_fit import decode_list, replay, should_downgrade, needs_manual_review
+from ops.audit_cached_fit import decode_list, replay, should_downgrade, needs_manual_review
 from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
 from src.fit_gap_evidence import (
     approval_fingerprint, approved_candidates, approval_tokens, candidate_evidence,
@@ -274,7 +274,7 @@ class CachedFitAuditTests(unittest.TestCase):
 
     def test_apply_never_defaults_to_all_rows(self):
         process = subprocess.run(
-            [sys.executable, "-m", "src.audit_cached_fit", "--apply"],
+            [sys.executable, "-m", "ops.audit_cached_fit", "--apply"],
             capture_output=True, text=True,
         )
         self.assertNotEqual(process.returncode, 0)

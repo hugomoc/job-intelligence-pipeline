@@ -25,7 +25,7 @@ from src.ai.resume_matcher import (
     calculate_overall_score,
 )
 from src.ai.resume_profiler import ResumeProfile
-from src.audit_cached_fit import COMPONENTS, JSON_FIELDS, decode_list, replay
+from ops.audit_cached_fit import COMPONENTS, JSON_FIELDS, decode_list, replay
 from src.database import DATABASE_PATH
 from src.fit_gap_evidence import gap_clause_pattern, platform_tenure_gap
 

@@ -16,7 +16,7 @@ from typing import Any
 
 import duckdb
 
-from src.audit_linkedin_expired_descriptions import (
+from ops.audit_linkedin_expired_descriptions import (
     CLASS_CONFIRMED,
     CLASS_HIGH_CONFIDENCE,
     classify_row,

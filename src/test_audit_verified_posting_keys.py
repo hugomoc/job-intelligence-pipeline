@@ -1,4 +1,4 @@
-from src.audit_verified_posting_keys import (
+from ops.audit_verified_posting_keys import (
     CLASS_CONFLICTING,
     CLASS_GENERIC_URL_KEY,
     CLASS_LEGACY_UNVERIFIED,

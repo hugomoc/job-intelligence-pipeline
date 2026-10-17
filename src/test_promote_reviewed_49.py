@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import unittest
 
-from src.promote_reviewed_49 import (
+from ops.promote_reviewed_49 import (
     approvals, candidates_for_day, promotion_candidate,
 )
 from src.test_audit_49_scores import row
@@ -48,7 +48,7 @@ def result(score=74, recommendation="review", gaps=()):
 class Reviewed49PromotionTests(unittest.TestCase):
     def test_piedmont_stored_hard_gaps_both_invalid(self):
         saved = piedmont()
-        with patch("src.promote_reviewed_49.replay", return_value=result()):
+        with patch("ops.promote_reviewed_49.replay", return_value=result()):
             candidate = promotion_candidate(saved)
         self.assertIsNotNone(candidate)
         preview, _ = candidate
@@ -63,7 +63,7 @@ class Reviewed49PromotionTests(unittest.TestCase):
 
     def test_fingerprint_changes_if_description_profile_or_score_changes(self):
         saved = piedmont()
-        with patch("src.promote_reviewed_49.replay", return_value=result()):
+        with patch("ops.promote_reviewed_49.replay", return_value=result()):
             original = promotion_candidate(saved)[0]["approval_fingerprint"]
             for key, new in (
                 ("description", saved["description"] + " Changed"),
@@ -86,7 +86,7 @@ class Reviewed49PromotionTests(unittest.TestCase):
                 "<p>Experience in a healthcare setting.</p>"
             ),
         )
-        with patch("src.promote_reviewed_49.replay", return_value=result()):
+        with patch("ops.promote_reviewed_49.replay", return_value=result()):
             self.assertIsNone(promotion_candidate(saved))
 
     def test_new_replay_hard_gap_or_apply_are_not_automatically_promoted(self):
@@ -96,7 +96,7 @@ class Reviewed49PromotionTests(unittest.TestCase):
             result(score=90, recommendation="apply"),
             result(score=49),
         ):
-            with patch("src.promote_reviewed_49.replay", return_value=replay_result):
+            with patch("ops.promote_reviewed_49.replay", return_value=replay_result):
                 self.assertIsNone(promotion_candidate(saved))
 
     def test_old_stale_or_partial_scores_not_eligible(self):
@@ -109,14 +109,14 @@ class Reviewed49PromotionTests(unittest.TestCase):
             {"profile_json": ""},
             {"prompt_version": "v1"},
         ):
-            with patch("src.promote_reviewed_49.replay", return_value=result()):
+            with patch("ops.promote_reviewed_49.replay", return_value=result()):
                 self.assertIsNone(promotion_candidate(dict(saved, **modifications)))
 
     def test_only_matching_scored_date_is_included(self):
         old = piedmont()
         other = dict(piedmont(), record_key="older")
         other["scored_at"] = datetime(2026, 10, 14, 16, tzinfo=timezone.utc)
-        with patch("src.promote_reviewed_49.replay", return_value=result()):
+        with patch("ops.promote_reviewed_49.replay", return_value=result()):
             proposals, errors = candidates_for_day(
                 [old, other], date(2026, 10, 15), "America/Los_Angeles"
             )
