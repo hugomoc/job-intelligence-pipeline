@@ -17,6 +17,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 CI_TESTS = [
+    "src/test_resolution_graph_equivalence.py",
     "src/test_status_performance.py",
     "src/test_actionability.py",
     "src/test_suspicious_view_audit.py",
