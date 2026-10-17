@@ -568,3 +568,14 @@ this explicitly selected class. It handles historical `enriched`,
 proof of a correct JD. The original job rows, URLs, source attempts, and
 historical score rows remain; clearing descriptions and bumping their
 timestamps makes previously cached scores stale. Zero paid API requests.
+
+## Testing
+
+Run the offline test suite from the repository root:
+
+```bash
+python -m pytest -q src
+```
+
+The eight `MANUAL_ONLY` files in `scripts/run_ci_tests.py` are excluded automatically.
+Pytest also executes two matcher tests that were previously not executed by the legacy runner.
