@@ -76,19 +76,28 @@ CI_TESTS = [
     "src/test_ziprecruiter_parser.py",
 ]
 
-EXCLUDED_TESTS = {
+MANUAL_ONLY = {
+    # Requires Yahoo credentials and reads live Glassdoor alert emails.
     "src/test_glassdoor_reader.py": "manual Yahoo mailbox reader",
+    # Requires a live Lensa URL and Playwright browser navigation.
     "src/test_lensa_resolver.py": "manual Playwright/live Lensa resolver",
+    # Requires Yahoo credentials and captures a live LinkedIn email fixture.
     "src/test_linkedin_reader.py": "manual Yahoo mailbox reader",
+    # Requires a user-supplied local PDF or DOCX resume.
     "src/test_resume_extractor.py": "manual local resume file CLI",
+    # Requires a local resume and an authenticated AI API call.
     "src/test_resume_profiler.py": "manual AI profile CLI requiring a resume/API key",
+    # Requires Yahoo credentials and connects to live IMAP folders.
     "src/test_yahoo_connection.py": "manual Yahoo IMAP credential check",
+    # Requires Yahoo credentials and reads live Indeed alert emails.
     "src/test_yahoo_reader.py": "manual Yahoo mailbox reader",
+    # Requires Yahoo credentials and captures a live ZipRecruiter email fixture.
     "src/test_ziprecruiter_reader.py": "manual Yahoo mailbox reader",
 }
 
 
 def validate_test_inventory() -> None:
+    """Require every src/test_*.py to be in CI_TESTS or MANUAL_ONLY."""
     discovered = {
         path.as_posix()
         for path in sorted((REPO_ROOT / "src").glob("test_*.py"))
@@ -99,7 +108,7 @@ def validate_test_inventory() -> None:
         else path
         for path in discovered
     }
-    classified = set(CI_TESTS) | set(EXCLUDED_TESTS)
+    classified = set(CI_TESTS) | set(MANUAL_ONLY)
     unclassified = sorted(discovered - classified)
     missing = sorted(classified - discovered)
 
@@ -140,7 +149,7 @@ def main() -> None:
     validate_test_inventory()
 
     print("Excluded from deterministic CI:")
-    for path, reason in sorted(EXCLUDED_TESTS.items()):
+    for path, reason in sorted(MANUAL_ONLY.items()):
         print(f" - {path}: {reason}")
 
     for test_path in CI_TESTS:
