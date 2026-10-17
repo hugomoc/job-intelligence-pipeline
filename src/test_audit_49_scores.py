@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 import json
 import unittest
 
-from src.audit_49_scores import audit_score, build_report, local_day
+from ops.audit_49_scores import audit_score, build_report, local_day
 from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
 from src.test_resume_matcher_validation import make_profile
 

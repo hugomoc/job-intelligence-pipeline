@@ -27,3 +27,10 @@ job_intelligence_dbt/dbt_packages/
 
 # Local dbt user settings
 job_intelligence_dbt/.user.yml
+
+# Local environment and audit reports (may contain job data)
+.venv/
+/audit-*.json
+/reviewed-*.json
+/fit-evidence.json
+/*-approval.json

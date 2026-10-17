@@ -459,7 +459,7 @@ redirects, generic search-results text, and legacy source-identity bypasses,
 stop Streamlit/other DuckDB writers and run:
 
 ```bash
-python -m src.audit_linkedin_expired_descriptions --report data/linkedin-expired-descriptions-audit.json
+python -m ops.audit_linkedin_expired_descriptions --report data/linkedin-expired-descriptions-audit.json
 ```
 
 The scanner opens the existing DuckDB in `read_only=True` mode and makes
@@ -493,7 +493,7 @@ must be requested explicitly. **Stop Streamlit and other DuckDB users first.**
    **read-only**):
 
 ```bash
-python -m src.quarantine_confirmed_linkedin_descriptions --audit-report data/linkedin-expired-descriptions-audit.json --expected-count 272 --plan-report data/linkedin-quarantine-dry-run.json
+python -m ops.quarantine_confirmed_linkedin_descriptions --audit-report data/linkedin-expired-descriptions-audit.json --expected-count 272 --plan-report data/linkedin-quarantine-dry-run.json
 ```
 
 Inspect `ready_to_apply`, `eligible_for_quarantine` and
@@ -511,7 +511,7 @@ prevents **all** changes.
    in **one transaction**:
 
 ```bash
-python -m src.quarantine_confirmed_linkedin_descriptions --audit-report data/linkedin-expired-descriptions-audit.json --expected-count 272 --apply --confirm-count 272 --plan-report data/linkedin-quarantine-applied.json
+python -m ops.quarantine_confirmed_linkedin_descriptions --audit-report data/linkedin-expired-descriptions-audit.json --expected-count 272 --apply --confirm-count 272 --plan-report data/linkedin-quarantine-applied.json
 ```
 
 For every confirmed record, the script sets the inaccurate `raw_jobs.description`
@@ -540,7 +540,7 @@ Do **not** reuse the original 1,323-record audit for this second cleanup.
 After stopping Streamlit and all DuckDB users, generate a fresh report:
 
 ```bash
-python -m src.audit_linkedin_expired_descriptions --report data/linkedin-expired-descriptions-pass2.json
+python -m ops.audit_linkedin_expired_descriptions --report data/linkedin-expired-descriptions-pass2.json
 ```
 
 For the local snapshot reviewed on October 16, 2026, the expected new category
@@ -550,7 +550,7 @@ the new count is not exactly 41, stop and review the report before continuing.
 The next command only reads the database and writes a dry-run JSON plan:
 
 ```bash
-python -m src.quarantine_confirmed_linkedin_descriptions --audit-report data/linkedin-expired-descriptions-pass2.json --target-class high_confidence_search_results_page --expected-count 41 --plan-report data/linkedin-pass2-dry-run.json
+python -m ops.quarantine_confirmed_linkedin_descriptions --audit-report data/linkedin-expired-descriptions-pass2.json --target-class high_confidence_search_results_page --expected-count 41 --plan-report data/linkedin-pass2-dry-run.json
 ```
 
 If and **only if** all 41 records pass independent content, URL, status,
@@ -558,7 +558,7 @@ source and verified-key checks (`ready_to_apply: true`, zero safety failures),
 run the explicit opt-in command:
 
 ```bash
-python -m src.quarantine_confirmed_linkedin_descriptions --audit-report data/linkedin-expired-descriptions-pass2.json --target-class high_confidence_search_results_page --expected-count 41 --apply --confirm-count 41 --plan-report data/linkedin-pass2-applied.json
+python -m ops.quarantine_confirmed_linkedin_descriptions --audit-report data/linkedin-expired-descriptions-pass2.json --target-class high_confidence_search_results_page --expected-count 41 --apply --confirm-count 41 --plan-report data/linkedin-pass2-applied.json
 ```
 
 The code refuses `.wal` files, creates a new SHA-256-checked full database
