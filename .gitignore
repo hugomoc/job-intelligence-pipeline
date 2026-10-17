@@ -34,3 +34,7 @@ job_intelligence_dbt/.user.yml
 /reviewed-*.json
 /fit-evidence.json
 /*-approval.json
+
+/evaluation/private/
+/labels*.csv
+/results_detail*.csv

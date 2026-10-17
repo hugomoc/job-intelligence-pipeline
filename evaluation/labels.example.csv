@@ -1,0 +1,7 @@
+record_key,company,title,source,source_apply_url,stored_official_url,description_excerpt,resolution_label,expected_official_url,my_fit_rating,my_decision
+example-001,Example Co 1,Fictional Data Role 1,synthetic,https://example.invalid/source/1,https://example.invalid/official/1,Entirely fictional description for format demonstration.,correct,,95,apply
+example-002,Example Co 2,Fictional Data Role 2,synthetic,https://example.invalid/source/2,https://example.invalid/official/2,Entirely fictional description for format demonstration.,wrong_job,https://example.invalid/expected/2,35,skip
+example-003,Example Co 3,Fictional Data Role 3,synthetic,https://example.invalid/source/3,https://example.invalid/official/3,Entirely fictional description for format demonstration.,unsure,,60,review
+example-004,Example Co 4,Fictional Data Role 4,synthetic,https://example.invalid/source/4,https://example.invalid/official/4,Entirely fictional description for format demonstration.,correct,,80,apply
+example-005,Example Co 5,Fictional Data Role 5,synthetic,https://example.invalid/source/5,,Entirely fictional description for format demonstration.,,https://example.invalid/expected/5,55,review
+example-006,Example Co 6,Fictional Data Role 6,synthetic,https://example.invalid/source/6,,Entirely fictional description for format demonstration.,,https://example.invalid/expected/6,20,skip
