@@ -156,3 +156,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_offline_indeed_checks():
+    check_location_pattern()
+    check_sample_email()
