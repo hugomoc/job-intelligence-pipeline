@@ -301,11 +301,16 @@ This keeps API keys, local email-derived data, resumes, and generated artifacts 
 
 ## Future Improvements
 
-- Search for official employer or ATS postings when an alert only contains a platform redirect.
-- Add more robust public-page enrichment for Workday, Greenhouse, Lever, Ashby, and SmartRecruiters.
-- Add description-quality scoring before AI resume matching.
 - Add a dedicated review queue for jobs that need manual description capture.
+  Needs review and Description filters identify incomplete jobs; a manual description-entry/save workflow is still missing.
 - Add dashboard metrics for daily new jobs, scored jobs, applied jobs, and removed jobs.
+  Current-status New, Applied, Removed and AI-scored totals exist; day-by-day dashboard metrics are still missing.
+
+### Completed
+
+- Search for official employer or ATS postings when an alert only contains a platform redirect. Implemented in `src/enrichment/official_job_resolver.py`
+- Add more robust public-page enrichment for Workday, Greenhouse, Lever, Ashby, and SmartRecruiters. Implemented in `src/enrichment/ats/` and `src/enrichment/official_job_resolver.py`
+- Add description-quality scoring before AI resume matching. Implemented as a deterministic quality gate in `src/description_quality.py` and `src/ai/resume_matcher.py`
 
 
 ### Official job discovery: Tavily first, Serper backup
