@@ -32,6 +32,26 @@ Email folders
   -> Streamlit recommendations UI
 ```
 
+## Engineering practices
+
+- Design rule: search and ATS metadata only rank candidates; only fetched page content can verify a posting's identity.
+- CI runs pytest (695 tests), a legacy-runner parity job, and `dbt build` against a synthetic fixture (2 table models, 8 views, 122 data tests).
+- Moving CI to pytest exposed two matcher tests the old script runner never executed.
+- `resume_matcher.py` was split with move-only changes, verified by AST equality, identity of moved objects, and unchanged test collection.
+- An opt-in LangGraph wrapper (`src/agent/`) reproduces the resolver's results across 10+ scenarios (equivalence tests) and adds SQLite checkpoints and a human-review interrupt for ambiguous matches. The production path is unchanged. See `docs/langgraph_resolution.md`.
+
+## Evaluation
+
+Offline, read-only evaluation against 50 stored results that I labeled by hand (stratified sample).
+
+| Question | Result |
+| --- | --- |
+| Official URL wrong among verifiable stored matches | 0 of 20 (95% CI 0-16.1%) |
+| Stored matches I could not verify | 20 of 40 |
+| Fit-score agreement | not reported: only 9 labeled rows had stored scores (needs n of at least 10) |
+
+Limitations: small, selectively labeled sample; half of the stored matches were unverifiable by me; no recall estimate (no expected URLs supplied); fit scores may be stale or from older prompt versions. Details in `docs/eval_results.md`. Run it with `python -m evaluation.run_eval` (see `evaluation/README.md`).
+
 ## Tech Stack
 
 - Python
