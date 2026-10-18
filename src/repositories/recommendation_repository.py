@@ -948,29 +948,17 @@ def trusted_display_posting_key(job: dict[str, Any]) -> str | None:
 
 
 def ui_duplicate_key(job: dict[str, Any]) -> tuple[str, ...]:
-    """Prefer trusted opening proof, retaining conservative source fallback."""
+    """Collapse only a trusted opening or the same exact posting identity."""
     verified_key = trusted_display_posting_key(job)
     if verified_key:
         return ("verified_posting", verified_key)
 
-    duplicate_fingerprint = str(
-        job.get("duplicate_fingerprint") or ""
-    ).strip()
-    source = normalize_duplicate_text(job.get("source"))
-
-    if duplicate_fingerprint and source:
-        return (
-            "fingerprint",
-            source,
-            duplicate_fingerprint,
-            "",
-        )
-
     return (
-        normalize_duplicate_text(job.get("title")),
-        normalize_duplicate_text(job.get("company_name")),
-        normalize_duplicate_text(job.get("source")),
-        normalize_duplicate_text(job.get("location")),
+        "exact_posting",
+        job.get("exact_posting_key") or exact_posting_identity(
+            job.get("source"), job.get("source_job_id"),
+            job.get("apply_url"), job.get("record_key"),
+        ),
     )
 
 
@@ -2279,6 +2267,28 @@ def prepare_job_display(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         job.get('application_status', 'new') in {'applied', 'removed'}
         or (job.get('_snapshot_new_source_visible', True)
             and job.get('_snapshot_new_admitted', True)))]
+    # Fingerprints can suggest prior history, but never establish identity.
+    removed_alerts: dict[tuple[str, str], list[tuple[tuple[str, ...], datetime]]] = {}
+    for job in jobs:
+        job.pop("similar_job_previously_removed", None)
+        fingerprint = str(job.get("duplicate_fingerprint") or "").strip()
+        source = normalize_duplicate_text(job.get("source"))
+        removed_at = normalize_datetime(job.get("application_status_updated_at"))
+        if (job.get("application_status") == "removed" and fingerprint and source
+                and removed_at and not trusted_display_posting_key(job)):
+            removed_alerts.setdefault((source, fingerprint), []).append(
+                (ui_duplicate_key(job), removed_at))
+    for job in jobs:
+        if job.get("application_status", "new") != "new" or trusted_display_posting_key(job):
+            continue
+        arrived_at = normalize_datetime(job.get("discovered_at") or job.get("sent_at"))
+        scope = (normalize_duplicate_text(job.get("source")),
+                 str(job.get("duplicate_fingerprint") or "").strip())
+        if arrived_at and any(
+            identity != ui_duplicate_key(job) and removed_at <= arrived_at
+            for identity, removed_at in removed_alerts.get(scope, ())
+        ):
+            job["similar_job_previously_removed"] = True
     for job in jobs:
         job.pop('approximate_enrichment_queue_rank', None)
     queue_candidates = sorted(

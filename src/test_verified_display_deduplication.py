@@ -107,12 +107,81 @@ class VerifiedDisplayTests(unittest.TestCase):
                         duplicate_fingerprint='same')]
         self.assertEqual(len(prepare_job_display(rows)), 2)
         self.assertEqual(ui_duplicate_key(rows[0]),
-                         ('fingerprint', 'linkedin', 'same', ''))
+                         ('exact_posting', 'linkedin:a'))
 
-    def test_legacy_same_source_fingerprint_still_collapses(self):
+    def test_same_fingerprint_distinct_unverified_postings_stay_separate(self):
         rows = [posting('a', verified_posting_key=None, duplicate_fingerprint='same'),
                 posting('b', verified_posting_key=None, duplicate_fingerprint='same')]
+        self.assertEqual(len(prepare_job_display(rows)), 2)
+
+    def test_exact_unverified_duplicates_still_collapse(self):
+        rows = [posting('a', verified_posting_key=None, exact_posting_key='linkedin|123'),
+                posting('b', verified_posting_key=None, exact_posting_key='linkedin|123')]
         self.assertEqual(len(prepare_job_display(rows)), 1)
+        for row in rows:
+            row.pop('exact_posting_key')
+            row.update(source_job_id='123', apply_url='https://linkedin.com/jobs/view/123')
+        self.assertEqual(len(prepare_job_display(rows)), 1)
+
+    def test_spoiler_alert_august_removal_october_alert_and_filters(self):
+        import ast
+        from pathlib import Path
+        from unittest.mock import Mock
+        old = posting('august', source='welcometothejungle', source_job_id=None,
+            exact_posting_key='welcometothejungle|record:august',
+            apply_url='https://u9255466.ct.sendgrid.net/ls/click?upn=august',
+            title='Senior Data Engineer', company_name='Spoiler Alert',
+            location='Remote (within the US)', duplicate_fingerprint='spoiler-repeat',
+            verified_posting_key=None, application_status='removed',
+            application_status_updated_at='2026-08-16T10:18:49-07:00',
+            discovered_at='2026-08-15T18:29:23-07:00')
+        new = copy.deepcopy(old)
+        new.update(record_key='october', exact_posting_key='welcometothejungle|record:october',
+            apply_url='https://u9255466.ct.sendgrid.net/ls/click?upn=october',
+            application_status='new', application_status_updated_at=None,
+            discovered_at='2026-10-17T22:02:13-07:00')
+        for rows in ([old, new], [new, old]):
+            cards = prepare_job_display(rows)
+            self.assertEqual(len(cards), 2)
+            self.assertTrue(new['similar_job_previously_removed'])
+            self.assertNotIn('similar_job_previously_removed', old)
+            # Execute the real Streamlit status-filter block, without starting the app.
+            tree = ast.parse(Path('streamlit_app.py').read_text())
+            status_filter = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                and ast.unparse(node.test) == "status_filter != 'All'")
+            for selection, expected in [('New', {'october'}), ('Removed', {'august'}),
+                                         ('All', {'august', 'october'})]:
+                namespace = dict(status_filter=selection, filtered_jobs=cards)
+                exec(compile(ast.Module(body=[status_filter], type_ignores=[]),
+                    'streamlit_app.py', 'exec'), namespace)
+                self.assertEqual({j['record_key'] for j in namespace['filtered_jobs']}, expected)
+            indicator = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                and ast.unparse(node.test) == "job.get('similar_job_previously_removed')")
+            ui = Mock()
+            exec(compile(ast.Module(body=[indicator], type_ignores=[]),
+                'streamlit_app.py', 'exec'), dict(job=new, st=ui))
+            ui.caption.assert_called_once_with('Similar job previously removed')
+        # Derived hints must disappear after the older dismissal is restored to NEW.
+        old.update(application_status='new')
+        prepare_job_display([old, new])
+        self.assertNotIn('similar_job_previously_removed', new)
+
+    def test_similarity_hint_is_conservative(self):
+        old = posting('old', verified_posting_key=None, duplicate_fingerprint='same',
+            application_status='removed', application_status_updated_at='2026-08-16T12:00:00Z')
+        new = posting('new', verified_posting_key=None, duplicate_fingerprint='same',
+            discovered_at='2026-10-17T12:00:00Z')
+        for change in (
+            {'source': 'other'}, {'duplicate_fingerprint': 'different'},
+            {'discovered_at': '2026-08-15T12:00:00Z'},
+            {'discovered_at': None, 'sent_at': None},
+            {'exact_posting_key': old['exact_posting_key']},
+            {'verified_posting_key': KEY},
+        ):
+            candidate = dict(new, **change)
+            prepare_job_display([copy.deepcopy(old), candidate])
+            self.assertNotIn('similar_job_previously_removed', candidate, change)
+        self.assertEqual(new['application_status'], 'new')
 
     def test_untrusted_or_unrecognized_provenance_cannot_collapse(self):
         for change in ({'verified_posting_key_trust': 'untrusted'},
