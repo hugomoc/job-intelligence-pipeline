@@ -91,11 +91,11 @@ class SessionTests(unittest.TestCase):
         a=initialize_session([sample()]);b=initialize_session([sample()])
         session.patch_status(a,'a','removed',Mock(return_value=receipt([sample()],'removed')))
         self.assertEqual(b['jobs_snapshot'][0]['application_status'],'new')
-    def test_duplicate_display_representative_can_switch(self):
+    def test_unverified_distinct_postings_remain_after_status_change(self):
         state=initialize_session([sample('a',duplicate_fingerprint='same',ai_score=90),sample('b',duplicate_fingerprint='same',ai_score=80)])
-        self.assertEqual(session.display_snapshot(state)[0]['record_key'],'a')
+        self.assertEqual({j['record_key'] for j in session.display_snapshot(state)},{'a','b'})
         session.patch_status(state,'a','applied',Mock(return_value=receipt([sample()])))
-        self.assertEqual(session.display_snapshot(state)[0]['record_key'],'b')
+        self.assertEqual({j['record_key']:j['application_status'] for j in session.display_snapshot(state)}, {'a':'applied','b':'new'})
     def test_no_jobs_loader_in_operations_with_supplied_jobs(self):
         def scenario():
             repo.initialize_job_eligibility_table()
@@ -226,6 +226,50 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(set(cached),set(fresh))
         for key in fresh:
             self.assertEqual({f:cached[key].get(f) for f in STATUS_FIELDS},{f:fresh[key].get(f) for f in STATUS_FIELDS},key)
+    def test_three_myfitnesspal_verified_records_remain_one_removed_card(self):
+        def scenario():
+            seed_resume_profile()
+            for key, source, url in (
+                ('recent-lensa', 'lensa', 'https://sg3email.lensa.com/ls/click?upn=recent'),
+                ('older-lensa', 'lensa', 'https://sg3email.lensa.com/ls/click?upn=older'),
+                ('wellfound', 'wellfound', 'https://wellfound.com/jobs/4703774'),
+            ):
+                seed_review_job(key, 'Staff Data Engineer', source=source,
+                    description=DESC, apply_url=url)
+                seed_verified_attempt(key, 'greenhouse:8191556', source=source,
+                    description=DESC,
+                    official_job_url='https://job-boards.greenhouse.io/myfitnesspal/jobs/8191556')
+            state = initialize_session(repo.load_all_jobs('resume-1', for_session_snapshot=True))
+            session.patch_status(state, 'recent-lensa', 'removed', repo.update_application_status)
+            self.assert_fresh(state)
+            fresh = repo.load_all_jobs('resume-1')
+            self.assertEqual(len(fresh), 1)
+            self.assertEqual(fresh[0]['application_status'], 'removed')
+            self.assertEqual({j['application_status'] for j in state['jobs_snapshot']}, {'removed'})
+            with database.get_connection() as connection:
+                self.assertEqual(connection.execute(
+                    "SELECT record_key,status FROM application_status").fetchall(),
+                    [('recent-lensa', 'removed')])
+        with_temp_review_database(scenario)
+
+    def test_distinct_linkedin_ids_do_not_inherit_removal(self):
+        def scenario():
+            seed_resume_profile()
+            for key, posting_id in (('old', '111'), ('new', '222')):
+                seed_review_job(key, 'Senior Data Engineer', source='linkedin',
+                    description=DESC, apply_url=f'https://www.linkedin.com/jobs/view/{posting_id}/')
+            with database.get_connection() as connection:
+                connection.execute("UPDATE raw_jobs SET job_fingerprint='same'")
+            repo.update_application_status('old', 'removed')
+            rows = {j['record_key']:j for j in repo.load_all_jobs('resume-1')}
+            self.assertEqual(set(rows), {'old', 'new'})
+            self.assertEqual(rows['old']['application_status'], 'removed')
+            self.assertEqual(rows['new']['application_status'], 'new')
+            with database.get_connection() as connection:
+                self.assertIsNone(connection.execute(
+                    "SELECT status FROM application_status WHERE record_key='new'").fetchone())
+        with_temp_review_database(scenario)
+
     def test_applied_removed_exact_and_trusted_propagation_match_fresh(self):
         def scenario():
             self.seed();state=initialize_session(repo.load_all_jobs('resume-1',for_session_snapshot=True))

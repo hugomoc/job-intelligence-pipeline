@@ -302,6 +302,9 @@ def render_job_listing(job: dict) -> None:
                 )
             )
 
+            if job.get("similar_job_previously_removed"):
+                st.caption("Similar job previously removed")
+
             if job.get("application_status_scope") == "verified_posting":
                 st.caption(
                     "Previously "
