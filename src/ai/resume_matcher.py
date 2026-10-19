@@ -90,6 +90,24 @@ from src.description_quality import MINIMUM_FULL_DESCRIPTION_WORDS, assess_descr
 
 
 
+class RequirementMatch(BaseModel):
+    job_requirement: str = Field(
+        description="Important job requirement or core responsibility from the JD.",
+    )
+    candidate_background: str = Field(
+        description=(
+            "Concise candidate evidence that matches the requirement, or a clear "
+            "statement that the experience is not demonstrated."
+        ),
+    )
+    match: Literal["excellent", "strong", "partial", "gap"] = Field(
+        description=(
+            "Human-readable fit label for this requirement. This is explanatory "
+            "only and must not be used as a formula for the overall score."
+        ),
+    )
+
+
 class JobMatchAnalysis(BaseModel):
     title_fit: int = Field(
         ge=0,
@@ -191,8 +209,8 @@ class JobMatchAnalysis(BaseModel):
     hard_requirements_missing: list[str] = Field(
         default_factory=list,
         description=(
-            "Explicitly required qualifications that the "
-            "candidate does not demonstrate."
+            "Explicit requirements or central hands-on responsibilities "
+            "that the candidate does not demonstrate."
         ),
     )
 
@@ -209,6 +227,16 @@ class JobMatchAnalysis(BaseModel):
         description=(
             "Important concerns such as location, required "
             "clearance, seniority mismatch or missing data."
+        ),
+    )
+
+    requirement_matches: list[RequirementMatch] = Field(
+        default_factory=list,
+        max_length=10,
+        description=(
+            "Concise comparison of the most important job requirements against "
+            "the candidate's demonstrated background. Explanatory only; it does "
+            "not determine the score."
         ),
     )
 
@@ -350,6 +378,12 @@ Rules:
 14. recommendation must agree with overall_score and the stated gaps.
 15. Keep strengths, gaps, risks, and summary concise and specific enough that a
     human can understand why the score was assigned.
+16. Populate requirement_matches with the 6-10 most important requirements,
+    core responsibilities, and explicit eligibility constraints from the JD.
+    For each row, compare the requirement with concise candidate evidence and
+    label it excellent, strong, partial, or gap. Do not invent evidence. Keep
+    these rows explanatory only: do not calculate overall_score by counting or
+    averaging the row labels.
 
 CANDIDATE PROFILE:
 
@@ -1020,8 +1054,9 @@ def score_resume_against_job_openai(
                     "content": (
                         "Return only valid JSON matching the supplied schema. "
                         "You must populate overall_score and recommendation in addition "
-                        "to the component fit scores, strengths, gaps, risks, confidence, "
-                        "and summary. overall_score and all *_fit fields must be integers "
+                        "to the component fit scores, requirement comparisons, strengths, "
+                        "gaps, risks, confidence, and summary. overall_score and all *_fit "
+                        "fields must be integers "
                         "from 0 to 100. recommendation must be apply, review, or skip and "
                         "must agree with the score bands in the user prompt."
                     ),
