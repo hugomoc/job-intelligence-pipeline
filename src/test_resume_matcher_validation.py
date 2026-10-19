@@ -892,6 +892,31 @@ def test_ai_first_score_is_not_recomputed_from_components() -> None:
     assert match.recommendation == "review"
 
 
+def test_ai_first_allows_high_score_review_with_material_uncertainty() -> None:
+    analysis = make_analysis([], score=90).model_copy(
+        update={
+            "overall_score": 75,
+            "recommendation": "review",
+            "risk_factors": [
+                "Material requirement needs human confirmation."
+            ],
+        }
+    )
+
+    match = scored_match(
+        make_profile(),
+        "Staff Data Analytics Engineer",
+        (
+            "Responsibilities include Snowflake analytics engineering, "
+            "semantic modeling, and product analytics. "
+        ) * 12,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 75
+    assert match.recommendation == "review"
+
+
 def test_ai_first_rejects_apply_with_missing_core_requirement() -> None:
     analysis = make_analysis(
         ["Develop extraction and transformation routines using ABAP"],
@@ -967,6 +992,7 @@ def main() -> None:
     test_repeated_specialization_is_treated_as_critical()
     test_prompt_version_controls_cache_reuse()
     test_ai_first_score_is_not_recomputed_from_components()
+    test_ai_first_allows_high_score_review_with_material_uncertainty()
     test_ai_first_rejects_apply_with_missing_core_requirement()
     test_ai_first_prompt_requires_full_jd_holistic_decision()
     test_incomplete_description_cannot_be_apply()
