@@ -97,6 +97,76 @@ class VerifiedIdentityPersistenceTests(unittest.TestCase):
                 self.assertEqual(row, (url, "FOUND_VERIFIED", verified_posting_key_from_url(url),
                                        "official_found_verified", "trusted"))
 
+    def resolve_fetched(self, url, *, final_url=None, source="greenhouse"):
+        from src.enrichment import official_job_resolver as resolver
+        job = posting()
+        result = fetched(final_url or url)
+        candidate = resolver.OfficialJobCandidate(url=url, label="fixture discovery", source=source)
+        with patch.object(resolver, "fetch_candidate_description", return_value=result):
+            resolution = resolver.resolve_from_candidates(job, object(), [candidate], source="ats")
+        return job, result, resolution
+
+    def test_resolver_cannot_verify_generic_redirect_or_missing_ats_id(self):
+        cases = (
+            (GREENHOUSE_URL, "https://boards.greenhouse.io/optro", "greenhouse"),
+            (GREENHOUSE_URL, "https://careers.example.com/careers", "greenhouse"),
+            ("https://jobs.ashbyhq.com/optro", None, "ashby"),
+            ("https://careers.example.com/careers", None, "employer"),
+        )
+        for url, final_url, source in cases:
+            with self.subTest(url=url, final_url=final_url):
+                job, result, resolution = self.resolve_fetched(url, final_url=final_url, source=source)
+                self.assertNotEqual(resolution.status, "FOUND_VERIFIED")
+                self.assertIsNone(resolution.official_job_url)
+                self.assertFalse(job["candidate_validation_trace"][0]["accepted"])
+                self.assertIn("specific posting identity", resolution.official_url_validation_reason)
+
+    def test_resolver_search_provenance_cannot_authorize_employer_url(self):
+        job, result, resolution = self.resolve_fetched(
+            "https://careers.example.com/jobs/123", source="search")
+        self.assertNotEqual(resolution.status, "FOUND_VERIFIED")
+        # This used to be FOUND_VERIFIED but rejected by the unchanged save guard.
+        self.assert_refused_before_connection(job, result,
+            replace(verified_resolution(result.final_url), official_url_source="search"))
+
+    def test_resolver_and_save_accept_same_specific_ats_keys_and_preserve_ids(self):
+        urls = ((GREENHOUSE_URL + "?utm_source=fixture", "greenhouse"),
+                ("https://boards.greenhouse.io/optro?gh_jid=123&utm_source=fixture", "greenhouse"),
+                ("https://optro.wd1.myworkdayjobs.com/en-US/Careers/job/Remote/Engineer_R123?jobId=R123", "workday"),
+                (ASHBY_URL, "ashby"))
+        for index, (url, source) in enumerate(urls):
+            with self.subTest(url=url):
+                job, result, resolution = self.resolve_fetched(url, source=source)
+                job["record_key"] = f"posting-{index}"
+                self.assertEqual(resolution.status, "FOUND_VERIFIED")
+                self.assertEqual(resolution.official_job_url, url)
+                enrichment.save_enrichment_attempt(job, result, official_resolution=resolution)
+                with database.get_connection() as connection:
+                    row = connection.execute(
+                        "SELECT official_job_url, verified_posting_key FROM job_enrichment_attempts "
+                        "WHERE record_key=?", [job["record_key"]]).fetchone()
+                self.assertEqual(row, (url, verified_posting_key_from_url(url)))
+                changed = url.replace("123", "456").replace("72669bd1", "82669bd1")
+                self.assertNotEqual(verified_posting_key_from_url(url), verified_posting_key_from_url(changed))
+
+    def test_rejection_diagnostics_keep_posting_identity_but_drop_credentials(self):
+        emitted = []
+        url = "https://user:private-pass@careers.example.com/jobs/123?jobId=123&token=private-token#private-fragment"
+        with patch.object(enrichment, "process_enrichment_job",
+                          return_value=self.batch_result(posting(), resolution=replace(
+                              verified_resolution(), official_job_url=url, official_url_source="search"))), patch.object(
+                enrichment, "save_enrichment_attempt", side_effect=ValueError("specific posting URL required")):
+            summary = enrichment.process_enrichment_batch([posting()], object(), emit=emitted.append)
+        text = "\n".join(emitted)
+        for label in ("record_key=optro", "source=welcometothejungle", "original apply_url=",
+                      "candidate official_job_url=", "official_url_source=search", "verified_posting_key=",
+                      "verified_posting_key_source=", "verified_posting_key_trust=", "jobId=123"):
+            self.assertIn(label, text)
+        for secret in ("private-pass", "private-token", "private-fragment", "user:"):
+            self.assertNotIn(secret, text)
+        self.assertEqual(summary.persistence_error, 1)
+        self.assertEqual(self.saved(), [])
+
     def test_missing_or_wrong_generated_metadata_cannot_persist_found_verified(self):
         for metadata in ((None, None, None, None, None),
                          ("greenhouse:999", "official_found_verified", VERIFIED_AT, 1.0, "trusted")):

@@ -22,6 +22,7 @@ from src.repositories.recommendation_repository import (
     count_cached_canonical_scores,
     load_candidate_jobs,
 )
+from src.scoring_diagnostics import log_scoring_failure
 from src.database import get_connection
 from src.job_screening import screen_unscreened_jobs
 from src.score_jobs_ai import (
@@ -218,7 +219,8 @@ def score_backlog(
                 )
 
         except ResumeMatcherError as error:
-            print("Score failed for this job.")
+            log_scoring_failure(job, index, len(candidate_jobs),
+                                "OpenAI" if use_openai_fallback else "Gemini", error)
 
             if should_switch_to_openai(error):
                 if is_quota_exhausted(error):
@@ -243,6 +245,7 @@ def score_backlog(
                     )
 
                 except ResumeMatcherError as fallback_error:
+                    log_scoring_failure(job, index, len(candidate_jobs), "OpenAI", fallback_error)
                     jobs_failed += 1
                     print(
                         "OpenAI fallback also failed for this job."
