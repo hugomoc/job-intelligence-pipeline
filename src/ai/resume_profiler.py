@@ -130,6 +130,9 @@ class EducationItem(BaseModel):
 
 class CandidateEligibilityFacts(BaseModel):
     """Explicit candidate-supplied facts; None always means unknown."""
+    current_country: str | None = None
+    current_region: str | None = None
+    professional_languages: list[str] | None = None
     citizenship_country_codes: list[str] | None = None
     authorized_work_countries: list[str] | None = None
     requires_sponsorship: bool | None = None
@@ -137,6 +140,85 @@ class CandidateEligibilityFacts(BaseModel):
     willing_to_relocate: bool | None = None
     willing_to_travel: bool | None = None
     max_travel_percent: int | None = Field(default=None, ge=0, le=100)
+
+
+def _optional_csv_env(name: str) -> list[str] | None:
+    value = os.getenv(name)
+
+    if value is None:
+        return None
+
+    return [
+        item.strip()
+        for item in value.split(",")
+        if item.strip()
+    ]
+
+
+def _optional_bool_env(name: str) -> bool | None:
+    value = os.getenv(name)
+
+    if value is None:
+        return None
+
+    normalized = value.strip().casefold()
+
+    if normalized in {"1", "true", "yes", "y"}:
+        return True
+
+    if normalized in {"0", "false", "no", "n"}:
+        return False
+
+    raise ResumeProfilerError(
+        f"{name} must be true/false when configured."
+    )
+
+
+def apply_candidate_eligibility_overrides(
+    profile: "ResumeProfile",
+) -> "ResumeProfile":
+    """Overlay explicit local candidate facts without persisting them in git."""
+    current = profile.personal_eligibility
+    updates: dict[str, object] = {}
+
+    scalar_env = {
+        "current_country": "CANDIDATE_CURRENT_COUNTRY",
+        "current_region": "CANDIDATE_CURRENT_REGION",
+    }
+
+    for field_name, env_name in scalar_env.items():
+        value = os.getenv(env_name)
+
+        if value is not None and value.strip():
+            updates[field_name] = value.strip()
+
+    list_env = {
+        "professional_languages": "CANDIDATE_PROFESSIONAL_LANGUAGES",
+        "citizenship_country_codes": "CANDIDATE_CITIZENSHIP_COUNTRY_CODES",
+        "authorized_work_countries": "CANDIDATE_AUTHORIZED_WORK_COUNTRIES",
+    }
+
+    for field_name, env_name in list_env.items():
+        value = _optional_csv_env(env_name)
+
+        if value is not None:
+            updates[field_name] = value
+
+    sponsorship = _optional_bool_env("CANDIDATE_REQUIRES_SPONSORSHIP")
+
+    if sponsorship is not None:
+        updates["requires_sponsorship"] = sponsorship
+
+    if not updates:
+        return profile
+
+    return profile.model_copy(
+        update={
+            "personal_eligibility": current.model_copy(
+                update=updates
+            )
+        }
+    )
 
 
 class ResumeProfile(BaseModel):
