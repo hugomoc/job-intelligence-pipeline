@@ -598,10 +598,74 @@ def personal_fact_kind(text: str) -> str | None:
         "citizenship": r"citizen|citizenship|permanent resident|itar|protected (?:person|individual)",
         "clearance": r"security clearance|secret.clearance|secret.level|public trust|federal clearance",
         "work_authorization": r"work authoriz|authoriz(?:ed|ation) to work|visa sponsorship|work visa|employment visa|sponsorship or transfer",
+        "location": r"\b(?:location|residen(?:ce|cy)|based in|located in|must be based|must reside|remote candidates)\b",
+        "language": r"\b(?:fluen(?:t|cy)|proficien(?:t|cy)|language|spoken|written)\b",
         "relocation": r"relocat(?:e|ion|ing)",
         "travel": r"travel (?:willingness|flexibility|up to|requirement)|willing to travel",
     }
     return next((kind for kind, pattern in patterns.items() if re.search(pattern, value)), None)
+
+
+US_REGION_ALIASES = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+    "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
+    "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+    "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
+    "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI",
+    "south carolina": "SC", "south dakota": "SD", "tennessee": "TN", "texas": "TX",
+    "utah": "UT", "vermont": "VT", "virginia": "VA", "washington": "WA",
+    "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+    "district of columbia": "DC",
+}
+
+
+def _canonical_us_region(value: str) -> str | None:
+    normalized = value.strip().casefold()
+
+    if normalized in US_REGION_ALIASES:
+        return US_REGION_ALIASES[normalized]
+
+    upper = value.strip().upper()
+
+    if upper in set(US_REGION_ALIASES.values()):
+        return upper
+
+    return None
+
+
+def _mentioned_us_regions(text: str) -> set[str]:
+    mentioned = {
+        code
+        for name, code in US_REGION_ALIASES.items()
+        if re.search(rf"\b{re.escape(name)}\b", text, re.I)
+    }
+
+    for code in set(US_REGION_ALIASES.values()):
+        if re.search(rf"(?<![A-Z]){code}(?![A-Z])", text):
+            mentioned.add(code)
+
+    return mentioned
+
+
+def _required_language_names(text: str) -> set[str]:
+    patterns = (
+        r"(?:fluen(?:t|cy)|proficien(?:t|cy))\s+(?:in\s+)?(?:both\s+)?([A-Za-z]+)(?:\s+and\s+([A-Za-z]+))?",
+        r"(?:spoken|written)\s+([A-Za-z]+)(?:\s+and\s+([A-Za-z]+))?",
+    )
+    languages: set[str] = set()
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.I):
+            for value in match.groups():
+                if value:
+                    languages.add(value.casefold())
+
+    return languages
 
 
 def personal_requirement_evidence(gap: str, description: str, profile: ResumeProfile, _kind: str | None = None) -> dict[str, Any] | None:
@@ -643,6 +707,38 @@ def personal_requirement_evidence(gap: str, description: str, profile: ResumePro
             state, evidence = "MEETS", "Explicit matching security_clearances"
         elif re.search(r"active|current|possess|hold", text):
             state, evidence = "DOES_NOT_MEET", "Explicit security_clearances lacks required current clearance"
+    elif kind == "location":
+        current_region = facts.current_region
+        current_country = facts.current_country
+        required_regions = _mentioned_us_regions(text)
+
+        if current_region and required_regions:
+            candidate_region = _canonical_us_region(current_region)
+
+            if candidate_region is not None:
+                state = "MEETS" if candidate_region in required_regions else "DOES_NOT_MEET"
+                evidence = "Explicit current_region"
+        elif current_country and re.search(r"\b(?:u\.?s\.?|united states)\b", text):
+            us = current_country.strip().casefold() in {
+                "us", "usa", "united states", "united states of america",
+            }
+            state = "MEETS" if us else "DOES_NOT_MEET"
+            evidence = "Explicit current_country"
+    elif kind == "language" and facts.professional_languages is not None:
+        required_languages = _required_language_names(text)
+
+        if required_languages:
+            supplied_languages = {
+                language.strip().casefold()
+                for language in facts.professional_languages
+                if language.strip()
+            }
+            state = (
+                "MEETS"
+                if required_languages.issubset(supplied_languages)
+                else "DOES_NOT_MEET"
+            )
+            evidence = "Explicit professional_languages"
     elif kind == "relocation" and facts.willing_to_relocate is not None:
         state, evidence = ("MEETS" if facts.willing_to_relocate else "DOES_NOT_MEET"), "Explicit willing_to_relocate"
     elif kind == "travel" and facts.willing_to_travel is not None:
