@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from src.ai.resume_matcher import (
     MATCHER_PROMPT_VERSION,
@@ -12,7 +13,11 @@ from src.ai.resume_matcher import (
     determine_recommendation,
     validate_missing_qualifications,
 )
-from src.ai.resume_profiler import CandidateEligibilityFacts, ResumeProfile
+from src.ai.resume_profiler import (
+    CandidateEligibilityFacts,
+    ResumeProfile,
+    apply_candidate_eligibility_overrides,
+)
 from src import database
 from src.score_jobs_ai import (
     initialize_ai_tables,
@@ -919,6 +924,32 @@ def test_ai_first_allows_high_score_review_with_material_uncertainty() -> None:
     assert match.recommendation == "review"
 
 
+def test_candidate_eligibility_env_overrides_are_explicit() -> None:
+    profile = make_profile()
+
+    with patch.dict(
+        "os.environ",
+        {
+            "CANDIDATE_CURRENT_COUNTRY": "United States",
+            "CANDIDATE_CURRENT_REGION": "California",
+            "CANDIDATE_PROFESSIONAL_LANGUAGES": "English, Portuguese",
+            "CANDIDATE_CITIZENSHIP_COUNTRY_CODES": "US",
+            "CANDIDATE_AUTHORIZED_WORK_COUNTRIES": "US",
+            "CANDIDATE_REQUIRES_SPONSORSHIP": "false",
+        },
+        clear=False,
+    ):
+        updated = apply_candidate_eligibility_overrides(profile)
+
+    facts = updated.personal_eligibility
+    assert facts.current_country == "United States"
+    assert facts.current_region == "California"
+    assert facts.professional_languages == ["English", "Portuguese"]
+    assert facts.citizenship_country_codes == ["US"]
+    assert facts.authorized_work_countries == ["US"]
+    assert facts.requires_sponsorship is False
+
+
 def test_unknown_location_gap_cannot_force_skip() -> None:
     analysis = make_analysis(
         [
@@ -1157,6 +1188,7 @@ def main() -> None:
     test_prompt_version_controls_cache_reuse()
     test_ai_first_score_is_not_recomputed_from_components()
     test_ai_first_allows_high_score_review_with_material_uncertainty()
+    test_candidate_eligibility_env_overrides_are_explicit()
     test_unknown_location_gap_cannot_force_skip()
     test_explicit_california_location_removes_location_gap()
     test_confirmed_missing_required_language_can_remain_skip()
