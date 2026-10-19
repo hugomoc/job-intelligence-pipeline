@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 from src.ai.resume_matcher import (
     MATCHER_PROMPT_VERSION,
     JobMatchAnalysis,
+    RequirementMatch,
     ResumeMatcherError,
     build_job_match_prompt,
     build_resume_job_match,
@@ -917,6 +918,42 @@ def test_ai_first_allows_high_score_review_with_material_uncertainty() -> None:
     assert match.recommendation == "review"
 
 
+def test_requirement_matches_are_explanatory_only() -> None:
+    analysis = make_analysis([], score=95).model_copy(
+        update={
+            "overall_score": 82,
+            "recommendation": "apply",
+            "requirement_matches": [
+                RequirementMatch(
+                    job_requirement="Advanced SQL",
+                    candidate_background="Extensive production SQL experience",
+                    match="excellent",
+                ),
+                RequirementMatch(
+                    job_requirement="Healthcare domain experience",
+                    candidate_background="No direct healthcare experience demonstrated",
+                    match="gap",
+                ),
+            ],
+        }
+    )
+
+    match = scored_match(
+        make_profile(),
+        "Staff Data Analytics Engineer",
+        (
+            "Responsibilities include advanced SQL, analytics engineering, "
+            "data modeling, and healthcare analytics. "
+        ) * 12,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 82
+    assert match.recommendation == "apply"
+    assert len(match.analysis.requirement_matches) == 2
+    assert match.analysis.requirement_matches[1].match == "gap"
+
+
 def test_ai_first_rejects_apply_with_missing_core_requirement() -> None:
     analysis = make_analysis(
         ["Develop extraction and transformation routines using ABAP"],
@@ -963,6 +1000,9 @@ def test_ai_first_prompt_requires_full_jd_holistic_decision() -> None:
     assert "required language fluency" in prompt
     assert "HOLISTIC final fit score" in prompt
     assert "Do not let a matching title" in prompt
+    assert "requirement_matches" in prompt
+    assert "6-10 most important requirements" in prompt
+    assert "explanatory only" in prompt
 
 
 def main() -> None:
@@ -993,6 +1033,7 @@ def main() -> None:
     test_prompt_version_controls_cache_reuse()
     test_ai_first_score_is_not_recomputed_from_components()
     test_ai_first_allows_high_score_review_with_material_uncertainty()
+    test_requirement_matches_are_explanatory_only()
     test_ai_first_rejects_apply_with_missing_core_requirement()
     test_ai_first_prompt_requires_full_jd_holistic_decision()
     test_incomplete_description_cannot_be_apply()
