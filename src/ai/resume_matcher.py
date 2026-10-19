@@ -360,8 +360,8 @@ Rules:
    location, language, work authorization, clearance, relocation, or travel
    information may create REVIEW uncertainty, but UNKNOWN by itself must never
    produce SKIP. When an explicit personal_eligibility fact satisfies the
-   requirement, do not list that requirement as a gap. Confirmed incompatibility
-   may be treated as a real eligibility gap.
+   requirement, do not list that requirement as a gap. A confirmed mismatch
+   against a mandatory personal eligibility requirement must produce SKIP.
 9. Do not let a matching title or many generic skills overwhelm one major
    missing core responsibility.
 10. Treat years-of-experience requirements as minimums unless the JD gives a
@@ -655,6 +655,36 @@ def parse_openai_job_match_content(
     )
 
 
+def confirmed_mandatory_personal_mismatches(
+    resume_profile: ResumeProfile,
+    description: str,
+) -> list[str]:
+    """Return mandatory personal requirements disproved by explicit facts."""
+    mismatches: list[str] = []
+
+    for row in description_requirement_clauses(description):
+        if not row.get("mandatory"):
+            continue
+
+        clause = str(row.get("clause") or "").strip()
+        kind = personal_fact_kind(clause)
+
+        if not clause or kind is None:
+            continue
+
+        evidence = personal_requirement_evidence(
+            clause,
+            description,
+            resume_profile,
+            _kind=kind,
+        )
+
+        if evidence is not None and evidence["state"] == "DOES_NOT_MEET":
+            mismatches.append(clause)
+
+    return list(dict.fromkeys(mismatches))
+
+
 def normalize_v5_personal_eligibility(
     analysis: JobMatchAnalysis,
     resume_profile: ResumeProfile,
@@ -722,7 +752,7 @@ def build_resume_job_match(
             "The job record_key is missing."
         )
 
-    # v4 production scoring is AI-first: the full JD and candidate profile are
+    # v6 production scoring is AI-first: the full JD and candidate profile are
     # evaluated holistically by the model. Python validates consistency and
     # persistence shape; it does not re-interpret the JD as a second recruiter.
     if (
@@ -743,13 +773,38 @@ def build_resume_job_match(
             description=description,
         )
 
+        mandatory_personal_mismatches = (
+            confirmed_mandatory_personal_mismatches(
+                resume_profile=resume_profile,
+                description=description,
+            )
+        )
+
+        if mandatory_personal_mismatches:
+            saw_confirmed_personal_mismatch = True
+            analysis = analysis.model_copy(
+                update={
+                    "hard_requirements_missing": list(
+                        dict.fromkeys(
+                            analysis.hard_requirements_missing
+                            + mandatory_personal_mismatches
+                        )
+                    )
+                }
+            )
+
+        # Confirmed failure of a mandatory personal eligibility requirement is
+        # practical ineligibility, even when the technical fit is excellent.
+        if saw_confirmed_personal_mismatch:
+            overall_score = min(overall_score, 49)
+            recommendation = "skip"
+
         # UNKNOWN personal eligibility is review uncertainty, never proof of
         # ineligibility. If it was the only hard-gap basis for SKIP, normalize
         # the result to the REVIEW band rather than inventing a failure.
-        if (
+        elif (
             recommendation == "skip"
             and saw_nonfailing_personal
-            and not saw_confirmed_personal_mismatch
             and not analysis.hard_requirements_missing
         ):
             overall_score = max(overall_score, 50)
