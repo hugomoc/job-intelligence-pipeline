@@ -88,6 +88,7 @@ def should_switch_to_openai(error: ResumeMatcherError) -> bool:
 
 
 def load_latest_resume_hash(model_name: str) -> str | None:
+    """Return the newest cached resume regardless of profiling model."""
     initialize_ai_tables()
 
     with get_connection() as connection:
@@ -95,11 +96,9 @@ def load_latest_resume_hash(model_name: str) -> str | None:
             """
             SELECT resume_hash
             FROM resume_profiles
-            WHERE model_name = ?
             ORDER BY created_at DESC NULLS LAST
             LIMIT 1
-            """,
-            [model_name],
+            """
         ).fetchone()
 
     if not result:
