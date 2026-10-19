@@ -550,6 +550,98 @@ class SharedRequirementPolicyTests(unittest.TestCase):
         self.assertEqual(len(clauses), 1, clauses)
         self.assertIn("CITIZENSHIP", clauses[0]["clause"])
 
+    def test_job_responsibilities_heading_preserves_delivery_provenance(self):
+        desc = (
+            "<h2>Job Responsibilities</h2>"
+            "<p>Develop extractions, transformation routines, and user exits "
+            "using ABAP development programming language.</p>"
+        )
+        clause = next(
+            row for row in description_requirement_clauses(desc)
+            if "ABAP" in row["clause"]
+        )
+        self.assertEqual(clause["section"], "responsibilities")
+        self.assertFalse(clause["mandatory"])
+        self.assertFalse(clause["optional"])
+
+    def test_abap_central_responsibility_prevents_false_apply(self):
+        p = profile()
+        j = job(
+            "<h2>Job Responsibilities</h2>"
+            "<p>Develop extractions, transformation routines, and user exits "
+            "using ABAP development programming language.</p>",
+            "Business Intelligence Developer II",
+        )
+        direct = validate_hard_gap_clause(
+            "ABAP development experience",
+            j["description"],
+            p,
+        )
+        self.assertFalse(direct["keep_hard_gap"], direct)
+        self.assertEqual(
+            direct["reason"],
+            "central responsibility unsatisfied",
+            direct,
+        )
+
+        match = score(p, j, ["ABAP development experience"])
+        self.assertEqual(match.recommendation, "review")
+        self.assertLessEqual(match.overall_score, 69)
+        self.assertEqual(match.analysis.hard_requirements_missing, [])
+        self.assertTrue(any(
+            risk.startswith("Major central responsibility gap:")
+            and "ABAP" in risk
+            for risk in match.analysis.risk_factors
+        ))
+
+    def test_central_responsibility_is_satisfied_when_tool_is_demonstrated(self):
+        p = profile(
+            production_skills=[
+                "SQL",
+                "Python",
+                "Data pipelines",
+                "ABAP development",
+            ]
+        )
+        j = job(
+            "<h2>Job Responsibilities</h2>"
+            "<p>Develop extractions, transformation routines, and user exits "
+            "using ABAP development programming language.</p>",
+            "Business Intelligence Developer II",
+        )
+        match = score(p, j, ["ABAP development experience"])
+        self.assertEqual(match.recommendation, "apply")
+        self.assertEqual(match.overall_score, 85)
+        self.assertFalse(any(
+            risk.startswith("Major central responsibility gap:")
+            for risk in match.analysis.risk_factors
+        ))
+
+    def test_optional_tool_mention_does_not_become_central_responsibility(self):
+        p = profile()
+        j = job(
+            "<h2>Nice to have</h2>"
+            "<p>ABAP development experience preferred.</p>",
+            "Business Intelligence Developer II",
+        )
+        direct = validate_hard_gap_clause(
+            "ABAP development experience",
+            j["description"],
+            p,
+        )
+        self.assertNotEqual(
+            direct["reason"],
+            "central responsibility unsatisfied",
+            direct,
+        )
+        match = score(p, j, ["ABAP development experience"])
+        self.assertEqual(match.recommendation, "apply")
+        self.assertGreater(match.overall_score, 69)
+        self.assertFalse(any(
+            risk.startswith("Major central responsibility gap:")
+            for risk in match.analysis.risk_factors
+        ))
+
     def test_central_kubernetes_specialization_excludes_without_model_gap(self):
         j = job("<p>Design production data services on Kubernetes.</p><p>Operate Kubernetes streaming systems and maintain their reliability.</p>")
         normalized = normalize_job_eligibility(proposed([]), profile(), j)
