@@ -753,7 +753,7 @@ def test_repeated_specialization_is_treated_as_critical() -> None:
 
 
 def test_prompt_version_controls_cache_reuse() -> None:
-    assert MATCHER_PROMPT_VERSION == "v3"
+    assert MATCHER_PROMPT_VERSION == "v4"
 
     old_data_dir = database.DATA_DIR
     old_database_path = database.DATABASE_PATH
