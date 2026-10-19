@@ -21,6 +21,7 @@ from src.ai.resume_matcher import (
 from src.ai.resume_profiler import (
     ResumeProfile,
     ResumeProfilerError,
+    apply_candidate_eligibility_overrides,
     get_model_name,
     profile_resume,
 )
@@ -134,8 +135,12 @@ def load_cached_profile(
     if not result:
         return None
 
-    return ResumeProfile.model_validate_json(
+    profile = ResumeProfile.model_validate_json(
         result[0]
+    )
+
+    return apply_candidate_eligibility_overrides(
+        profile
     )
 
 
