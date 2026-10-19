@@ -116,6 +116,12 @@ def load_cached_profile(
     resume_hash: str,
     model_name: str,
 ) -> ResumeProfile | None:
+    """Load the cached structured profile for this resume hash.
+
+    The cache table is keyed by resume_hash, not profiling model. A model
+    change should not make an otherwise valid structured profile disappear.
+    model_name is retained for caller compatibility and score-provider context.
+    """
     initialize_ai_tables()
 
     with get_connection() as connection:
@@ -124,12 +130,8 @@ def load_cached_profile(
             SELECT profile_json
             FROM resume_profiles
             WHERE resume_hash = ?
-              AND model_name = ?
             """,
-            [
-                resume_hash,
-                model_name,
-            ],
+            [resume_hash],
         ).fetchone()
 
     if not result:
