@@ -685,16 +685,15 @@ def confirmed_mandatory_personal_mismatches(
     return list(dict.fromkeys(mismatches))
 
 
-def normalize_v5_personal_eligibility(
+def normalize_personal_eligibility(
     analysis: JobMatchAnalysis,
     resume_profile: ResumeProfile,
     description: str,
-) -> tuple[JobMatchAnalysis, bool, bool]:
-    """Remove fabricated personal gaps and identify personal eligibility state."""
+) -> tuple[JobMatchAnalysis, bool]:
+    """Remove fabricated personal gaps and identify unresolved eligibility."""
     hard_missing: list[str] = []
     risks = list(analysis.risk_factors)
     saw_nonfailing_personal = False
-    saw_confirmed_personal_mismatch = False
 
     for gap in analysis.hard_requirements_missing:
         evidence = personal_requirement_evidence(
@@ -710,7 +709,6 @@ def normalize_v5_personal_eligibility(
         state = evidence["state"]
 
         if state == "DOES_NOT_MEET":
-            saw_confirmed_personal_mismatch = True
             hard_missing.append(gap)
         elif state == "UNKNOWN":
             saw_nonfailing_personal = True
@@ -730,7 +728,6 @@ def normalize_v5_personal_eligibility(
             }
         ),
         saw_nonfailing_personal,
-        saw_confirmed_personal_mismatch,
     )
 
 
@@ -766,8 +763,7 @@ def build_resume_job_match(
         (
             analysis,
             saw_nonfailing_personal,
-            saw_confirmed_personal_mismatch,
-        ) = normalize_v5_personal_eligibility(
+        ) = normalize_personal_eligibility(
             analysis=analysis,
             resume_profile=resume_profile,
             description=description,
@@ -780,8 +776,11 @@ def build_resume_job_match(
             )
         )
 
+        saw_confirmed_personal_mismatch = bool(
+            mandatory_personal_mismatches
+        )
+
         if mandatory_personal_mismatches:
-            saw_confirmed_personal_mismatch = True
             analysis = analysis.model_copy(
                 update={
                     "hard_requirements_missing": list(
