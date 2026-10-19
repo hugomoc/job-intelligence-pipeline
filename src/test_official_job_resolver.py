@@ -486,7 +486,7 @@ def test_identity_mismatch_rejects_official_candidate() -> None:
 
 
 def test_dynamic_candidate_fetch_can_verify_official_job() -> None:
-    official_url = "https://careers.seismic.com/jobs/123"
+    official_url = "https://boards.greenhouse.io/seismic/jobs/123"
     original_dynamic_fetch = official_resolver.fetch_dynamic_job_description
 
     def fake_dynamic_fetch(url: str) -> JobDescriptionResult | None:

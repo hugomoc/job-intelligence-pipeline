@@ -1598,6 +1598,49 @@ def safe_enrichment_log_message(value: Any) -> str:
     return message[:1000]
 
 
+def safe_posting_url_diagnostic(value: Any) -> str:
+    """Display URL identity while dropping credentials and non-identity queries.
+
+    Scheme punctuation is escaped so the normal run-log URL scrubber cannot
+    discard the already-sanitized identity. No clickable credential URL escapes.
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit
+    from src.verified_posting_identity import JOB_ID_QUERY_PARAMETERS
+    try:
+        parsed = urlsplit(str(value or ""))
+        if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:
+            return "<absent or malformed>"
+        query = urlencode([(key, val) for key, val in parse_qsl(parsed.query)
+                           if key.casefold() in JOB_ID_QUERY_PARAMETERS])
+        host = parsed.hostname + (f":{parsed.port}" if parsed.port else "")
+        display = f"{parsed.scheme}[:]//{host}{parsed.path}"
+        if query:
+            display += "?" + query
+        return safe_enrichment_log_message(display)
+    except (TypeError, ValueError):
+        return "<absent or malformed>"
+
+
+def log_identity_diagnostics(log, job: dict, url: Any, source: Any, reason: Any) -> None:
+    """Explain rejected identity without mutating rows or retaining page payloads."""
+    try:
+        candidate_key = verified_posting_key_from_url(url)
+    except (TypeError, ValueError):
+        candidate_key = "<malformed>"
+    log("Identity diagnostic: " + safe_enrichment_log_message(
+        f"record_key={job.get('record_key')}; source={job.get('source')}; rejection={reason}"))
+    log("  original apply_url=" + safe_posting_url_diagnostic(job.get("apply_url")))
+    log("  candidate official_job_url=" + safe_posting_url_diagnostic(url))
+    log("  official_url_source=" + safe_enrichment_log_message(source))
+    for name, value in (("verified_posting_key", job.get("verified_posting_key")),
+                        ("verified_posting_key_source", job.get("verified_posting_key_source")),
+                        ("verified_posting_key_trust", job.get("verified_posting_key_trust")),
+                        ("candidate_url_key (not proof)", candidate_key)):
+        if str(value or "").startswith("official-url:"):
+            value = "official-url:" + safe_posting_url_diagnostic(str(value)[len("official-url:"):])
+        log("  " + name + "=" + safe_enrichment_log_message(value or "<none>"))
+
+
 def process_enrichment_batch(
     jobs: list[dict[str, Any]],
     client,
@@ -1674,6 +1717,11 @@ def process_enrichment_batch(
                 f"reason={official.official_url_validation_reason}"
             )
 
+        for trace in job.get("candidate_validation_trace", []):
+            if trace.get("reason") == "fetched URL lacks supported specific posting identity/provenance":
+                log_identity_diagnostics(log, job, trace.get("final_url") or trace.get("url"),
+                                         trace.get("official_url_source"), trace["reason"])
+
         try:
             save_enrichment_attempt(
                 job=job,
@@ -1691,6 +1739,10 @@ def process_enrichment_batch(
             if stored_status == "fetch_error":
                 totals["fetch_error"] += 1
             outcome = "rejected" if isinstance(error, ValueError) else "failed"
+            if processed.official_resolution:
+                official = processed.official_resolution
+                log_identity_diagnostics(log, job, official.official_job_url,
+                                         official.official_url_source, error)
             log(
                 f"Persistence {outcome} for {job.get('title') or 'Untitled job'} | "
                 f"{job.get('company_name') or 'Unknown company'} "

@@ -659,12 +659,31 @@ def ranked_candidates(
     )
 
 
+def candidate_specific_posting_key(
+    job: dict, candidate: OfficialJobCandidate, result: JobDescriptionResult,
+) -> str:
+    """Use the persistence URL policy before claiming verified resolution.
+
+    Discovery source labels and matching fetched metadata cannot establish a
+    posting-specific URL or upgrade search provenance to employer provenance.
+    Check the final URL, so redirects cannot borrow the candidate URL's ID.
+    """
+    from src.enrichment.verified_identity_recovery import supported_specific_posting_key
+    from src.enrich_jobs import official_status_value, stored_verified_key_is_trusted
+    allow_employer = candidate.source == "employer" or (
+        official_status_value(job) == OFFICIAL_FOUND_VERIFIED and stored_verified_key_is_trusted(job)
+    )
+    return supported_specific_posting_key(
+        result.final_url or candidate.url, allow_employer=allow_employer,
+    )
+
+
 def validate_candidate_result(
     job: dict,
     candidate: OfficialJobCandidate,
     result: JobDescriptionResult,
 ) -> VerifiedOfficialJob | None:
-    if result.status != "enriched":
+    if result.status != "enriched" or not candidate_specific_posting_key(job, candidate, result):
         return None
 
     # Candidate fields are discovery/ranking hints, including expected-company
@@ -822,11 +841,16 @@ def resolve_from_candidates(
 
         job["candidate_validation_trace"].append({"url": candidate.url,
             "accepted": verified is not None, "fetch_status": result.status,
+            "final_url": result.final_url, "official_url_source": candidate.source,
             "elapsed_ms": elapsed_ms,
             "reason": verified.validation.reason if verified else "fetched posting did not pass existing identity validation",
             "http_status": result.http_status, "word_count": result.word_count,
             "resolved_title": result.resolved_title, "resolved_company": result.resolved_company})
         if verified is None:
+            if result.status == "enriched" and not candidate_specific_posting_key(job, candidate, result):
+                last_rejection_reason = "fetched URL lacks supported specific posting identity/provenance"
+                job["candidate_validation_trace"][-1]["reason"] = last_rejection_reason
+                continue
             if result.status == "enriched" or result.resolved_title or result.resolved_company:
                 from src.enrich_jobs import trusted_identity_proof
                 validation = validate_job_identity(
