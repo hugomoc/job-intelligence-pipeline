@@ -8,6 +8,7 @@ from src.ai.resume_matcher import (
     ResumeMatcherError,
     build_job_match_prompt,
     build_resume_job_match,
+    get_openai_job_match_schema,
     determine_recommendation,
     validate_missing_qualifications,
 )
@@ -918,6 +919,18 @@ def test_ai_first_allows_high_score_review_with_material_uncertainty() -> None:
     assert match.recommendation == "review"
 
 
+def test_openai_schema_makes_nested_requirement_rows_strict() -> None:
+    schema = get_openai_job_match_schema()
+    requirement_schema = schema["$defs"]["RequirementMatch"]
+
+    assert requirement_schema["additionalProperties"] is False
+    assert set(requirement_schema["required"]) == {
+        "job_requirement",
+        "candidate_background",
+        "match",
+    }
+
+
 def test_requirement_matches_are_explanatory_only() -> None:
     analysis = make_analysis([], score=95).model_copy(
         update={
@@ -1033,6 +1046,7 @@ def main() -> None:
     test_prompt_version_controls_cache_reuse()
     test_ai_first_score_is_not_recomputed_from_components()
     test_ai_first_allows_high_score_review_with_material_uncertainty()
+    test_openai_schema_makes_nested_requirement_rows_strict()
     test_requirement_matches_are_explanatory_only()
     test_ai_first_rejects_apply_with_missing_core_requirement()
     test_ai_first_prompt_requires_full_jd_holistic_decision()
