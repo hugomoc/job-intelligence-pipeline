@@ -14,8 +14,10 @@ from src.enrich_jobs import DEFAULT_ENRICHMENT_LIMIT, EnrichmentProcessingResult
 from src.enrichment.job_description import JobDescriptionResult
 from src.enrichment.official_job_resolver import OfficialJobResolutionResult
 from src.repositories import recommendation_repository
-from src.score_backlog import BacklogSummary
+from src.score_backlog import BacklogSummary, load_latest_resume_hash
 from src.ui import daily_workflow_service
+from src.score_jobs_ai import load_cached_profile, save_resume_profile
+from src.test_resume_matcher_validation import make_profile
 from src.ui.daily_workflow_service import (
     EnrichmentSummary,
     DailyWorkflowError,
@@ -23,6 +25,35 @@ from src.ui.daily_workflow_service import (
     automatic_enrichment_limit,
     run_unscored_job_backlog,
 )
+
+
+def test_resume_profile_cache_survives_scoring_model_change() -> None:
+    with TemporaryDirectory() as directory:
+        data_dir = Path(directory)
+
+        with patch.object(database, "DATA_DIR", data_dir), patch.object(
+            database, "DATABASE_PATH", data_dir / "jobs.duckdb"
+        ):
+            profile = make_profile()
+
+            save_resume_profile(
+                resume_hash="resume-123",
+                filename="resume.pdf",
+                model_name="gemini-2.5-flash-lite",
+                profile=profile,
+            )
+
+            assert load_latest_resume_hash(
+                "gemini-3.5-flash-lite"
+            ) == "resume-123"
+
+            loaded = load_cached_profile(
+                resume_hash="resume-123",
+                model_name="gemini-3.5-flash-lite",
+            )
+
+            assert loaded is not None
+            assert loaded.professional_summary == profile.professional_summary
 
 
 def test_automatic_enrichment_limit_uses_shared_default() -> None:
@@ -267,6 +298,7 @@ def test_streamlit_renders_partial_enrichment_diagnostics() -> None:
 
 
 def main() -> None:
+    test_resume_profile_cache_survives_scoring_model_change()
     test_automatic_enrichment_limit_uses_shared_default()
     test_automatic_enrichment_limit_expands_with_larger_ai_limit()
     test_run_unscored_job_backlog_uses_broader_enrichment_limit()
