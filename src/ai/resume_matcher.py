@@ -660,10 +660,10 @@ def normalize_v5_personal_eligibility(
     resume_profile: ResumeProfile,
     description: str,
 ) -> tuple[JobMatchAnalysis, bool, bool]:
-    """Remove fabricated personal gaps and identify unresolved eligibility."""
+    """Remove fabricated personal gaps and identify personal eligibility state."""
     hard_missing: list[str] = []
     risks = list(analysis.risk_factors)
-    saw_unknown_personal = False
+    saw_nonfailing_personal = False
     saw_confirmed_personal_mismatch = False
 
     for gap in analysis.hard_requirements_missing:
@@ -683,11 +683,13 @@ def normalize_v5_personal_eligibility(
             saw_confirmed_personal_mismatch = True
             hard_missing.append(gap)
         elif state == "UNKNOWN":
-            saw_unknown_personal = True
+            saw_nonfailing_personal = True
             risks.append(
                 "Needs confirmation (UNKNOWN personal eligibility): "
                 f"{evidence['kind']}; no explicit candidate fact supplied."
             )
+        elif state == "MEETS":
+            saw_nonfailing_personal = True
         # MEETS is intentionally removed from hard gaps.
 
     return (
@@ -697,7 +699,7 @@ def normalize_v5_personal_eligibility(
                 "risk_factors": list(dict.fromkeys(risks)),
             }
         ),
-        saw_unknown_personal,
+        saw_nonfailing_personal,
         saw_confirmed_personal_mismatch,
     )
 
@@ -733,7 +735,7 @@ def build_resume_job_match(
 
         (
             analysis,
-            saw_unknown_personal,
+            saw_nonfailing_personal,
             saw_confirmed_personal_mismatch,
         ) = normalize_v5_personal_eligibility(
             analysis=analysis,
@@ -746,7 +748,7 @@ def build_resume_job_match(
         # the result to the REVIEW band rather than inventing a failure.
         if (
             recommendation == "skip"
-            and saw_unknown_personal
+            and saw_nonfailing_personal
             and not saw_confirmed_personal_mismatch
             and not analysis.hard_requirements_missing
         ):
