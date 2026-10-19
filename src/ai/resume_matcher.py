@@ -341,9 +341,11 @@ Rules:
     preferred_qualifications_missing.
 12. Return overall_score as your HOLISTIC final fit score. Do not derive it from
     a fixed weighted average of the component scores.
-13. Use these final decision bands consistently:
+13. Use these final decision rules consistently:
       APPLY  = 75-100 and no major core/eligibility blocker
-      REVIEW = 50-74, or meaningful uncertainty/gaps worth human review
+      REVIEW = 50-100 when meaningful gaps or uncertainty make APPLY premature;
+               scores of 75+ may still be REVIEW when the fit is strong but a
+               material concern needs human confirmation
       SKIP   = 0-49, including clear practical ineligibility or a major mismatch
 14. recommendation must agree with overall_score and the stated gaps.
 15. Keep strengths, gaps, risks, and summary concise and specific enough that a
@@ -632,18 +634,16 @@ def build_resume_job_match(
         overall_score = analysis.overall_score
         recommendation = analysis.recommendation
 
-        expected_recommendation = (
-            "apply"
-            if overall_score >= 75
-            else "review"
-            if overall_score >= 50
-            else "skip"
+        invalid_score_band = (
+            (recommendation == "apply" and overall_score < 75)
+            or (recommendation == "review" and overall_score < 50)
+            or (recommendation == "skip" and overall_score >= 50)
         )
-        if recommendation != expected_recommendation:
+        if invalid_score_band:
             raise ResumeMatcherError(
                 "AI fit result is internally inconsistent: "
-                f"score {overall_score} requires {expected_recommendation.upper()}, "
-                f"but model returned {recommendation.upper()}."
+                f"score {overall_score} does not support "
+                f"{recommendation.upper()}."
             )
 
         if (
