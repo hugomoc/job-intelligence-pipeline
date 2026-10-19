@@ -760,7 +760,7 @@ def test_repeated_specialization_is_treated_as_critical() -> None:
 
 
 def test_prompt_version_controls_cache_reuse() -> None:
-    assert MATCHER_PROMPT_VERSION == "v5"
+    assert MATCHER_PROMPT_VERSION == "v6"
 
     old_data_dir = database.DATA_DIR
     old_database_path = database.DATABASE_PATH
@@ -1022,6 +1022,41 @@ def test_explicit_california_location_removes_location_gap() -> None:
     assert match.analysis.hard_requirements_missing == []
 
 
+def test_confirmed_mandatory_language_mismatch_forces_skip_from_review() -> None:
+    profile = make_profile().model_copy(
+        update={
+            "personal_eligibility": CandidateEligibilityFacts(
+                current_country="United States",
+                current_region="California",
+                professional_languages=["English", "Portuguese"],
+            )
+        }
+    )
+    analysis = make_analysis([], score=90).model_copy(
+        update={
+            "overall_score": 75,
+            "recommendation": "review",
+        }
+    )
+
+    match = scored_match(
+        profile,
+        "Senior BI Analyst",
+        (
+            "Fluency in both Polish and English is required. "
+            "Responsibilities include SQL, dashboards, and Python. "
+        ) * 10,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 49
+    assert match.recommendation == "skip"
+    assert any(
+        "Fluency in both Polish and English is required" in gap
+        for gap in match.analysis.hard_requirements_missing
+    )
+
+
 def test_confirmed_missing_required_language_can_remain_skip() -> None:
     profile = make_profile().model_copy(
         update={
@@ -1191,6 +1226,7 @@ def main() -> None:
     test_candidate_eligibility_env_overrides_are_explicit()
     test_unknown_location_gap_cannot_force_skip()
     test_explicit_california_location_removes_location_gap()
+    test_confirmed_mandatory_language_mismatch_forces_skip_from_review()
     test_confirmed_missing_required_language_can_remain_skip()
     test_openai_schema_makes_nested_requirement_rows_strict()
     test_requirement_matches_are_explanatory_only()
