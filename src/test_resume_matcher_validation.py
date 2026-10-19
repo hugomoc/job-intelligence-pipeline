@@ -4,6 +4,8 @@ from tempfile import TemporaryDirectory
 from src.ai.resume_matcher import (
     MATCHER_PROMPT_VERSION,
     JobMatchAnalysis,
+    ResumeMatcherError,
+    build_job_match_prompt,
     build_resume_job_match,
     determine_recommendation,
     validate_missing_qualifications,
@@ -866,6 +868,78 @@ def test_incomplete_description_can_still_be_skip() -> None:
     ) == "skip"
 
 
+def test_ai_first_score_is_not_recomputed_from_components() -> None:
+    analysis = make_analysis([], score=95).model_copy(
+        update={
+            "overall_score": 63,
+            "recommendation": "review",
+            "summary": (
+                "Strong generic BI fit, but a central hands-on technology "
+                "responsibility is not demonstrated."
+            ),
+        }
+    )
+    match = scored_match(
+        make_profile(),
+        "Business Intelligence Developer II",
+        (
+            "Responsibilities include developing extraction and transformation "
+            "routines using a specialized programming language. "
+        ) * 12,
+        analysis=analysis,
+    )
+    assert match.overall_score == 63
+    assert match.recommendation == "review"
+
+
+def test_ai_first_rejects_apply_with_missing_core_requirement() -> None:
+    analysis = make_analysis(
+        ["Develop extraction and transformation routines using ABAP"],
+        score=95,
+    ).model_copy(
+        update={
+            "overall_score": 87,
+            "recommendation": "apply",
+        }
+    )
+
+    try:
+        scored_match(
+            make_profile(),
+            "Business Intelligence Developer II",
+            (
+                "Responsibilities include developing extraction and transformation "
+                "routines and user exits using ABAP. "
+            ) * 12,
+            analysis=analysis,
+        )
+    except ResumeMatcherError as error:
+        assert "APPLY cannot include" in str(error)
+    else:
+        raise AssertionError("AI-first guardrail accepted APPLY with a core gap")
+
+
+def test_ai_first_prompt_requires_full_jd_holistic_decision() -> None:
+    prompt = build_job_match_prompt(
+        make_profile(),
+        {
+            "title": "Senior BI Analyst",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": "unused",
+        },
+        (
+            "Location: Poland. Fluency in Polish and English. "
+            "Responsibilities include SQL, dashboards, and Python."
+        ),
+        True,
+    )
+    assert "CORE RESPONSIBILITIES" in prompt
+    assert "required language fluency" in prompt
+    assert "HOLISTIC final fit score" in prompt
+    assert "Do not let a matching title" in prompt
+
+
 def main() -> None:
     test_cloud_platform_alternatives_are_not_missing()
     test_data_warehouse_alternatives_are_not_missing()
@@ -892,6 +966,9 @@ def main() -> None:
     test_production_ai_experience_satisfies_critical_requirement()
     test_repeated_specialization_is_treated_as_critical()
     test_prompt_version_controls_cache_reuse()
+    test_ai_first_score_is_not_recomputed_from_components()
+    test_ai_first_rejects_apply_with_missing_core_requirement()
+    test_ai_first_prompt_requires_full_jd_holistic_decision()
     test_incomplete_description_cannot_be_apply()
     test_incomplete_description_can_still_be_skip()
     print("Resume matcher validation tests passed.")
