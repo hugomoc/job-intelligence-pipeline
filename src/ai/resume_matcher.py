@@ -64,7 +64,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from google.genai import types
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from src.ai.resume_profiler import (
     ResumeProfile,
@@ -91,8 +91,6 @@ from src.description_quality import MINIMUM_FULL_DESCRIPTION_WORDS, assess_descr
 
 
 class RequirementMatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
     job_requirement: str = Field(
         description="Important job requirement or core responsibility from the JD.",
     )
@@ -608,11 +606,23 @@ def get_openai_model_name() -> str:
 
 def get_openai_job_match_schema() -> dict[str, Any]:
     schema = JobMatchAnalysis.model_json_schema()
-    schema["additionalProperties"] = False
-    schema["required"] = list(
-        schema.get("properties", {}).keys()
-    )
 
+    def make_strict(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "object" or "properties" in node:
+                node["additionalProperties"] = False
+                properties = node.get("properties")
+                if isinstance(properties, dict):
+                    node["required"] = list(properties.keys())
+
+            for value in node.values():
+                make_strict(value)
+
+        elif isinstance(node, list):
+            for value in node:
+                make_strict(value)
+
+    make_strict(schema)
     return schema
 
 
