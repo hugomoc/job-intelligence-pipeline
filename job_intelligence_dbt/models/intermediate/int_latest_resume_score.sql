@@ -32,6 +32,7 @@ select
     industry_fit,
     location_fit,
     confidence,
+    requirement_matches,
     matching_strengths,
     hard_requirements_missing,
     preferred_qualifications_missing,
