@@ -12,7 +12,7 @@ from src.ai.resume_matcher import (
     determine_recommendation,
     validate_missing_qualifications,
 )
-from src.ai.resume_profiler import ResumeProfile
+from src.ai.resume_profiler import CandidateEligibilityFacts, ResumeProfile
 from src import database
 from src.score_jobs_ai import (
     initialize_ai_tables,
@@ -755,7 +755,7 @@ def test_repeated_specialization_is_treated_as_critical() -> None:
 
 
 def test_prompt_version_controls_cache_reuse() -> None:
-    assert MATCHER_PROMPT_VERSION == "v4"
+    assert MATCHER_PROMPT_VERSION == "v5"
 
     old_data_dir = database.DATA_DIR
     old_database_path = database.DATABASE_PATH
@@ -919,6 +919,115 @@ def test_ai_first_allows_high_score_review_with_material_uncertainty() -> None:
     assert match.recommendation == "review"
 
 
+def test_unknown_location_gap_cannot_force_skip() -> None:
+    analysis = make_analysis(
+        [
+            "Location constraint: candidate profile does not establish "
+            "residency in California, Oregon, Washington, Utah, or Texas"
+        ],
+        score=90,
+    ).model_copy(
+        update={
+            "overall_score": 40,
+            "recommendation": "skip",
+        }
+    )
+
+    match = scored_match(
+        make_profile(),
+        "Staff Data Analytics Engineer",
+        (
+            "Remote candidates must be based in California, Oregon, Washington, "
+            "Utah, or Texas. Responsibilities include SQL and data modeling. "
+        ) * 10,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 50
+    assert match.recommendation == "review"
+    assert match.analysis.hard_requirements_missing == []
+    assert any(
+        "UNKNOWN personal eligibility" in risk
+        for risk in match.analysis.risk_factors
+    )
+
+
+def test_explicit_california_location_removes_location_gap() -> None:
+    profile = make_profile().model_copy(
+        update={
+            "personal_eligibility": CandidateEligibilityFacts(
+                current_country="United States",
+                current_region="California",
+                authorized_work_countries=["US"],
+                requires_sponsorship=False,
+            )
+        }
+    )
+    analysis = make_analysis(
+        [
+            "Location constraint: candidate profile does not establish "
+            "residency in California, Oregon, Washington, Utah, or Texas"
+        ],
+        score=90,
+    ).model_copy(
+        update={
+            "overall_score": 40,
+            "recommendation": "skip",
+        }
+    )
+
+    match = scored_match(
+        profile,
+        "Staff Data Analytics Engineer",
+        (
+            "Remote candidates must be based in California, Oregon, Washington, "
+            "Utah, or Texas. Responsibilities include SQL and data modeling. "
+        ) * 10,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 50
+    assert match.recommendation == "review"
+    assert match.analysis.hard_requirements_missing == []
+
+
+def test_confirmed_missing_required_language_can_remain_skip() -> None:
+    profile = make_profile().model_copy(
+        update={
+            "personal_eligibility": CandidateEligibilityFacts(
+                current_country="United States",
+                current_region="California",
+                professional_languages=["English", "Portuguese"],
+            )
+        }
+    )
+    analysis = make_analysis(
+        ["Demonstrated professional fluency in Polish"],
+        score=90,
+    ).model_copy(
+        update={
+            "overall_score": 40,
+            "recommendation": "skip",
+        }
+    )
+
+    match = scored_match(
+        profile,
+        "Senior BI Analyst",
+        (
+            "Fluency in both Polish and English is required. "
+            "Responsibilities include SQL, dashboards, and Python. "
+        ) * 10,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 40
+    assert match.recommendation == "skip"
+    assert match.analysis.hard_requirements_missing == [
+        "Demonstrated professional fluency in Polish"
+    ]
+
+
 def test_openai_schema_makes_nested_requirement_rows_strict() -> None:
     schema = get_openai_job_match_schema()
     requirement_schema = schema["$defs"]["RequirementMatch"]
@@ -1016,6 +1125,8 @@ def test_ai_first_prompt_requires_full_jd_holistic_decision() -> None:
     assert "requirement_matches" in prompt
     assert "6-10 most important requirements" in prompt
     assert "explanatory only" in prompt
+    assert "UNKNOWN by itself must never" in prompt
+    assert "personal_eligibility contains explicit" in prompt
 
 
 def main() -> None:
@@ -1046,6 +1157,9 @@ def main() -> None:
     test_prompt_version_controls_cache_reuse()
     test_ai_first_score_is_not_recomputed_from_components()
     test_ai_first_allows_high_score_review_with_material_uncertainty()
+    test_unknown_location_gap_cannot_force_skip()
+    test_explicit_california_location_removes_location_gap()
+    test_confirmed_missing_required_language_can_remain_skip()
     test_openai_schema_makes_nested_requirement_rows_strict()
     test_requirement_matches_are_explanatory_only()
     test_ai_first_rejects_apply_with_missing_core_requirement()
