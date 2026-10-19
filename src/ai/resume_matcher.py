@@ -64,7 +64,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from google.genai import types
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.ai.resume_profiler import (
     ResumeProfile,
@@ -91,6 +91,8 @@ from src.description_quality import MINIMUM_FULL_DESCRIPTION_WORDS, assess_descr
 
 
 class RequirementMatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     job_requirement: str = Field(
         description="Important job requirement or core responsibility from the JD.",
     )
