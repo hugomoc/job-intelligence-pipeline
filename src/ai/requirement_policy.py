@@ -74,7 +74,16 @@ def description_requirement_clauses(description: str) -> list[dict[str, Any]]:
             if re.search(r"preferred qualifications|desired qualifications|nice.to.have|bonus qualifications", heading):
                 section = "optional"
                 continue
-            if heading in {"responsibilities", "benefits", "about us", "about the company", "what you ll do", "what you will do", "why you ll love it here", "why you will love it here", "compensation and benefits", "compensation", "how we ll take care of you", "total rewards", "our tech stack"}:
+            if (
+                re.fullmatch(
+                    r"(?:job |core |key |primary |essential )?(?:responsibilities|duties)",
+                    heading,
+                )
+                or heading in {"what you ll do", "what you will do"}
+            ):
+                section = "responsibilities"
+                continue
+            if heading in {"benefits", "about us", "about the company", "why you ll love it here", "why you will love it here", "compensation and benefits", "compensation", "how we ll take care of you", "total rewards", "our tech stack"}:
                 section = "other"
                 continue
         # Do not split decimal years or e.g.; alternatives stay in one clause.
@@ -579,6 +588,67 @@ def validate_hard_gap_clause(gap: str, description: str, profile: ResumeProfile)
             if len(cg) > 1:
                 satisfied = cg.issubset(set(demonstrated))
         decisions.append(dict(row, satisfied=satisfied, allowed_groups=sorted(allowed), resume_evidence=demonstrated))
+    # A direct hands-on responsibility can be central to the role even when the
+    # posting does not repeat "required" or "must" in that bullet. Preserve
+    # that distinction from a formal hard requirement: it should prevent a
+    # false APPLY, but it should not automatically become a hard SKIP.
+    central_responsibilities = []
+    if not any(not row["satisfied"] for row in decisions):
+        generic_gap_terms = {
+            "major", "gap", "required", "requirement", "requirements",
+            "professional", "production", "hands", "hand", "strong",
+            "expert", "expertise", "proficiency", "ability",
+            "development", "develop", "developing", "developer",
+            "programming", "language", "technology", "technologies",
+            "tool", "tools", "platform", "platforms", "system", "systems",
+            "work", "working",
+        }
+        gap_terms = significant_terms(gap) - generic_gap_terms
+        profile_terms = significant_terms(
+            profile_to_text(profile, include_certifications=False)
+        )
+        gap_groups = clause_groups(gap)
+
+        for row in matches:
+            clause = row["clause"]
+            if (
+                row.get("section") != "responsibilities"
+                or row["optional"]
+                or not re.search(
+                    r"\b(?:build|create|develop|design|implement|write|program"
+                    r"|configure|administer|operate|maintain|deploy|integrate"
+                    r"|engineer|optimiz\w*|migrat\w*|troubleshoot|own)\w*\b",
+                    clause,
+                    re.I,
+                )
+            ):
+                continue
+
+            if gap_groups:
+                satisfied = requirement_is_demonstrated(clause, profile)
+            else:
+                satisfied = bool(gap_terms) and gap_terms.issubset(profile_terms)
+
+            if not satisfied:
+                central_responsibilities.append(
+                    dict(
+                        row,
+                        satisfied=False,
+                        allowed_groups=sorted(gap_groups),
+                        resume_evidence=[],
+                        central_responsibility=True,
+                    )
+                )
+
+    if central_responsibilities:
+        return {
+            "gap": gap,
+            "keep_hard_gap": False,
+            "reason": "central responsibility unsatisfied",
+            "clauses": decisions + central_responsibilities,
+            "matched_clauses": matches,
+        }
+
     # A separately mandatory unsatisfied clause cannot be rescued by an optional mention.
     for row in decisions:
         if not row["satisfied"] and groups and not requirement_requires_all(row["clause"]) and re.search(r"such as|e\.g\.|examples? (?:include|including)", row["clause"], re.I):
