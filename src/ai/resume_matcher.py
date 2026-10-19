@@ -470,6 +470,8 @@ def validate_missing_qualifications(
                 hard_missing.append(gap)
             elif decision.get("personal_evidence", {}).get("state") == "UNKNOWN":
                 risks.append(f"Needs confirmation (UNKNOWN personal eligibility): {decision['personal_evidence']['kind']}; no explicit candidate fact supplied.")
+            elif decision["reason"] == "central responsibility unsatisfied":
+                risks.append(f"Major central responsibility gap: {gap}")
             elif decision["reason"] in {"mandatory status not established", "vendor examples not mandatory; broader capability needs review"}:
                 risks.append(f"Unconfirmed qualification (mandatory JD evidence unavailable): {gap}")
     preferred_missing = remove_demonstrated_missing_items(
@@ -519,6 +521,12 @@ def determine_recommendation(
 
     if overall_score < 50:
         return "skip"
+
+    if any(
+        risk.startswith("Major central responsibility gap:")
+        for risk in analysis.risk_factors
+    ):
+        return "review"
 
     if (
         overall_score >= 75
@@ -826,9 +834,30 @@ def build_resume_job_match(
                 ),
             })
 
+    central_responsibility_gaps = [
+        risk.removeprefix("Major central responsibility gap:").strip()
+        for risk in analysis.risk_factors
+        if risk.startswith("Major central responsibility gap:")
+    ]
+    if central_responsibility_gaps:
+        analysis = analysis.model_copy(
+            update={
+                "skills_fit": min(analysis.skills_fit, 65),
+                "experience_fit": min(analysis.experience_fit, 70),
+                "summary": (
+                    "Major central responsibility gap: "
+                    + "; ".join(central_responsibility_gaps)
+                    + ". "
+                    + analysis.summary
+                ),
+            }
+        )
+
     overall_score = calculate_overall_score(
         analysis
     )
+    if central_responsibility_gaps:
+        overall_score = min(overall_score, 69)
 
     # Missing requirements found in an incomplete posting
     # are not confirmed hard requirements. Preserve them
