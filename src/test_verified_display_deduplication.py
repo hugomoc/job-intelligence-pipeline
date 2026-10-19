@@ -7,6 +7,8 @@ import unittest
 from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
+from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
+
 from src.repositories.recommendation_repository import (
     exact_posting_identity,
     prepare_job_display,
@@ -40,7 +42,7 @@ def posting(record_key='a', **changes):
         description_complete=True, has_incomplete_description=False,
         description_quality_signals=True, description_hash='same-jd',
         description_updated_at=NOW-timedelta(hours=2),
-        ai_score=90, ai_prompt_version='v3', ai_scored_at=NOW-timedelta(hours=1),
+        ai_score=90, ai_prompt_version=MATCHER_PROMPT_VERSION, ai_scored_at=NOW-timedelta(hours=1),
         recommendation='apply', confidence='high',
         has_current_complete_ai_assessment=True,
         fit_priority_label='High', title_classification='STRONG_MATCH',
