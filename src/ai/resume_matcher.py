@@ -68,6 +68,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from src.ai.resume_profiler import (
     ResumeProfile,
+    apply_candidate_eligibility_overrides,
     get_gemini_client,
     get_model_name,
 )
@@ -353,13 +354,14 @@ Rules:
    technology, language, platform, or domain that is central to the work.
 7. Evaluate practical eligibility from the full JD, including explicit
    geography, required language fluency, travel, clearance, and work
-   authorization constraints. Do not assume citizenship, sponsorship,
-   clearance, relocation, or travel facts that are not in personal_eligibility;
-   unknown personal facts should create REVIEW uncertainty rather than a
-   fabricated failure.
-8. Required professional language fluency or a clearly restricted work
-   location that the candidate profile does not demonstrate should materially
-   affect the recommendation.
+   authorization constraints. personal_eligibility contains explicit
+   candidate-supplied facts and must be treated as authoritative.
+8. Never turn an UNKNOWN personal fact into a failed requirement. Unknown
+   location, language, work authorization, clearance, relocation, or travel
+   information may create REVIEW uncertainty, but UNKNOWN by itself must never
+   produce SKIP. When an explicit personal_eligibility fact satisfies the
+   requirement, do not list that requirement as a gap. Confirmed incompatibility
+   may be treated as a real eligibility gap.
 9. Do not let a matching title or many generic skills overwhelm one major
    missing core responsibility.
 10. Treat years-of-experience requirements as minimums unless the JD gives a
@@ -381,9 +383,10 @@ Rules:
 16. Populate requirement_matches with the 6-10 most important requirements,
     core responsibilities, and explicit eligibility constraints from the JD.
     For each row, compare the requirement with concise candidate evidence and
-    label it excellent, strong, partial, or gap. Do not invent evidence. Keep
-    these rows explanatory only: do not calculate overall_score by counting or
-    averaging the row labels.
+    label it excellent, strong, partial, or gap. Do not invent evidence. For
+    personal eligibility, use PARTIAL when the fact is unknown and GAP only for
+    a confirmed mismatch. Keep these rows explanatory only: do not calculate
+    overall_score by counting or averaging the row labels.
 
 CANDIDATE PROFILE:
 
@@ -652,6 +655,53 @@ def parse_openai_job_match_content(
     )
 
 
+def normalize_v5_personal_eligibility(
+    analysis: JobMatchAnalysis,
+    resume_profile: ResumeProfile,
+    description: str,
+) -> tuple[JobMatchAnalysis, bool, bool]:
+    """Remove fabricated personal gaps and identify unresolved eligibility."""
+    hard_missing: list[str] = []
+    risks = list(analysis.risk_factors)
+    saw_unknown_personal = False
+    saw_confirmed_personal_mismatch = False
+
+    for gap in analysis.hard_requirements_missing:
+        evidence = personal_requirement_evidence(
+            gap,
+            description,
+            resume_profile,
+        )
+
+        if evidence is None:
+            hard_missing.append(gap)
+            continue
+
+        state = evidence["state"]
+
+        if state == "DOES_NOT_MEET":
+            saw_confirmed_personal_mismatch = True
+            hard_missing.append(gap)
+        elif state == "UNKNOWN":
+            saw_unknown_personal = True
+            risks.append(
+                "Needs confirmation (UNKNOWN personal eligibility): "
+                f"{evidence['kind']}; no explicit candidate fact supplied."
+            )
+        # MEETS is intentionally removed from hard gaps.
+
+    return (
+        analysis.model_copy(
+            update={
+                "hard_requirements_missing": list(dict.fromkeys(hard_missing)),
+                "risk_factors": list(dict.fromkeys(risks)),
+            }
+        ),
+        saw_unknown_personal,
+        saw_confirmed_personal_mismatch,
+    )
+
+
 def build_resume_job_match(
     resume_profile: ResumeProfile,
     job: dict[str, Any],
@@ -679,6 +729,29 @@ def build_resume_job_match(
     ):
         overall_score = analysis.overall_score
         recommendation = analysis.recommendation
+        description = str(job.get("description") or "")
+
+        (
+            analysis,
+            saw_unknown_personal,
+            saw_confirmed_personal_mismatch,
+        ) = normalize_v5_personal_eligibility(
+            analysis=analysis,
+            resume_profile=resume_profile,
+            description=description,
+        )
+
+        # UNKNOWN personal eligibility is review uncertainty, never proof of
+        # ineligibility. If it was the only hard-gap basis for SKIP, normalize
+        # the result to the REVIEW band rather than inventing a failure.
+        if (
+            recommendation == "skip"
+            and saw_unknown_personal
+            and not saw_confirmed_personal_mismatch
+            and not analysis.hard_requirements_missing
+        ):
+            overall_score = max(overall_score, 50)
+            recommendation = "review"
 
         invalid_score_band = (
             (recommendation == "apply" and overall_score < 75)
@@ -954,6 +1027,10 @@ def score_resume_against_job(
     job: dict[str, Any],
     model_name: str | None = None,
 ) -> ResumeJobMatch:
+    resume_profile = apply_candidate_eligibility_overrides(
+        resume_profile
+    )
+
     (
         description,
         description_word_count,
@@ -1017,6 +1094,10 @@ def score_resume_against_job_openai(
     job: dict[str, Any],
     model_name: str | None = None,
 ) -> ResumeJobMatch:
+    resume_profile = apply_candidate_eligibility_overrides(
+        resume_profile
+    )
+
     api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key:
