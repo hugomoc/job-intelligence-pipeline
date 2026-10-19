@@ -1022,6 +1022,35 @@ def test_explicit_california_location_removes_location_gap() -> None:
     assert match.analysis.hard_requirements_missing == []
 
 
+def test_preferred_language_mismatch_does_not_force_skip() -> None:
+    profile = make_profile().model_copy(
+        update={
+            "personal_eligibility": CandidateEligibilityFacts(
+                professional_languages=["English", "Portuguese"],
+            )
+        }
+    )
+    analysis = make_analysis([], score=90).model_copy(
+        update={
+            "overall_score": 75,
+            "recommendation": "review",
+        }
+    )
+
+    match = scored_match(
+        profile,
+        "Senior BI Analyst",
+        (
+            "Polish language proficiency is preferred, not required. "
+            "Responsibilities include SQL, dashboards, and Python. "
+        ) * 10,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 75
+    assert match.recommendation == "review"
+
+
 def test_confirmed_mandatory_language_mismatch_forces_skip_from_review() -> None:
     profile = make_profile().model_copy(
         update={
@@ -1226,6 +1255,7 @@ def main() -> None:
     test_candidate_eligibility_env_overrides_are_explicit()
     test_unknown_location_gap_cannot_force_skip()
     test_explicit_california_location_removes_location_gap()
+    test_preferred_language_mismatch_does_not_force_skip()
     test_confirmed_mandatory_language_mismatch_forces_skip_from_review()
     test_confirmed_missing_required_language_can_remain_skip()
     test_openai_schema_makes_nested_requirement_rows_strict()
