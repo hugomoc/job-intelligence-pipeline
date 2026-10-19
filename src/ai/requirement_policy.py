@@ -611,16 +611,28 @@ def validate_hard_gap_clause(gap: str, description: str, profile: ResumeProfile)
 
         for row in matches:
             clause = row["clause"]
+            strong_action = re.search(
+                r"\b(?:build|create|develop|design|implement|write|program"
+                r"|configure|administer|operate|maintain|deploy|integrate"
+                r"|engineer|optimiz\w*|migrat\w*|troubleshoot|own)\w*\b",
+                clause,
+                re.I,
+            )
+            soft_support_context = re.search(
+                r"\b(?:support|assist|collaborat\w*|cooperat\w*|partner\w*)\b",
+                clause,
+                re.I,
+            )
+            explicit_ownership = re.search(
+                r"\b(?:own|lead|primary responsibility)\w*\b",
+                clause,
+                re.I,
+            )
             if (
                 row.get("section") != "responsibilities"
                 or row["optional"]
-                or not re.search(
-                    r"\b(?:build|create|develop|design|implement|write|program"
-                    r"|configure|administer|operate|maintain|deploy|integrate"
-                    r"|engineer|optimiz\w*|migrat\w*|troubleshoot|own)\w*\b",
-                    clause,
-                    re.I,
-                )
+                or not strong_action
+                or (soft_support_context and not explicit_ownership)
             ):
                 continue
 
