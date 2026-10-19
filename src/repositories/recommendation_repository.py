@@ -503,6 +503,45 @@ def parse_json_list(value: str | None) -> list[str]:
     return [str(item) for item in parsed]
 
 
+def parse_requirement_matches(
+    value: str | None,
+) -> list[dict[str, str]]:
+    if not value:
+        return []
+
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(parsed, list):
+        return []
+
+    allowed_matches = {"excellent", "strong", "partial", "gap"}
+    rows: list[dict[str, str]] = []
+
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+
+        requirement = str(item.get("job_requirement") or "").strip()
+        background = str(item.get("candidate_background") or "").strip()
+        match = str(item.get("match") or "").strip().casefold()
+
+        if not requirement or not background or match not in allowed_matches:
+            continue
+
+        rows.append(
+            {
+                "job_requirement": requirement,
+                "candidate_background": background,
+                "match": match,
+            }
+        )
+
+    return rows[:10]
+
+
 def parse_email_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -1019,6 +1058,7 @@ def initialize_job_eligibility_table() -> None:
                 industry_fit INTEGER NOT NULL,
                 location_fit INTEGER NOT NULL,
                 confidence VARCHAR NOT NULL,
+                requirement_matches VARCHAR,
                 matching_strengths VARCHAR,
                 hard_requirements_missing VARCHAR,
                 preferred_qualifications_missing VARCHAR,
@@ -1070,6 +1110,10 @@ def initialize_job_eligibility_table() -> None:
             """
             ALTER TABLE resume_job_scores
             ADD COLUMN IF NOT EXISTS confidence VARCHAR
+            """,
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS requirement_matches VARCHAR
             """,
             """
             ALTER TABLE resume_job_scores
@@ -1675,6 +1719,7 @@ def load_all_jobs(
                     scores.seniority_fit,
                     scores.industry_fit,
                     scores.location_fit,
+                    scores.requirement_matches,
                     scores.matching_strengths,
                     scores.hard_requirements_missing,
                     scores.preferred_qualifications_missing,
@@ -1724,6 +1769,7 @@ def load_all_jobs(
                     scores.seniority_fit,
                     scores.industry_fit,
                     scores.location_fit,
+                    scores.requirement_matches,
                     scores.matching_strengths,
                     scores.hard_requirements_missing,
                     scores.preferred_qualifications_missing,
@@ -1933,6 +1979,14 @@ def load_all_jobs(
                         verified_scores.location_fit
                     )
                 END AS location_fit,
+                CASE
+                    WHEN exact_scores.ai_score IS NOT NULL
+                    THEN exact_scores.requirement_matches
+                    ELSE coalesce(
+                        recommendations.requirement_matches,
+                        verified_scores.requirement_matches
+                    )
+                END AS requirement_matches,
                 CASE
                     WHEN exact_scores.ai_score IS NOT NULL
                     THEN exact_scores.matching_strengths
@@ -2158,6 +2212,9 @@ def load_all_jobs(
         else:
             job["sent_at"] = None
 
+        job["requirement_matches"] = parse_requirement_matches(
+            job.get("requirement_matches")
+        )
         job["matching_strengths"] = parse_json_list(
             job.get("matching_strengths")
         )
@@ -3475,6 +3532,7 @@ def load_recommendations(
                 seniority_fit,
                 industry_fit,
                 location_fit,
+                requirement_matches,
                 matching_strengths,
                 hard_requirements_missing,
                 preferred_qualifications_missing,
@@ -3510,6 +3568,9 @@ def load_recommendations(
     recommendations = [dict(zip(columns, row)) for row in rows]
 
     for recommendation in recommendations:
+        recommendation["requirement_matches"] = parse_requirement_matches(
+            recommendation.get("requirement_matches")
+        )
         recommendation["matching_strengths"] = parse_json_list(
             recommendation.get("matching_strengths")
         )
