@@ -257,6 +257,7 @@ def create_review_supporting_tables() -> None:
                 seniority_fit INTEGER,
                 industry_fit INTEGER,
                 location_fit INTEGER,
+                requirement_matches VARCHAR,
                 matching_strengths VARCHAR,
                 hard_requirements_missing VARCHAR,
                 preferred_qualifications_missing VARCHAR,
@@ -2640,7 +2641,7 @@ def test_load_all_jobs_reads_current_exact_score_without_mart_refresh() -> None:
                 SELECT ?,resume_hash,prompt_version,overall_score,
                     recommendation,confidence,title_fit,skills_fit,
                     experience_fit,seniority_fit,industry_fit,location_fit,
-                    matching_strengths,hard_requirements_missing,
+                    requirement_matches,matching_strengths,hard_requirements_missing,
                     preferred_qualifications_missing,risk_factors,summary,
                     description_word_count,description_complete,false,scored_at
                 FROM resume_job_scores WHERE record_key='current-exact'
