@@ -781,16 +781,41 @@ def build_resume_job_match(
         )
 
         if mandatory_personal_mismatches:
-            analysis = analysis.model_copy(
-                update={
-                    "hard_requirements_missing": list(
-                        dict.fromkeys(
-                            analysis.hard_requirements_missing
-                            + mandatory_personal_mismatches
-                        )
+            existing_confirmed_personal_kinds: set[str] = set()
+
+            for gap in analysis.hard_requirements_missing:
+                evidence = personal_requirement_evidence(
+                    gap,
+                    description,
+                    resume_profile,
+                )
+
+                if (
+                    evidence is not None
+                    and evidence["state"] == "DOES_NOT_MEET"
+                ):
+                    existing_confirmed_personal_kinds.add(
+                        evidence["kind"]
                     )
-                }
-            )
+
+            additional_mismatches = [
+                clause
+                for clause in mandatory_personal_mismatches
+                if personal_fact_kind(clause)
+                not in existing_confirmed_personal_kinds
+            ]
+
+            if additional_mismatches:
+                analysis = analysis.model_copy(
+                    update={
+                        "hard_requirements_missing": list(
+                            dict.fromkeys(
+                                analysis.hard_requirements_missing
+                                + additional_mismatches
+                            )
+                        )
+                    }
+                )
 
         # Confirmed failure of a mandatory personal eligibility requirement is
         # practical ineligibility, even when the technical fit is excellent.
