@@ -68,6 +68,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from src.ai.resume_profiler import (
     ResumeProfile,
+    apply_candidate_eligibility_overrides,
     get_gemini_client,
     get_model_name,
 )
@@ -88,6 +89,24 @@ from src.description_quality import MINIMUM_FULL_DESCRIPTION_WORDS, assess_descr
 
 
 
+
+
+class RequirementMatch(BaseModel):
+    job_requirement: str = Field(
+        description="Important job requirement or core responsibility from the JD.",
+    )
+    candidate_background: str = Field(
+        description=(
+            "Concise candidate evidence that matches the requirement, or a clear "
+            "statement that the experience is not demonstrated."
+        ),
+    )
+    match: Literal["excellent", "strong", "partial", "gap"] = Field(
+        description=(
+            "Human-readable fit label for this requirement. This is explanatory "
+            "only and must not be used as a formula for the overall score."
+        ),
+    )
 
 
 class JobMatchAnalysis(BaseModel):
@@ -145,6 +164,30 @@ class JobMatchAnalysis(BaseModel):
         ),
     )
 
+    overall_score: int | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description=(
+            "Holistic candidate-to-job fit score returned by the model after "
+            "considering the full JD, core responsibilities, requirements, "
+            "eligibility constraints, and transferable experience."
+        ),
+    )
+
+    recommendation: Literal[
+        "apply",
+        "review",
+        "skip",
+    ] | None = Field(
+        default=None,
+        description=(
+            "Holistic model recommendation. APPLY requires a realistically "
+            "actionable fit, REVIEW is plausible with meaningful gaps or "
+            "uncertainty, and SKIP is a poor or practically ineligible fit."
+        ),
+    )
+
     confidence: Literal[
         "high",
         "medium",
@@ -167,8 +210,8 @@ class JobMatchAnalysis(BaseModel):
     hard_requirements_missing: list[str] = Field(
         default_factory=list,
         description=(
-            "Explicitly required qualifications that the "
-            "candidate does not demonstrate."
+            "Explicit requirements or central hands-on responsibilities "
+            "that the candidate does not demonstrate."
         ),
     )
 
@@ -185,6 +228,16 @@ class JobMatchAnalysis(BaseModel):
         description=(
             "Important concerns such as location, required "
             "clearance, seniority mismatch or missing data."
+        ),
+    )
+
+    requirement_matches: list[RequirementMatch] = Field(
+        default_factory=list,
+        max_length=10,
+        description=(
+            "Concise comparison of the most important job requirements against "
+            "the candidate's demonstrated background. Explanatory only; it does "
+            "not determine the score."
         ),
     )
 
@@ -269,7 +322,7 @@ def build_job_match_prompt(
     description: str,
     description_complete: bool,
 ) -> str:
-    """Build the full evidence-bound prompt for fit scoring."""
+    """Build the full-JD, AI-first fit-scoring prompt."""
     completeness = (
         "COMPLETE"
         if description_complete
@@ -277,100 +330,63 @@ def build_job_match_prompt(
     )
 
     return f"""
-You are an expert technical recruiter evaluating a candidate
-against a specific job.
+You are an expert technical recruiter evaluating one candidate against one
+specific job. Read the ENTIRE job description and the ENTIRE candidate profile
+before deciding.
 
-Evaluate only evidence contained in the candidate profile and
-job information below.
+Your job is to make the same holistic judgment a strong recruiter would make,
+not to count keywords.
 
 Rules:
 
-1. Do not invent candidate experience or qualifications.
-2. Distinguish production experience from portfolio-project
-   experience.
-3. Portfolio experience is useful evidence, but it must not
-   be treated as years of professional production experience.
-4. Distinguish explicitly required qualifications from
-   preferred qualifications.
-5. Add an item to hard_requirements_missing only when the job
-   explicitly requires it and the candidate profile does not
-   demonstrate it.
-6. Do not penalize the candidate for every technology that is
-   merely preferred.
-7. Consider equivalent and transferable experience.
-8. Do not reward keyword repetition.
-9. If the job description is incomplete, use low confidence
-   and do not infer requirements that are not provided.
-10. Required security clearance, work authorization,
-    mandatory location or travel requirements should be
-    identified as risk factors when relevant.
-11. Evaluate seniority based on demonstrated scope,
-    responsibilities and years of relevant experience.
-12. Treat years-of-experience requirements as minimum
-    requirements unless the job explicitly specifies a
-    maximum or a bounded range.
-
-13. A candidate exceeding a minimum experience requirement
-    should normally be treated as meeting or exceeding the
-    requirement, not as a risk.
-
-14. Do not identify excess years of experience as a risk by
-    itself. Only identify possible overqualification when
-    there is explicit evidence of a meaningful mismatch in
-    seniority, responsibilities, compensation, or role scope.
-
-15. When possible overqualification is uncertain, do not add
-    it to risk_factors.
-
-16. Keep strengths, gaps and risks concise and specific.
-17. Before adding any item to hard_requirements_missing or
-    preferred_qualifications_missing, inspect the complete
-    candidate profile, including professional experience,
-    skills, projects, certifications, tools, platforms,
-    methodologies and summarized experience.
-18. Do not mark a qualification missing when the candidate
-    demonstrates the exact qualification, a recognized alias,
-    or a clearly equivalent or transferable qualification.
-19. When a requirement lists examples in parentheses, such as
-    "cloud platforms (AWS, Azure, GCP)" or "data warehouses
-    (Snowflake, Redshift, BigQuery)", treat those examples as
-    alternatives unless the job explicitly says all are required.
-20. A cloud-platform requirement can be satisfied by
-    demonstrated production use of relevant cloud services,
-    infrastructure, databases or data warehouses. Do not check
-    only certifications when work-history evidence exists.
-21. Treat Git-based development plus Jenkins, GitHub Actions,
-    GitLab CI, Azure DevOps, CircleCI or equivalent automation
-    tools as relevant evidence for CI/CD and Git requirements.
-22. Do not declare a qualification missing merely because the
-    candidate profile uses different wording from the job.
-23. A missing qualification must be genuinely absent. Do not
-    use missing qualifications to describe experience that is
-    present but could be stronger, newer or more detailed.
-24. Preferred technologies should not all be treated as
-    mandatory.
-25. Agile methodologies may be missing only when the job asks
-    for Agile and the complete candidate profile contains no
-    evidence of Agile, Scrum, sprint-based delivery or an
-    equivalent methodology.
-26. Before returning the final JSON, verify every item in
-    hard_requirements_missing and preferred_qualifications_missing
-    against the complete candidate profile one final time.
-27. Identify critical specializations that define the role, such
-    as production RAG/agent systems, Databricks, Domo, healthcare
-    claims, production ML deployment, ledger/accounting domain
-    expertise, or Staff/Principal organizational scope. Missing
-    one central specialization is a major gap even when the
-    candidate is an excellent generic data-engineering fit.
-28. Do not treat personal projects, AI-assisted coding, coursework
-    or generic tool usage as equivalent to production ownership
-    when the job asks for production systems serving real users.
-29. When a critical specialization is missing, lower the relevant
-    component score substantially and explain it as a major gap.
-    Do not describe it as a minor or preferred gap.
-30. Do not apply a major penalty for interchangeable alternatives
-    or preferred-only skills, such as Snowflake/BigQuery/Redshift
-    or similar when the candidate has one equivalent platform.
+1. Use only evidence in the candidate profile and job information. Never invent
+   experience, skills, eligibility, location, language fluency, or credentials.
+2. Distinguish professional production experience from portfolio/project work.
+3. Identify the role's CORE RESPONSIBILITIES even when a responsibility bullet
+   does not contain words such as "required" or "must". A central hands-on duty
+   can be a major gap if the candidate has no demonstrated experience with it.
+4. Distinguish core/required qualifications from preferred or nice-to-have
+   qualifications. Do not penalize heavily for preferred-only technologies.
+5. Evaluate alternatives correctly. "A or B", "such as", examples, and
+   "or equivalent" do not require every named technology.
+6. Consider genuinely transferable experience, but do not treat a different
+   tool as equivalent when the job specifically requires hands-on use of a
+   technology, language, platform, or domain that is central to the work.
+7. Evaluate practical eligibility from the full JD, including explicit
+   geography, required language fluency, travel, clearance, and work
+   authorization constraints. personal_eligibility contains explicit
+   candidate-supplied facts and must be treated as authoritative.
+8. Never turn an UNKNOWN personal fact into a failed requirement. Unknown
+   location, language, work authorization, clearance, relocation, or travel
+   information may create REVIEW uncertainty, but UNKNOWN by itself must never
+   produce SKIP. When an explicit personal_eligibility fact satisfies the
+   requirement, do not list that requirement as a gap. A confirmed mismatch
+   against a mandatory personal eligibility requirement must produce SKIP.
+9. Do not let a matching title or many generic skills overwhelm one major
+   missing core responsibility.
+10. Treat years-of-experience requirements as minimums unless the JD gives a
+    maximum or bounded range. More experience is not a negative by itself.
+11. Put missing explicit requirements AND missing central hands-on
+    responsibilities in hard_requirements_missing. Put preferred-only gaps in
+    preferred_qualifications_missing.
+12. Return overall_score as your HOLISTIC final fit score. Do not derive it from
+    a fixed weighted average of the component scores.
+13. Use these final decision rules consistently:
+      APPLY  = 75-100 and no major core/eligibility blocker
+      REVIEW = 50-100 when meaningful gaps or uncertainty make APPLY premature;
+               scores of 75+ may still be REVIEW when the fit is strong but a
+               material concern needs human confirmation
+      SKIP   = 0-49, including clear practical ineligibility or a major mismatch
+14. recommendation must agree with overall_score and the stated gaps.
+15. Keep strengths, gaps, risks, and summary concise and specific enough that a
+    human can understand why the score was assigned.
+16. Populate requirement_matches with the 6-10 most important requirements,
+    core responsibilities, and explicit eligibility constraints from the JD.
+    For each row, compare the requirement with concise candidate evidence and
+    label it excellent, strong, partial, or gap. Do not invent evidence. For
+    personal eligibility, use PARTIAL when the fact is unknown and GAP only for
+    a confirmed mismatch. Keep these rows explanatory only: do not calculate
+    overall_score by counting or averaging the row labels.
 
 CANDIDATE PROFILE:
 
@@ -386,60 +402,10 @@ Source: {job.get("source") or "Not provided"}
 
 Job-description completeness: {completeness}
 
-JOB DESCRIPTION:
+FULL JOB DESCRIPTION:
 
 {description or "No complete job description is available."}
 """.strip()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -643,11 +609,23 @@ def get_openai_model_name() -> str:
 
 def get_openai_job_match_schema() -> dict[str, Any]:
     schema = JobMatchAnalysis.model_json_schema()
-    schema["additionalProperties"] = False
-    schema["required"] = list(
-        schema.get("properties", {}).keys()
-    )
 
+    def make_strict(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "object" or "properties" in node:
+                node["additionalProperties"] = False
+                properties = node.get("properties")
+                if isinstance(properties, dict):
+                    node["required"] = list(properties.keys())
+
+            for value in node.values():
+                make_strict(value)
+
+        elif isinstance(node, list):
+            for value in node:
+                make_strict(value)
+
+    make_strict(schema)
     return schema
 
 
@@ -677,6 +655,82 @@ def parse_openai_job_match_content(
     )
 
 
+def confirmed_mandatory_personal_mismatches(
+    resume_profile: ResumeProfile,
+    description: str,
+) -> list[str]:
+    """Return mandatory personal requirements disproved by explicit facts."""
+    mismatches: list[str] = []
+
+    for row in description_requirement_clauses(description):
+        if not row.get("mandatory"):
+            continue
+
+        clause = str(row.get("clause") or "").strip()
+        kind = personal_fact_kind(clause)
+
+        if not clause or kind is None:
+            continue
+
+        evidence = personal_requirement_evidence(
+            clause,
+            description,
+            resume_profile,
+            _kind=kind,
+        )
+
+        if evidence is not None and evidence["state"] == "DOES_NOT_MEET":
+            mismatches.append(clause)
+
+    return list(dict.fromkeys(mismatches))
+
+
+def normalize_personal_eligibility(
+    analysis: JobMatchAnalysis,
+    resume_profile: ResumeProfile,
+    description: str,
+) -> tuple[JobMatchAnalysis, bool]:
+    """Remove fabricated personal gaps and identify unresolved eligibility."""
+    hard_missing: list[str] = []
+    risks = list(analysis.risk_factors)
+    saw_nonfailing_personal = False
+
+    for gap in analysis.hard_requirements_missing:
+        evidence = personal_requirement_evidence(
+            gap,
+            description,
+            resume_profile,
+        )
+
+        if evidence is None:
+            hard_missing.append(gap)
+            continue
+
+        state = evidence["state"]
+
+        if state == "DOES_NOT_MEET":
+            hard_missing.append(gap)
+        elif state == "UNKNOWN":
+            saw_nonfailing_personal = True
+            risks.append(
+                "Needs confirmation (UNKNOWN personal eligibility): "
+                f"{evidence['kind']}; no explicit candidate fact supplied."
+            )
+        elif state == "MEETS":
+            saw_nonfailing_personal = True
+        # MEETS is intentionally removed from hard gaps.
+
+    return (
+        analysis.model_copy(
+            update={
+                "hard_requirements_missing": list(dict.fromkeys(hard_missing)),
+                "risk_factors": list(dict.fromkeys(risks)),
+            }
+        ),
+        saw_nonfailing_personal,
+    )
+
+
 def build_resume_job_match(
     resume_profile: ResumeProfile,
     job: dict[str, Any],
@@ -695,6 +749,130 @@ def build_resume_job_match(
             "The job record_key is missing."
         )
 
+    # v6 production scoring is AI-first: the full JD and candidate profile are
+    # evaluated holistically by the model. Python validates consistency and
+    # persistence shape; it does not re-interpret the JD as a second recruiter.
+    if (
+        analysis.overall_score is not None
+        and analysis.recommendation is not None
+    ):
+        overall_score = analysis.overall_score
+        recommendation = analysis.recommendation
+        description = str(job.get("description") or "")
+
+        (
+            analysis,
+            saw_nonfailing_personal,
+        ) = normalize_personal_eligibility(
+            analysis=analysis,
+            resume_profile=resume_profile,
+            description=description,
+        )
+
+        mandatory_personal_mismatches = (
+            confirmed_mandatory_personal_mismatches(
+                resume_profile=resume_profile,
+                description=description,
+            )
+        )
+
+        saw_confirmed_personal_mismatch = bool(
+            mandatory_personal_mismatches
+        )
+
+        if mandatory_personal_mismatches:
+            existing_confirmed_personal_kinds: set[str] = set()
+
+            for gap in analysis.hard_requirements_missing:
+                evidence = personal_requirement_evidence(
+                    gap,
+                    description,
+                    resume_profile,
+                )
+
+                if (
+                    evidence is not None
+                    and evidence["state"] == "DOES_NOT_MEET"
+                ):
+                    existing_confirmed_personal_kinds.add(
+                        evidence["kind"]
+                    )
+
+            additional_mismatches = [
+                clause
+                for clause in mandatory_personal_mismatches
+                if personal_fact_kind(clause)
+                not in existing_confirmed_personal_kinds
+            ]
+
+            if additional_mismatches:
+                analysis = analysis.model_copy(
+                    update={
+                        "hard_requirements_missing": list(
+                            dict.fromkeys(
+                                analysis.hard_requirements_missing
+                                + additional_mismatches
+                            )
+                        )
+                    }
+                )
+
+        # Confirmed failure of a mandatory personal eligibility requirement is
+        # practical ineligibility, even when the technical fit is excellent.
+        if saw_confirmed_personal_mismatch:
+            overall_score = min(overall_score, 49)
+            recommendation = "skip"
+
+        # UNKNOWN personal eligibility is review uncertainty, never proof of
+        # ineligibility. If it was the only hard-gap basis for SKIP, normalize
+        # the result to the REVIEW band rather than inventing a failure.
+        elif (
+            recommendation == "skip"
+            and saw_nonfailing_personal
+            and not analysis.hard_requirements_missing
+        ):
+            overall_score = max(overall_score, 50)
+            recommendation = "review"
+
+        invalid_score_band = (
+            (recommendation == "apply" and overall_score < 75)
+            or (recommendation == "review" and overall_score < 50)
+            or (recommendation == "skip" and overall_score >= 50)
+        )
+        if invalid_score_band:
+            raise ResumeMatcherError(
+                "AI fit result is internally inconsistent: "
+                f"score {overall_score} does not support "
+                f"{recommendation.upper()}."
+            )
+
+        if (
+            recommendation == "apply"
+            and analysis.hard_requirements_missing
+        ):
+            raise ResumeMatcherError(
+                "AI fit result is internally inconsistent: APPLY cannot include "
+                "missing core or required qualifications."
+            )
+
+        if not description_complete:
+            raise ResumeMatcherError(
+                "A current FULL_JD is required before AI scoring."
+            )
+
+        return ResumeJobMatch(
+            record_key=record_key,
+            model_name=model_name,
+            prompt_version=MATCHER_PROMPT_VERSION,
+            overall_score=overall_score,
+            recommendation=recommendation,
+            description_word_count=description_word_count,
+            description_complete=description_complete,
+            analysis=analysis,
+        )
+
+    # Legacy fallback for older unit-test fixtures and historical callers that
+    # construct JobMatchAnalysis without the v4 final decision fields.
     analysis = validate_missing_qualifications(
         analysis=analysis,
         resume_profile=resume_profile,
@@ -930,6 +1108,10 @@ def score_resume_against_job(
     job: dict[str, Any],
     model_name: str | None = None,
 ) -> ResumeJobMatch:
+    resume_profile = apply_candidate_eligibility_overrides(
+        resume_profile
+    )
+
     (
         description,
         description_word_count,
@@ -993,6 +1175,10 @@ def score_resume_against_job_openai(
     job: dict[str, Any],
     model_name: str | None = None,
 ) -> ResumeJobMatch:
+    resume_profile = apply_candidate_eligibility_overrides(
+        resume_profile
+    )
+
     api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key:
@@ -1040,15 +1226,13 @@ def score_resume_against_job_openai(
                 {
                     "role": "system",
                     "content": (
-                        "Return only valid JSON with these keys: "
-                        "title_fit, skills_fit, experience_fit, "
-                        "seniority_fit, industry_fit, location_fit, "
-                        "confidence, matching_strengths, "
-                        "hard_requirements_missing, "
-                        "preferred_qualifications_missing, "
-                        "risk_factors, summary. The six *_fit "
-                        "fields must be integer numbers from 0 "
-                        "to 100, never words."
+                        "Return only valid JSON matching the supplied schema. "
+                        "You must populate overall_score and recommendation in addition "
+                        "to the component fit scores, requirement comparisons, strengths, "
+                        "gaps, risks, confidence, and summary. overall_score and all *_fit "
+                        "fields must be integers "
+                        "from 0 to 100. recommendation must be apply, review, or skip and "
+                        "must agree with the score bands in the user prompt."
                     ),
                 },
                 {

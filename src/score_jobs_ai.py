@@ -21,6 +21,7 @@ from src.ai.resume_matcher import (
 from src.ai.resume_profiler import (
     ResumeProfile,
     ResumeProfilerError,
+    apply_candidate_eligibility_overrides,
     get_model_name,
     profile_resume,
 )
@@ -70,6 +71,7 @@ def initialize_ai_tables() -> None:
 
                 confidence VARCHAR NOT NULL,
 
+                requirement_matches VARCHAR,
                 matching_strengths VARCHAR,
                 hard_requirements_missing VARCHAR,
                 preferred_qualifications_missing VARCHAR,
@@ -101,6 +103,13 @@ def initialize_ai_tables() -> None:
                 DEFAULT 'v1'
             """
         )
+        connection.execute(
+            """
+            ALTER TABLE resume_job_scores
+            ADD COLUMN IF NOT EXISTS
+                requirement_matches VARCHAR
+            """
+        )
 
 
 def load_cached_profile(
@@ -126,8 +135,12 @@ def load_cached_profile(
     if not result:
         return None
 
-    return ResumeProfile.model_validate_json(
+    profile = ResumeProfile.model_validate_json(
         result[0]
+    )
+
+    return apply_candidate_eligibility_overrides(
+        profile
     )
 
 
@@ -268,6 +281,7 @@ def load_cached_job_score(
                 overall_score,
                 recommendation,
                 confidence,
+                requirement_matches,
                 matching_strengths,
                 hard_requirements_missing,
                 preferred_qualifications_missing,
@@ -331,6 +345,13 @@ def save_job_score(
         analysis.location_fit,
         analysis.confidence,
         json.dumps(
+            [
+                item.model_dump()
+                for item in analysis.requirement_matches
+            ],
+            ensure_ascii=False,
+        ),
+        json.dumps(
             analysis.matching_strengths,
             ensure_ascii=False,
         ),
@@ -381,6 +402,7 @@ def save_job_score(
                 industry_fit,
                 location_fit,
                 confidence,
+                requirement_matches,
                 matching_strengths,
                 hard_requirements_missing,
                 preferred_qualifications_missing,
@@ -393,7 +415,7 @@ def save_job_score(
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             values,

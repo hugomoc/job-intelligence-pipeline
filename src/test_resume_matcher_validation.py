@@ -1,14 +1,23 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from src.ai.resume_matcher import (
     MATCHER_PROMPT_VERSION,
     JobMatchAnalysis,
+    RequirementMatch,
+    ResumeMatcherError,
+    build_job_match_prompt,
     build_resume_job_match,
+    get_openai_job_match_schema,
     determine_recommendation,
     validate_missing_qualifications,
 )
-from src.ai.resume_profiler import ResumeProfile
+from src.ai.resume_profiler import (
+    CandidateEligibilityFacts,
+    ResumeProfile,
+    apply_candidate_eligibility_overrides,
+)
 from src import database
 from src.score_jobs_ai import (
     initialize_ai_tables,
@@ -751,7 +760,7 @@ def test_repeated_specialization_is_treated_as_critical() -> None:
 
 
 def test_prompt_version_controls_cache_reuse() -> None:
-    assert MATCHER_PROMPT_VERSION == "v3"
+    assert MATCHER_PROMPT_VERSION == "v6"
 
     old_data_dir = database.DATA_DIR
     old_database_path = database.DATABASE_PATH
@@ -866,6 +875,355 @@ def test_incomplete_description_can_still_be_skip() -> None:
     ) == "skip"
 
 
+def test_ai_first_score_is_not_recomputed_from_components() -> None:
+    analysis = make_analysis([], score=95).model_copy(
+        update={
+            "overall_score": 63,
+            "recommendation": "review",
+            "summary": (
+                "Strong generic BI fit, but a central hands-on technology "
+                "responsibility is not demonstrated."
+            ),
+        }
+    )
+    match = scored_match(
+        make_profile(),
+        "Business Intelligence Developer II",
+        (
+            "Responsibilities include developing extraction and transformation "
+            "routines using a specialized programming language. "
+        ) * 12,
+        analysis=analysis,
+    )
+    assert match.overall_score == 63
+    assert match.recommendation == "review"
+
+
+def test_ai_first_allows_high_score_review_with_material_uncertainty() -> None:
+    analysis = make_analysis([], score=90).model_copy(
+        update={
+            "overall_score": 75,
+            "recommendation": "review",
+            "risk_factors": [
+                "Material requirement needs human confirmation."
+            ],
+        }
+    )
+
+    match = scored_match(
+        make_profile(),
+        "Staff Data Analytics Engineer",
+        (
+            "Responsibilities include Snowflake analytics engineering, "
+            "semantic modeling, and product analytics. "
+        ) * 12,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 75
+    assert match.recommendation == "review"
+
+
+def test_candidate_eligibility_env_overrides_are_explicit() -> None:
+    profile = make_profile()
+
+    with patch.dict(
+        "os.environ",
+        {
+            "CANDIDATE_CURRENT_COUNTRY": "United States",
+            "CANDIDATE_CURRENT_REGION": "California",
+            "CANDIDATE_PROFESSIONAL_LANGUAGES": "English, Portuguese",
+            "CANDIDATE_CITIZENSHIP_COUNTRY_CODES": "US",
+            "CANDIDATE_AUTHORIZED_WORK_COUNTRIES": "US",
+            "CANDIDATE_REQUIRES_SPONSORSHIP": "false",
+        },
+        clear=False,
+    ):
+        updated = apply_candidate_eligibility_overrides(profile)
+
+    facts = updated.personal_eligibility
+    assert facts.current_country == "United States"
+    assert facts.current_region == "California"
+    assert facts.professional_languages == ["English", "Portuguese"]
+    assert facts.citizenship_country_codes == ["US"]
+    assert facts.authorized_work_countries == ["US"]
+    assert facts.requires_sponsorship is False
+
+
+def test_unknown_location_gap_cannot_force_skip() -> None:
+    analysis = make_analysis(
+        [
+            "Location constraint: candidate profile does not establish "
+            "residency in California, Oregon, Washington, Utah, or Texas"
+        ],
+        score=90,
+    ).model_copy(
+        update={
+            "overall_score": 40,
+            "recommendation": "skip",
+        }
+    )
+
+    match = scored_match(
+        make_profile(),
+        "Staff Data Analytics Engineer",
+        (
+            "Remote candidates must be based in California, Oregon, Washington, "
+            "Utah, or Texas. Responsibilities include SQL and data modeling. "
+        ) * 10,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 50
+    assert match.recommendation == "review"
+    assert match.analysis.hard_requirements_missing == []
+    assert any(
+        "UNKNOWN personal eligibility" in risk
+        for risk in match.analysis.risk_factors
+    )
+
+
+def test_explicit_california_location_removes_location_gap() -> None:
+    profile = make_profile().model_copy(
+        update={
+            "personal_eligibility": CandidateEligibilityFacts(
+                current_country="United States",
+                current_region="California",
+                authorized_work_countries=["US"],
+                requires_sponsorship=False,
+            )
+        }
+    )
+    analysis = make_analysis(
+        [
+            "Location constraint: candidate profile does not establish "
+            "residency in California, Oregon, Washington, Utah, or Texas"
+        ],
+        score=90,
+    ).model_copy(
+        update={
+            "overall_score": 40,
+            "recommendation": "skip",
+        }
+    )
+
+    match = scored_match(
+        profile,
+        "Staff Data Analytics Engineer",
+        (
+            "Remote candidates must be based in California, Oregon, Washington, "
+            "Utah, or Texas. Responsibilities include SQL and data modeling. "
+        ) * 10,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 50
+    assert match.recommendation == "review"
+    assert match.analysis.hard_requirements_missing == []
+
+
+def test_preferred_language_mismatch_does_not_force_skip() -> None:
+    profile = make_profile().model_copy(
+        update={
+            "personal_eligibility": CandidateEligibilityFacts(
+                professional_languages=["English", "Portuguese"],
+            )
+        }
+    )
+    analysis = make_analysis([], score=90).model_copy(
+        update={
+            "overall_score": 75,
+            "recommendation": "review",
+        }
+    )
+
+    match = scored_match(
+        profile,
+        "Senior BI Analyst",
+        (
+            "Polish language proficiency is preferred, not required. "
+            "Responsibilities include SQL, dashboards, and Python. "
+        ) * 10,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 75
+    assert match.recommendation == "review"
+
+
+def test_confirmed_mandatory_language_mismatch_forces_skip_from_review() -> None:
+    profile = make_profile().model_copy(
+        update={
+            "personal_eligibility": CandidateEligibilityFacts(
+                current_country="United States",
+                current_region="California",
+                professional_languages=["English", "Portuguese"],
+            )
+        }
+    )
+    analysis = make_analysis([], score=90).model_copy(
+        update={
+            "overall_score": 75,
+            "recommendation": "review",
+        }
+    )
+
+    match = scored_match(
+        profile,
+        "Senior BI Analyst",
+        (
+            "Fluency in both Polish and English is required. "
+            "Responsibilities include SQL, dashboards, and Python. "
+        ) * 10,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 49
+    assert match.recommendation == "skip"
+    assert any(
+        "Fluency in both Polish and English is required" in gap
+        for gap in match.analysis.hard_requirements_missing
+    )
+
+
+def test_confirmed_missing_required_language_can_remain_skip() -> None:
+    profile = make_profile().model_copy(
+        update={
+            "personal_eligibility": CandidateEligibilityFacts(
+                current_country="United States",
+                current_region="California",
+                professional_languages=["English", "Portuguese"],
+            )
+        }
+    )
+    analysis = make_analysis(
+        ["Demonstrated professional fluency in Polish"],
+        score=90,
+    ).model_copy(
+        update={
+            "overall_score": 40,
+            "recommendation": "skip",
+        }
+    )
+
+    match = scored_match(
+        profile,
+        "Senior BI Analyst",
+        (
+            "Fluency in both Polish and English is required. "
+            "Responsibilities include SQL, dashboards, and Python. "
+        ) * 10,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 40
+    assert match.recommendation == "skip"
+    assert match.analysis.hard_requirements_missing == [
+        "Demonstrated professional fluency in Polish"
+    ]
+
+
+def test_openai_schema_makes_nested_requirement_rows_strict() -> None:
+    schema = get_openai_job_match_schema()
+    requirement_schema = schema["$defs"]["RequirementMatch"]
+
+    assert requirement_schema["additionalProperties"] is False
+    assert set(requirement_schema["required"]) == {
+        "job_requirement",
+        "candidate_background",
+        "match",
+    }
+
+
+def test_requirement_matches_are_explanatory_only() -> None:
+    analysis = make_analysis([], score=95).model_copy(
+        update={
+            "overall_score": 82,
+            "recommendation": "apply",
+            "requirement_matches": [
+                RequirementMatch(
+                    job_requirement="Advanced SQL",
+                    candidate_background="Extensive production SQL experience",
+                    match="excellent",
+                ),
+                RequirementMatch(
+                    job_requirement="Healthcare domain experience",
+                    candidate_background="No direct healthcare experience demonstrated",
+                    match="gap",
+                ),
+            ],
+        }
+    )
+
+    match = scored_match(
+        make_profile(),
+        "Staff Data Analytics Engineer",
+        (
+            "Responsibilities include advanced SQL, analytics engineering, "
+            "data modeling, and healthcare analytics. "
+        ) * 12,
+        analysis=analysis,
+    )
+
+    assert match.overall_score == 82
+    assert match.recommendation == "apply"
+    assert len(match.analysis.requirement_matches) == 2
+    assert match.analysis.requirement_matches[1].match == "gap"
+
+
+def test_ai_first_rejects_apply_with_missing_core_requirement() -> None:
+    analysis = make_analysis(
+        ["Develop extraction and transformation routines using ABAP"],
+        score=95,
+    ).model_copy(
+        update={
+            "overall_score": 87,
+            "recommendation": "apply",
+        }
+    )
+
+    try:
+        scored_match(
+            make_profile(),
+            "Business Intelligence Developer II",
+            (
+                "Responsibilities include developing extraction and transformation "
+                "routines and user exits using ABAP. "
+            ) * 12,
+            analysis=analysis,
+        )
+    except ResumeMatcherError as error:
+        assert "APPLY cannot include" in str(error)
+    else:
+        raise AssertionError("AI-first guardrail accepted APPLY with a core gap")
+
+
+def test_ai_first_prompt_requires_full_jd_holistic_decision() -> None:
+    prompt = build_job_match_prompt(
+        make_profile(),
+        {
+            "title": "Senior BI Analyst",
+            "company_name": "Example",
+            "location": "Remote",
+            "description": "unused",
+        },
+        (
+            "Location: Poland. Fluency in Polish and English. "
+            "Responsibilities include SQL, dashboards, and Python."
+        ),
+        True,
+    )
+    assert "CORE RESPONSIBILITIES" in prompt
+    assert "required language fluency" in prompt
+    assert "HOLISTIC final fit score" in prompt
+    assert "Do not let a matching title" in prompt
+    assert "requirement_matches" in prompt
+    assert "6-10 most important requirements" in prompt
+    assert "explanatory only" in prompt
+    assert "UNKNOWN by itself must never" in prompt
+    assert "personal_eligibility contains explicit" in prompt
+
+
 def main() -> None:
     test_cloud_platform_alternatives_are_not_missing()
     test_data_warehouse_alternatives_are_not_missing()
@@ -892,6 +1250,18 @@ def main() -> None:
     test_production_ai_experience_satisfies_critical_requirement()
     test_repeated_specialization_is_treated_as_critical()
     test_prompt_version_controls_cache_reuse()
+    test_ai_first_score_is_not_recomputed_from_components()
+    test_ai_first_allows_high_score_review_with_material_uncertainty()
+    test_candidate_eligibility_env_overrides_are_explicit()
+    test_unknown_location_gap_cannot_force_skip()
+    test_explicit_california_location_removes_location_gap()
+    test_preferred_language_mismatch_does_not_force_skip()
+    test_confirmed_mandatory_language_mismatch_forces_skip_from_review()
+    test_confirmed_missing_required_language_can_remain_skip()
+    test_openai_schema_makes_nested_requirement_rows_strict()
+    test_requirement_matches_are_explanatory_only()
+    test_ai_first_rejects_apply_with_missing_core_requirement()
+    test_ai_first_prompt_requires_full_jd_holistic_decision()
     test_incomplete_description_cannot_be_apply()
     test_incomplete_description_can_still_be_skip()
     print("Resume matcher validation tests passed.")

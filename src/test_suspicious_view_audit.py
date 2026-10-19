@@ -3,7 +3,7 @@ import ast
 import unittest
 from datetime import date,datetime,timedelta,timezone
 from pathlib import Path
-from src.ai.resume_matcher import get_description_information,build_resume_job_match,requirement_is_demonstrated
+from src.ai.resume_matcher import MATCHER_PROMPT_VERSION,get_description_information,build_resume_job_match,requirement_is_demonstrated
 from src.test_resume_matcher_validation import make_profile,make_analysis
 from src.description_quality import assess_description_quality
 from src.repositories.recommendation_repository import has_current_complete_ai_score
@@ -65,7 +65,7 @@ class AuditTests(unittest.TestCase):
 
     def test_freshness_and_partial_transition(self):
         now=datetime.now(timezone.utc)
-        j=dict(ai_score=75,ai_prompt_version='v3',description_complete=True,raw_description_word_count=200,description_state='FULL_JD',ai_scored_at=now,description_updated_at=now-timedelta(days=1))
+        j=dict(ai_score=75,ai_prompt_version=MATCHER_PROMPT_VERSION,description_complete=True,raw_description_word_count=200,description_state='FULL_JD',ai_scored_at=now,description_updated_at=now-timedelta(days=1))
         self.assertTrue(has_current_complete_ai_score(j))
         self.assertFalse(has_current_complete_ai_score(dict(j,description_updated_at=now+timedelta(seconds=1))))
         self.assertFalse(has_current_complete_ai_score(dict(j,description_complete=False)))

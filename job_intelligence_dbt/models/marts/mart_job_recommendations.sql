@@ -43,6 +43,7 @@ select
     scores.seniority_fit,
     scores.industry_fit,
     scores.location_fit,
+    scores.requirement_matches,
     scores.matching_strengths,
     scores.hard_requirements_missing,
     scores.preferred_qualifications_missing,

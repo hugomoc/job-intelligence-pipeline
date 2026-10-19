@@ -157,6 +157,22 @@ Optional:
 OPENAI_MODEL=gpt-4.1-mini
 ```
 
+Optional candidate eligibility facts can also be supplied locally so the fit
+scorer does not guess about location, languages, citizenship, or sponsorship:
+
+```dotenv
+CANDIDATE_CURRENT_COUNTRY=United States
+CANDIDATE_CURRENT_REGION=<state-or-region>
+CANDIDATE_PROFESSIONAL_LANGUAGES=English,<other-language>
+CANDIDATE_CITIZENSHIP_COUNTRY_CODES=US
+CANDIDATE_AUTHORIZED_WORK_COUNTRIES=US
+CANDIDATE_REQUIRES_SPONSORSHIP=false
+```
+
+These values are overlaid at scoring time. Omitted values remain unknown, and
+an unknown personal fact is treated as review uncertainty rather than proof of
+ineligibility.
+
 The `.env` file is ignored by git.
 
 Optional browser resolver settings:
