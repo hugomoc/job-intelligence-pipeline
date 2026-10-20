@@ -10,6 +10,7 @@ from docx import Document
 
 from src import database
 from src.resume.extractor import extract_resume
+from src.scoring_run_repository import load_latest_scoring_run
 from src.score_jobs_ai import (
     load_cached_resume_text,
     save_resume_profile,
@@ -168,7 +169,106 @@ def test_prepare_new_resume_creates_profile_but_does_not_score_jobs() -> None:
             )
 
 
+def test_process_resume_upload_persists_scoring_log() -> None:
+    uploaded = build_resume_upload()
+    extracted = extract_resume(uploaded)
+
+    with TemporaryDirectory() as directory:
+        data_dir = Path(directory)
+
+        with patch.object(
+            database,
+            "DATA_DIR",
+            data_dir,
+        ), patch.object(
+            database,
+            "DATABASE_PATH",
+            data_dir / "jobs.duckdb",
+        ):
+            save_resume_profile(
+                resume_hash=extracted.resume_hash,
+                filename=extracted.filename,
+                model_name="fixture-model",
+                profile=make_profile(),
+            )
+
+            fixture_match = SimpleNamespace(
+                overall_score=85,
+                recommendation="apply",
+                analysis=SimpleNamespace(
+                    confidence="high"
+                ),
+            )
+
+            with patch.object(
+                job_recommendation_service,
+                "get_model_name",
+                return_value="fixture-model",
+            ), patch.object(
+                job_recommendation_service,
+                "screen_unscreened_jobs",
+            ), patch.object(
+                job_recommendation_service,
+                "count_cached_canonical_scores",
+                return_value=0,
+            ), patch.object(
+                job_recommendation_service,
+                "load_candidate_jobs",
+                return_value=[
+                    {
+                        "record_key": "record-1",
+                        "title": "Senior Data Engineer",
+                        "company_name": "Example Co",
+                    }
+                ],
+            ), patch.object(
+                job_recommendation_service,
+                "score_resume_against_job",
+                return_value=fixture_match,
+            ), patch.object(
+                job_recommendation_service,
+                "score_resume_against_job_openai",
+                side_effect=AssertionError(
+                    "OpenAI fallback should not be used."
+                ),
+            ), patch.object(
+                job_recommendation_service,
+                "save_job_score",
+            ) as save_score, patch.object(
+                job_recommendation_service,
+                "run_dbt_build",
+            ):
+                summary = (
+                    job_recommendation_service.process_resume_upload(
+                        uploaded_file=uploaded,
+                        limit=1,
+                        minimum_rule_score=0,
+                    )
+                )
+
+            assert summary.successful_score_count == 1
+            assert summary.gemini_score_count == 1
+            assert any(
+                "Saved score: 85% APPLY" in line
+                for line in summary.log_lines
+            )
+            save_score.assert_called_once()
+
+            latest = load_latest_scoring_run(
+                extracted.resume_hash
+            )
+            assert latest is not None
+            assert latest.workflow == "score_jobs"
+            assert latest.scores_saved == 1
+            assert latest.gemini_scores_saved == 1
+            assert any(
+                "Senior Data Engineer | Example Co" in line
+                for line in latest.log_lines
+            )
+
+
 if __name__ == "__main__":
     test_prepare_uploaded_resume_backfills_v7_text_without_scoring()
     test_prepare_new_resume_creates_profile_but_does_not_score_jobs()
+    test_process_resume_upload_persists_scoring_log()
     print("Job recommendation service tests passed.")
