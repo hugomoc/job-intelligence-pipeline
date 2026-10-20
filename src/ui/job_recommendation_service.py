@@ -44,6 +44,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 @dataclass(frozen=True)
+class PreparedResume:
+    """Resume/profile pair ready for screening or job scoring."""
+
+    resume: ExtractedResume
+    profile: ResumeProfile
+    model_name: str
+    profile_was_cached: bool
+
+
+@dataclass(frozen=True)
 class ScoringSummary:
     resume_hash: str
     filename: str
@@ -96,6 +106,42 @@ def get_or_create_resume_profile(
     )
 
     return profiled_resume.profile, False
+
+
+def prepare_resume_upload(
+    uploaded_file: Any,
+) -> PreparedResume:
+    """Extract and activate an uploaded resume without scoring any jobs."""
+    try:
+        resume = extract_resume(uploaded_file)
+        model_name = get_model_name()
+
+        initialize_ai_tables()
+
+        resume_profile, profile_was_cached = get_or_create_resume_profile(
+            resume=resume,
+            model_name=model_name,
+        )
+
+        return PreparedResume(
+            resume=resume,
+            profile=resume_profile,
+            model_name=model_name,
+            profile_was_cached=profile_was_cached,
+        )
+
+    except ResumeExtractionError:
+        raise
+
+    except Exception as error:
+        print(
+            "Unexpected resume preparation error: "
+            f"{type(error).__name__}: {error}"
+        )
+        raise JobRecommendationServiceError(
+            "The resume could not be prepared for scoring. "
+            "Please try again later."
+        ) from error
 
 
 def run_dbt_build() -> None:
@@ -159,15 +205,13 @@ def process_resume_upload(
 ) -> ScoringSummary:
     """Profile a resume and score a bounded set of eligible jobs."""
     try:
-        resume = extract_resume(uploaded_file)
-        model_name = get_model_name()
-
-        initialize_ai_tables()
-
-        resume_profile, profile_was_cached = get_or_create_resume_profile(
-            resume=resume,
-            model_name=model_name,
+        prepared = prepare_resume_upload(
+            uploaded_file
         )
+        resume = prepared.resume
+        model_name = prepared.model_name
+        resume_profile = prepared.profile
+        profile_was_cached = prepared.profile_was_cached
 
         cached_score_count = count_cached_canonical_scores(
             resume_hash=resume.resume_hash,
