@@ -454,6 +454,12 @@ def load_scoring_backlog_status(
         model_name=model_name,
     )
 
+    from src.candidate_assessments import latest_candidate_resume
+    from src import database
+    if selected_resume_hash:
+        with database.get_connection() as connection:
+            selected_resume_hash = latest_candidate_resume(connection, selected_resume_hash)
+
     if selected_resume_hash is None:
         return ScoringBacklogStatus(
             resume_hash=None,

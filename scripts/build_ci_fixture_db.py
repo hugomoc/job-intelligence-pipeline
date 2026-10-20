@@ -11,6 +11,7 @@ import duckdb
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_OWNERS = (
+    ("src/candidate_assessments.py", "initialize"),
     ("src/database.py", "initialize_database"),
     ("src/score_jobs.py", "initialize_match_table"),
     ("src/score_jobs_ai.py", "initialize_ai_tables"),

@@ -120,6 +120,7 @@ def get_or_create_resume_profile(
 
 def prepare_resume_upload(
     uploaded_file: Any,
+    candidate_id: str | None = None,
 ) -> PreparedResume:
     """Extract and activate an uploaded resume without scoring any jobs."""
     try:
@@ -128,10 +129,35 @@ def prepare_resume_upload(
 
         initialize_ai_tables()
 
+        from src import database
+        from src.candidate_assessments import tables_exist, candidate_for_resume, CandidateIdentityError
+        with database.get_connection() as connection:
+            if tables_exist(connection) and connection.execute('SELECT count(*) FROM candidates').fetchone()[0]:
+                existing_owner = candidate_for_resume(connection, resume.resume_hash)
+                candidate_id = candidate_id or existing_owner
+                if existing_owner and existing_owner != candidate_id:
+                    raise CandidateIdentityError('Resume belongs to a different registered candidate')
+                if not candidate_id:
+                    raise CandidateIdentityError('Confirm which registered candidate owns this resume before profiling')
+                if not connection.execute('SELECT 1 FROM candidates WHERE candidate_id=?',[candidate_id]).fetchone():
+                    raise CandidateIdentityError('Unknown candidate')
+
         resume_profile, profile_was_cached = get_or_create_resume_profile(
             resume=resume,
             model_name=model_name,
         )
+
+        if candidate_id:
+            from src import database
+            from src.candidate_assessments import associate_resume
+            with database.get_connection() as connection:
+                connection.execute('BEGIN TRANSACTION')
+                try:
+                    associate_resume(connection, candidate_id, resume.resume_hash, confirmed=True)
+                    connection.execute('COMMIT')
+                except BaseException:
+                    connection.execute('ROLLBACK')
+                    raise
 
         return PreparedResume(
             resume=resume,
@@ -202,10 +228,11 @@ def process_resume_upload(
     uploaded_file: Any,
     limit: int,
     minimum_rule_score: int,
+    candidate_id: str | None = None,
 ) -> ScoringSummary:
     """Profile a resume, score a bounded set, and persist the scoring log."""
     prepared = prepare_resume_upload(
-        uploaded_file
+        uploaded_file, candidate_id=candidate_id
     )
     resume = prepared.resume
     model_name = prepared.model_name
@@ -273,130 +300,135 @@ def process_resume_upload(
                 candidate_jobs,
                 start=1,
             ):
-                title = job.get("title") or "Untitled job"
-                company = (
-                    job.get("company_name")
-                    or "Unknown company"
-                )
-                print(
-                    f"Scoring {index}/{len(candidate_jobs)}: "
-                    f"{title} | {company}"
-                )
-
-                try:
-                    if use_openai_fallback:
-                        match = score_resume_against_job_openai(
-                            resume_profile=resume_profile,
-                            resume_text=resume.text,
-                            job=job,
-                            model_name=get_openai_model_name(),
-                        )
-                    else:
-                        match = score_resume_against_job(
-                            resume_profile=resume_profile,
-                            resume_text=resume.text,
-                            job=job,
-                            model_name=model_name,
-                        )
-
-                except ResumeMatcherError as error:
-                    provider = (
-                        "OpenAI"
-                        if use_openai_fallback
-                        else "Gemini"
+                from src.candidate_assessments import scoring_claim
+                with scoring_claim(resume.resume_hash, job) as acquired:
+                    if not acquired:
+                        print("Skipped: candidate already scored or another scoring run owns this job.")
+                        continue
+                    title = job.get("title") or "Untitled job"
+                    company = (
+                        job.get("company_name")
+                        or "Unknown company"
                     )
-                    log_scoring_failure(
-                        job,
-                        index,
-                        len(candidate_jobs),
-                        provider,
-                        error,
+                    print(
+                        f"Scoring {index}/{len(candidate_jobs)}: "
+                        f"{title} | {company}"
                     )
 
-                    if (
-                        not use_openai_fallback
-                        and is_gemini_quota_exhausted(error)
-                    ):
-                        quota_exhausted = True
-                        print(
-                            "Gemini daily quota is exhausted. "
-                            "Switching to OpenAI fallback."
-                        )
-                        use_openai_fallback = True
-
-                        try:
+                    try:
+                        if use_openai_fallback:
                             match = score_resume_against_job_openai(
                                 resume_profile=resume_profile,
                                 resume_text=resume.text,
                                 job=job,
                                 model_name=get_openai_model_name(),
                             )
-                        except ResumeMatcherError as fallback_error:
-                            log_scoring_failure(
-                                job,
-                                index,
-                                len(candidate_jobs),
-                                "OpenAI",
-                                fallback_error,
+                        else:
+                            match = score_resume_against_job(
+                                resume_profile=resume_profile,
+                                resume_text=resume.text,
+                                job=job,
+                                model_name=model_name,
                             )
-                            failed_score_count += 1
 
-                            if is_openai_quota_exhausted(
-                                fallback_error
-                            ):
-                                print(
-                                    "OpenAI quota is exhausted. "
-                                    "Stopping the remaining scoring requests."
+                    except ResumeMatcherError as error:
+                        provider = (
+                            "OpenAI"
+                            if use_openai_fallback
+                            else "Gemini"
+                        )
+                        log_scoring_failure(
+                            job,
+                            index,
+                            len(candidate_jobs),
+                            provider,
+                            error,
+                        )
+
+                        if (
+                            not use_openai_fallback
+                            and is_gemini_quota_exhausted(error)
+                        ):
+                            quota_exhausted = True
+                            print(
+                                "Gemini daily quota is exhausted. "
+                                "Switching to OpenAI fallback."
+                            )
+                            use_openai_fallback = True
+
+                            try:
+                                match = score_resume_against_job_openai(
+                                    resume_profile=resume_profile,
+                                    resume_text=resume.text,
+                                    job=job,
+                                    model_name=get_openai_model_name(),
                                 )
-                                break
+                            except ResumeMatcherError as fallback_error:
+                                log_scoring_failure(
+                                    job,
+                                    index,
+                                    len(candidate_jobs),
+                                    "OpenAI",
+                                    fallback_error,
+                                )
+                                failed_score_count += 1
 
+                                if is_openai_quota_exhausted(
+                                    fallback_error
+                                ):
+                                    print(
+                                        "OpenAI quota is exhausted. "
+                                        "Stopping the remaining scoring requests."
+                                    )
+                                    break
+
+                                continue
+
+                            save_job_score(
+                                resume_hash=resume.resume_hash,
+                                match=match,
+                            )
+                            successful_score_count += 1
+                            openai_score_count += 1
+                            print(
+                                "Saved fallback score: "
+                                f"{match.overall_score}% "
+                                f"{match.recommendation.upper()} "
+                                f"({match.analysis.confidence} confidence)"
+                            )
                             continue
 
-                        save_job_score(
-                            resume_hash=resume.resume_hash,
-                            match=match,
-                        )
-                        successful_score_count += 1
-                        openai_score_count += 1
-                        print(
-                            "Saved fallback score: "
-                            f"{match.overall_score}% "
-                            f"{match.recommendation.upper()} "
-                            f"({match.analysis.confidence} confidence)"
-                        )
+                        if (
+                            use_openai_fallback
+                            and is_openai_quota_exhausted(error)
+                        ):
+                            failed_score_count += 1
+                            print(
+                                "OpenAI quota is exhausted. "
+                                "Stopping the remaining scoring requests."
+                            )
+                            break
+
+                        failed_score_count += 1
                         continue
 
-                    if (
-                        use_openai_fallback
-                        and is_openai_quota_exhausted(error)
-                    ):
-                        failed_score_count += 1
-                        print(
-                            "OpenAI quota is exhausted. "
-                            "Stopping the remaining scoring requests."
-                        )
-                        break
+                    save_job_score(
+                        resume_hash=resume.resume_hash,
+                        match=match,
+                    )
+                    successful_score_count += 1
 
-                    failed_score_count += 1
-                    continue
+                    if use_openai_fallback:
+                        openai_score_count += 1
+                    else:
+                        gemini_score_count += 1
 
-                save_job_score(
-                    resume_hash=resume.resume_hash,
-                    match=match,
-                )
-                successful_score_count += 1
-
-                if use_openai_fallback:
-                    openai_score_count += 1
-                else:
-                    gemini_score_count += 1
-
-                print(
-                    "Saved score: "
-                    f"{match.overall_score}% "
-                    f"{match.recommendation.upper()} "
-                    f"({match.analysis.confidence} confidence)"
-                )
+                    print(
+                        "Saved score: "
+                        f"{match.overall_score}% "
+                        f"{match.recommendation.upper()} "
+                        f"({match.analysis.confidence} confidence)"
+                    )
 
             if successful_score_count:
                 print("Refreshing dbt analytics...")
@@ -495,3 +527,35 @@ def process_resume_upload(
             "Please try again later."
         ) from error
 
+
+
+def rescore_saved_job(record_key: str, resume_hash: str) -> None:
+    """Explicit single-job action; failure leaves the previous active assessment intact."""
+    from src import database
+    from src.candidate_assessments import candidate_for_resume, latest_candidate_resume, scoring_claim
+    from src.score_jobs_ai import load_cached_resume_text
+    with database.get_connection() as c:
+        resume_hash = latest_candidate_resume(c, resume_hash)
+        if not candidate_for_resume(c, resume_hash):
+            raise JobRecommendationServiceError('Register the candidate before manual rescoring')
+        cur = c.execute('SELECT * FROM raw_jobs WHERE record_key=?', [record_key])
+        names = [x[0] for x in cur.description]
+        row = cur.fetchone()
+        if row is None:
+            raise JobRecommendationServiceError('Job no longer exists')
+        job = dict(zip(names, row))
+    profile = load_cached_profile(resume_hash, get_model_name())
+    text = load_cached_resume_text(resume_hash)
+    if profile is None or text is None:
+        raise JobRecommendationServiceError('Cached resume text and profile are required')
+    with scoring_claim(resume_hash, job, manual=True) as acquired:
+        if not acquired:
+            raise JobRecommendationServiceError('Another scoring run already owns this job')
+        try:
+            match = score_resume_against_job(profile, job, resume_text=text, model_name=get_model_name())
+        except ResumeMatcherError as exc:
+            log_scoring_failure(job, 1, 1, 'Gemini', exc)
+            if not (is_gemini_daily_quota_error(exc) or 'PERMISSION_DENIED' in str(exc) or 'denied access' in str(exc).casefold()):
+                raise
+            match = score_resume_against_job_openai(profile, job, resume_text=text, model_name=get_openai_model_name())
+        save_job_score(resume_hash=resume_hash, match=match)

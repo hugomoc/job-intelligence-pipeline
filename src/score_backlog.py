@@ -116,6 +116,10 @@ def score_backlog(
         model_name=model_name,
     )
 
+    from src.candidate_assessments import latest_candidate_resume
+    with get_connection() as connection:
+        selected_resume_hash = latest_candidate_resume(connection, selected_resume_hash)
+
     if selected_resume_hash is None:
         raise ValueError(
             "No cached resume profile was found. Upload a resume in "
@@ -202,122 +206,127 @@ def score_backlog(
     use_openai_fallback = False
 
     for index, job in enumerate(candidate_jobs, start=1):
-        title = job.get("title") or "Untitled job"
-        company = job.get("company_name") or "Unknown company"
+        from src.candidate_assessments import scoring_claim
+        with scoring_claim(selected_resume_hash, job) as acquired:
+            if not acquired:
+                print("Skipped: candidate already scored or another scoring run owns this job.")
+                continue
+            title = job.get("title") or "Untitled job"
+            company = job.get("company_name") or "Unknown company"
 
-        print(
-            f"Scoring {index}/{len(candidate_jobs)}: "
-            f"{title} | {company}"
-        )
+            print(
+                f"Scoring {index}/{len(candidate_jobs)}: "
+                f"{title} | {company}"
+            )
 
-        try:
-            if use_openai_fallback:
-                match = score_resume_against_job_openai(
-                    resume_profile=resume_profile,
-                    resume_text=resume_text,
-                    job=job,
-                    model_name=get_openai_model_name(),
-                )
-            else:
-                match = score_resume_against_job(
-                    resume_profile=resume_profile,
-                    resume_text=resume_text,
-                    job=job,
-                    model_name=model_name,
-                )
-
-        except ResumeMatcherError as error:
-            log_scoring_failure(job, index, len(candidate_jobs),
-                                "OpenAI" if use_openai_fallback else "Gemini", error)
-
-            if should_switch_to_openai(error):
-                if is_quota_exhausted(error):
-                    quota_exhausted = True
-                    print(
-                        "Gemini quota is exhausted. "
-                        "Switching to OpenAI fallback."
-                    )
-                else:
-                    print(
-                        "Gemini is unavailable for scoring. "
-                        "Switching to OpenAI fallback."
-                    )
-
-                use_openai_fallback = True
-
-                try:
+            try:
+                if use_openai_fallback:
                     match = score_resume_against_job_openai(
                         resume_profile=resume_profile,
                         resume_text=resume_text,
                         job=job,
                         model_name=get_openai_model_name(),
                     )
-
-                except ResumeMatcherError as fallback_error:
-                    log_scoring_failure(job, index, len(candidate_jobs), "OpenAI", fallback_error)
-                    jobs_failed += 1
-                    print(
-                        "OpenAI fallback also failed for this job."
+                else:
+                    match = score_resume_against_job(
+                        resume_profile=resume_profile,
+                        resume_text=resume_text,
+                        job=job,
+                        model_name=model_name,
                     )
 
-                    if is_openai_quota_exhausted(
-                        fallback_error
-                    ):
+            except ResumeMatcherError as error:
+                log_scoring_failure(job, index, len(candidate_jobs),
+                                    "OpenAI" if use_openai_fallback else "Gemini", error)
+
+                if should_switch_to_openai(error):
+                    if is_quota_exhausted(error):
+                        quota_exhausted = True
                         print(
-                            "OpenAI quota is exhausted. "
-                            "Stopping the remaining backlog scoring requests."
+                            "Gemini quota is exhausted. "
+                            "Switching to OpenAI fallback."
                         )
-                        break
+                    else:
+                        print(
+                            "Gemini is unavailable for scoring. "
+                            "Switching to OpenAI fallback."
+                        )
+
+                    use_openai_fallback = True
+
+                    try:
+                        match = score_resume_against_job_openai(
+                            resume_profile=resume_profile,
+                            resume_text=resume_text,
+                            job=job,
+                            model_name=get_openai_model_name(),
+                        )
+
+                    except ResumeMatcherError as fallback_error:
+                        log_scoring_failure(job, index, len(candidate_jobs), "OpenAI", fallback_error)
+                        jobs_failed += 1
+                        print(
+                            "OpenAI fallback also failed for this job."
+                        )
+
+                        if is_openai_quota_exhausted(
+                            fallback_error
+                        ):
+                            print(
+                                "OpenAI quota is exhausted. "
+                                "Stopping the remaining backlog scoring requests."
+                            )
+                            break
+
+                        continue
+
+                    save_job_score(
+                        resume_hash=selected_resume_hash,
+                        match=match,
+                    )
+                    scores_saved += 1
+                    openai_scores_saved += 1
+
+                    print(
+                        "Saved fallback score: "
+                        f"{match.overall_score}% "
+                        f"{match.recommendation.upper()} "
+                        f"({match.analysis.confidence} confidence)"
+                    )
 
                     continue
 
-                save_job_score(
-                    resume_hash=selected_resume_hash,
-                    match=match,
-                )
-                scores_saved += 1
-                openai_scores_saved += 1
+                if (
+                    use_openai_fallback
+                    and is_openai_quota_exhausted(error)
+                ):
+                    jobs_failed += 1
+                    print(
+                        "OpenAI quota is exhausted. "
+                        "Stopping the remaining backlog scoring requests."
+                    )
+                    break
 
-                print(
-                    "Saved fallback score: "
-                    f"{match.overall_score}% "
-                    f"{match.recommendation.upper()} "
-                    f"({match.analysis.confidence} confidence)"
-                )
-
+                jobs_failed += 1
                 continue
 
-            if (
-                use_openai_fallback
-                and is_openai_quota_exhausted(error)
-            ):
-                jobs_failed += 1
-                print(
-                    "OpenAI quota is exhausted. "
-                    "Stopping the remaining backlog scoring requests."
-                )
-                break
+            save_job_score(
+                resume_hash=selected_resume_hash,
+                match=match,
+            )
+            scores_saved += 1
 
-            jobs_failed += 1
-            continue
+            if use_openai_fallback:
+                openai_scores_saved += 1
+            else:
+                gemini_scores_saved += 1
 
-        save_job_score(
-            resume_hash=selected_resume_hash,
-            match=match,
-        )
-        scores_saved += 1
-
-        if use_openai_fallback:
-            openai_scores_saved += 1
-        else:
-            gemini_scores_saved += 1
-
-        print(
-            "Saved score: "
-            f"{match.overall_score}% "
-            f"{match.recommendation.upper()} "
-            f"({match.analysis.confidence} confidence)"
-        )
+            print(
+                "Saved score: "
+                f"{match.overall_score}% "
+                f"{match.recommendation.upper()} "
+                f"({match.analysis.confidence} confidence)"
+            )
 
     dbt_was_run = False
 
