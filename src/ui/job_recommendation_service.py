@@ -303,10 +303,12 @@ def process_resume_upload(
             print(f"Eligibility screening failures: {screening_failures}")
             use_openai_fallback = False
 
+            last_position = 0
             for index, job in enumerate(
                 candidate_jobs,
                 start=1,
             ):
+                last_position = index
                 from src.candidate_assessments import scoring_claim
                 if screening_failed_for_job(screening_summary, job):
                     jobs_skipped += 1
@@ -444,6 +446,9 @@ def process_resume_upload(
                         f"({match.analysis.confidence} confidence)"
                     )
 
+            for index, job in enumerate(candidate_jobs[last_position:], start=last_position+1):
+                jobs_skipped += 1
+                log_scoring_skip(job,index,len(candidate_jobs),"not_attempted_provider_stop")
             print(f"Scoring outcomes: selected={len(candidate_jobs)}; saved={successful_score_count}; failed={failed_score_count}; skipped={jobs_skipped}; screening_failures={screening_failures}")
             if successful_score_count:
                 print("Refreshing dbt analytics...")

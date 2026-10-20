@@ -262,6 +262,21 @@ class ScreeningAndProviderGuards(unittest.TestCase):
         for message in ['Invalid score: 503','Response preview: ServerError: 503 UNAVAILABLE','A current FULL_JD is required','OpenAI API error: HTTP 503 service unavailable']:
             self.assertFalse(backlog.should_switch_to_openai(matcher.ResumeMatcherError(message)))
 
+    def test_upload_provider_stop_accounts_for_unattempted_positions(self):
+        from src.ui import job_recommendation_service as service
+        def run():
+            initialize_ai_tables()
+            prepared=SimpleNamespace(resume=SimpleNamespace(resume_hash='fixture',filename='fixture.docx',text='synthetic resume',word_count=100,page_count=1),profile=object(),model_name='fixture',profile_was_cached=True)
+            jobs=[dict(record_key='job-'+str(i),title='Data Engineer',canonical_job_key='exact-'+str(i)) for i in range(3)]
+            replacements=dict(prepare_resume_upload=Mock(return_value=prepared),start_scoring_run=Mock(return_value='run'),finish_scoring_run=Mock(),count_cached_canonical_scores=Mock(return_value=0),screen_unscreened_jobs=Mock(return_value=SimpleNamespace(screened=0)),load_candidate_jobs=Mock(return_value=jobs),score_resume_against_job=Mock(side_effect=matcher.ResumeMatcherError('429 RESOURCE_EXHAUSTED GenerateRequestsPerDay quota exceeded')),score_resume_against_job_openai=Mock(side_effect=matcher.ResumeMatcherError('OpenAI insufficient_quota')),run_dbt_build=Mock())
+            with patch.multiple(service,**replacements),redirect_stdout(io.StringIO()):
+                summary=service.process_resume_upload(object(),3,0)
+            self.assertEqual((summary.candidate_count,summary.failed_score_count,summary.jobs_skipped),(3,1,2))
+            text='\n'.join(summary.log_lines)
+            self.assertIn('Position: 2/3',text);self.assertIn('Position: 3/3',text)
+            self.assertIn('not_attempted_provider_stop',text)
+        with_temp_review_database(run)
+
     def test_81_positions_reconcile_and_skip_logs_have_identity(self):
         def run():
             initialize_ai_tables()
