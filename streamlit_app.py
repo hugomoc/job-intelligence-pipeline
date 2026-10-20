@@ -18,7 +18,7 @@ from src.repositories.recommendation_repository import (
     load_pipeline_operation_metrics,
     update_application_status,
 )
-from src.resume.extractor import ResumeExtractionError
+from src.resume.extractor import ResumeExtractionError, create_resume_hash
 from src.ui.daily_workflow_service import (
     DailyWorkflowError,
     load_scoring_backlog_status,
@@ -28,6 +28,7 @@ from src.ui.daily_workflow_service import (
 )
 from src.ui.job_recommendation_service import (
     JobRecommendationServiceError,
+    prepare_resume_upload,
     process_resume_upload,
 )
 from src.ui.job_links import select_job_open_target
@@ -626,7 +627,101 @@ uploaded_file = st.file_uploader(
     accept_multiple_files=False,
 )
 
-if uploaded_file and st.button("Score jobs", type="primary"):
+resume_preparation_succeeded = True
+score_uploaded_clicked = False
+
+if uploaded_file:
+    score_uploaded_clicked = st.button(
+        "Score jobs",
+        type="primary",
+    )
+
+    uploaded_resume_hash = create_resume_hash(
+        uploaded_file.getvalue()
+    )
+
+    if not score_uploaded_clicked:
+        try:
+            if (
+                st.session_state.get("prepared_resume_hash")
+                != uploaded_resume_hash
+            ):
+                with st.status(
+                    "Preparing resume...",
+                    expanded=False,
+                ) as status:
+                    prepared_resume = prepare_resume_upload(
+                        uploaded_file
+                    )
+                    status.update(
+                        label="Resume ready for scoring",
+                        state="complete",
+                    )
+
+                if (
+                    st.session_state.get("resume_hash")
+                    != prepared_resume.resume.resume_hash
+                ):
+                    invalidate_data(
+                        st.session_state,
+                        "uploaded resume changed",
+                    )
+
+                st.session_state["resume_hash"] = (
+                    prepared_resume.resume.resume_hash
+                )
+                st.session_state["prepared_resume_hash"] = (
+                    prepared_resume.resume.resume_hash
+                )
+
+                render_scoring_backlog_status(
+                    placeholder=backlog_status_placeholder,
+                    resume_hash=st.session_state.get("resume_hash"),
+                    minimum_rule_score=int(daily_minimum_rule_score),
+                )
+
+            elif (
+                st.session_state.get("resume_hash")
+                != uploaded_resume_hash
+            ):
+                invalidate_data(
+                    st.session_state,
+                    "uploaded resume reactivated",
+                )
+                st.session_state["resume_hash"] = (
+                    uploaded_resume_hash
+                )
+                render_scoring_backlog_status(
+                    placeholder=backlog_status_placeholder,
+                    resume_hash=st.session_state.get("resume_hash"),
+                    minimum_rule_score=int(daily_minimum_rule_score),
+                )
+
+            st.caption(
+                "Uploaded resume is active for backlog scoring."
+            )
+
+        except ResumeExtractionError:
+            resume_preparation_succeeded = False
+            st.error(
+                "The resume could not be read. "
+                "Please upload a readable PDF or DOCX."
+            )
+
+        except JobRecommendationServiceError:
+            resume_preparation_succeeded = False
+            st.error(
+                "The resume could not be prepared for scoring. "
+                "Please try again later."
+            )
+
+        except Exception:
+            resume_preparation_succeeded = False
+            st.error(
+                "Something went wrong while preparing the resume."
+            )
+
+if uploaded_file and score_uploaded_clicked:
     try:
         with st.status("Processing resume...", expanded=True) as status:
             result = process_resume_upload(
@@ -652,6 +747,7 @@ if uploaded_file and st.button("Score jobs", type="primary"):
             invalidate_data(st.session_state, "scoring/resume changed")
         actionability_requested = True
         st.session_state["resume_hash"] = result.resume_hash
+        st.session_state["prepared_resume_hash"] = result.resume_hash
         st.session_state["show_saved_jobs"] = True
         render_scoring_backlog_status(
             placeholder=backlog_status_placeholder,
@@ -759,10 +855,13 @@ if enrich_descriptions_clicked or (run_daily_clicked and ingestion_succeeded):
         invalidate_data(st.session_state, "pipeline workflow error; possible partial writes")
         st.error("Job descriptions could not be enriched. Please try again later.")
 
-if score_backlog_clicked or (
-    run_daily_clicked
-    and ingestion_succeeded
-    and enrichment_succeeded
+if resume_preparation_succeeded and (
+    score_backlog_clicked
+    or (
+        run_daily_clicked
+        and ingestion_succeeded
+        and enrichment_succeeded
+    )
 ):
     try:
         with st.status("Scoring unscored jobs...", expanded=True) as status:
