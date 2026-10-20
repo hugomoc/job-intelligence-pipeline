@@ -326,18 +326,9 @@ def render_job_listing(job: dict) -> None:
 
         with header_right:
             if job.get("ai_score") is not None:
-                recommendation = str(
-                    job.get("recommendation") or ""
-                ).lower()
                 st.metric(
-                    STATUS_LABELS.get(
-                        recommendation,
-                        "AI",
-                    ),
+                    "AI fit",
                     f"{job['ai_score']}%",
-                )
-                st.caption(
-                    f"Confidence: {job.get('confidence')}"
                 )
             else:
                 st.caption(pipeline_state.label)
@@ -520,64 +511,6 @@ def render_job_listing(job: dict) -> None:
                     st.caption(
                         "Official validation: "
                         f"{job['official_url_validation_reason']}"
-                    )
-
-        if job.get("ai_score") is not None:
-            score_cols = st.columns(6)
-            score_cols[0].metric("Title", job["title_fit"])
-            score_cols[1].metric("Skills", job["skills_fit"])
-            score_cols[2].metric("Experience", job["experience_fit"])
-            score_cols[3].metric("Seniority", job["seniority_fit"])
-            score_cols[4].metric("Industry", job["industry_fit"])
-            score_cols[5].metric("Location", job["location_fit"])
-
-            if job.get("summary"):
-                st.markdown(job["summary"])
-
-            requirement_matches = job.get("requirement_matches") or []
-
-            if requirement_matches:
-                st.markdown("#### How your experience matches")
-                st.dataframe(
-                    [
-                        {
-                            "Job requirement": row["job_requirement"],
-                            "Your background": row["candidate_background"],
-                            "Match": row["match"].title(),
-                        }
-                        for row in requirement_matches
-                    ],
-                    hide_index=True,
-                    use_container_width=True,
-                )
-
-            with st.expander("More details"):
-                detail_tabs = st.tabs(
-                    ["Strengths", "Missing", "Risks"]
-                )
-
-                with detail_tabs[0]:
-                    render_list(
-                        "Strengths",
-                        job["matching_strengths"],
-                    )
-
-                with detail_tabs[1]:
-                    missing_items = (
-                        job["hard_requirements_missing"]
-                        + job["preferred_qualifications_missing"]
-                    )
-                    render_list(
-                        "Missing qualifications",
-                        missing_items,
-                    )
-
-                with detail_tabs[2]:
-                    render_list(
-                        "Risks",
-                        remove_generic_incomplete_risks(
-                            job["risk_factors"]
-                        ),
                     )
 
 st.set_page_config(
