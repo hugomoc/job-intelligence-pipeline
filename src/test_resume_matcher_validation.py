@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from src.ai.resume_matcher import (
     MATCHER_PROMPT_VERSION,
+    FitAnalysis,
     JobMatchAnalysis,
     RequirementMatch,
     ResumeMatcherError,
@@ -11,6 +12,8 @@ from src.ai.resume_matcher import (
     build_resume_job_match,
     get_openai_job_match_schema,
     determine_recommendation,
+    fit_analysis_to_job_match_analysis,
+    fit_output_contradictions,
     validate_missing_qualifications,
 )
 from src.ai.resume_profiler import (
@@ -760,7 +763,7 @@ def test_repeated_specialization_is_treated_as_critical() -> None:
 
 
 def test_prompt_version_controls_cache_reuse() -> None:
-    assert MATCHER_PROMPT_VERSION == "v6"
+    assert MATCHER_PROMPT_VERSION == "v7"
 
     old_data_dir = database.DATA_DIR
     old_database_path = database.DATABASE_PATH
@@ -1198,9 +1201,12 @@ def test_ai_first_rejects_apply_with_missing_core_requirement() -> None:
         raise AssertionError("AI-first guardrail accepted APPLY with a core gap")
 
 
-def test_ai_first_prompt_requires_full_jd_holistic_decision() -> None:
+def test_ai_first_prompt_uses_actual_resume_and_requirements_rules() -> None:
+    profile = make_profile(
+        production_skills=["Cached profile skill that should not drive v7 scoring"],
+    )
     prompt = build_job_match_prompt(
-        make_profile(),
+        profile,
         {
             "title": "Senior BI Analyst",
             "company_name": "Example",
@@ -1212,16 +1218,123 @@ def test_ai_first_prompt_requires_full_jd_holistic_decision() -> None:
             "Responsibilities include SQL, dashboards, and Python."
         ),
         True,
+        resume_text=(
+            "ACTUAL RESUME EVIDENCE\n"
+            "Built SQL pipelines and dashboards in production."
+        ),
     )
-    assert "CORE RESPONSIBILITIES" in prompt
-    assert "required language fluency" in prompt
-    assert "HOLISTIC final fit score" in prompt
-    assert "Do not let a matching title" in prompt
-    assert "requirement_matches" in prompt
-    assert "6-10 most important requirements" in prompt
-    assert "explanatory only" in prompt
-    assert "UNKNOWN by itself must never" in prompt
-    assert "personal_eligibility contains explicit" in prompt
+
+    assert "ACTUAL RESUME EVIDENCE" in prompt
+    assert "Cached profile skill that should not drive v7 scoring" not in prompt
+    assert "WHOLE-REQUIREMENT EVIDENCE" in prompt
+    assert "GAP VS PARTIAL" in prompt
+    assert "OR / AND" in prompt
+    assert "REQUIRED VS PREFERRED" in prompt
+    assert "EQUIVALENT TECHNOLOGIES" in prompt
+    assert "WORK ARRANGEMENT" in prompt
+    assert "Do NOT include any of these in fit_score" in prompt
+    assert "SUMMARY CONSISTENCY" in prompt
+
+
+
+def test_v7_fit_score_is_used_directly_without_component_formula() -> None:
+    fit = FitAnalysis(
+        fit_score=85,
+        required_matches=[
+            "Advanced SQL",
+            "Dimensional modeling",
+        ],
+        required_partial=[
+            "Deep hands-on dbt experience",
+        ],
+        required_gaps=[],
+        preferred_matches=["Looker"],
+        preferred_partial=[],
+        preferred_gaps=["Marketplace experience"],
+        work_arrangement="Hybrid — San Francisco, CA — Tuesdays and Wednesdays",
+        summary=(
+            "Strong requirements fit; dbt depth is only partially demonstrated."
+        ),
+    )
+
+    analysis = fit_analysis_to_job_match_analysis(fit)
+
+    assert analysis.overall_score == 85
+    assert analysis.recommendation == "apply"
+    assert analysis.location_fit == 100
+    assert analysis.hard_requirements_missing == []
+    assert any(
+        "Deep hands-on dbt experience" in risk
+        for risk in analysis.risk_factors
+    )
+
+
+def test_v7_required_gap_keeps_high_score_in_review_not_apply() -> None:
+    fit = FitAnalysis(
+        fit_score=78,
+        required_matches=["SQL"],
+        required_partial=[],
+        required_gaps=["Required control-systems experience"],
+        preferred_matches=[],
+        preferred_partial=[],
+        preferred_gaps=[],
+        work_arrangement="Remote",
+        summary="Strong SQL background but a required capability is absent.",
+    )
+
+    analysis = fit_analysis_to_job_match_analysis(fit)
+
+    assert analysis.overall_score == 78
+    assert analysis.recommendation == "review"
+    assert analysis.hard_requirements_missing == [
+        "Required control-systems experience"
+    ]
+
+
+def test_v7_output_validator_catches_match_negated_by_summary() -> None:
+    fit = FitAnalysis(
+        fit_score=75,
+        required_matches=["SQL"],
+        required_partial=[],
+        required_gaps=[],
+        preferred_matches=[
+            "Start-up and healthcare experience",
+        ],
+        preferred_partial=[],
+        preferred_gaps=[],
+        work_arrangement="Remote",
+        summary=(
+            "Optional startup and healthcare experience is absent."
+        ),
+    )
+
+    contradictions = fit_output_contradictions(fit)
+
+    assert any(
+        "MATCH as absent" in item
+        for item in contradictions
+    )
+
+
+def test_v7_output_validator_allows_qualified_partial_summary() -> None:
+    fit = FitAnalysis(
+        fit_score=85,
+        required_matches=["SQL"],
+        required_partial=[
+            "Deep hands-on experience in dbt and SQL",
+        ],
+        required_gaps=[],
+        preferred_matches=[],
+        preferred_partial=[],
+        preferred_gaps=[],
+        work_arrangement="Hybrid",
+        summary=(
+            "Deep professional production-grade dbt usage is only partially "
+            "demonstrated rather than extensively proven."
+        ),
+    )
+
+    assert fit_output_contradictions(fit) == []
 
 
 def main() -> None:
@@ -1261,7 +1374,11 @@ def main() -> None:
     test_openai_schema_makes_nested_requirement_rows_strict()
     test_requirement_matches_are_explanatory_only()
     test_ai_first_rejects_apply_with_missing_core_requirement()
-    test_ai_first_prompt_requires_full_jd_holistic_decision()
+    test_ai_first_prompt_uses_actual_resume_and_requirements_rules()
+    test_v7_fit_score_is_used_directly_without_component_formula()
+    test_v7_required_gap_keeps_high_score_in_review_not_apply()
+    test_v7_output_validator_catches_match_negated_by_summary()
+    test_v7_output_validator_allows_qualified_partial_summary()
     test_incomplete_description_cannot_be_apply()
     test_incomplete_description_can_still_be_skip()
     print("Resume matcher validation tests passed.")
