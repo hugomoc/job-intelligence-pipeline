@@ -910,6 +910,8 @@ if resume_preparation_succeeded and (
             st.write(f"Gemini scores saved: {backlog_result.gemini_scores_saved}")
             st.write(f"OpenAI scores saved: {backlog_result.openai_scores_saved}")
             st.write(f"Jobs that could not be scored: {backlog_result.jobs_failed}")
+            st.write(f"Jobs skipped: {backlog_result.jobs_skipped}")
+            st.write(f"Eligibility screening failures: {backlog_result.screening_failures}")
             st.write("dbt build: " + ("run" if backlog_result.dbt_was_run else "not needed"))
             status.update(label="Scoring complete", state="complete")
             st.session_state["show_saved_jobs"] = True

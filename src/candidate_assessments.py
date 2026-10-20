@@ -146,6 +146,29 @@ def job_identities(connection, record_keys=None, *, prefer_verified=True):
     return result
 
 
+def posting_aliases(connection):
+    """Only exact source IDs can bridge a missing proof to one trusted posting."""
+    identities = job_identities(connection)
+    exact = job_identities(connection, prefer_verified=False)
+    proofs = {}
+    for key, identity in identities.items():
+        if identity.startswith('verified:'):
+            proofs.setdefault(exact[key], set()).add(identity)
+    return identities, exact, proofs
+
+
+def scoring_identity(connection, record_key):
+    identities, exact, proofs = posting_aliases(connection)
+    identity = identities.get(record_key)
+    if identity and identity.startswith('exact:'):
+        compatible = proofs.get(exact[record_key], set())
+        if len(compatible) > 1:
+            return None  # Hold an unverified sibling with competing positive proof.
+        if len(compatible) == 1:
+            return next(iter(compatible))
+    return identity
+
+
 def active_assessments(connection, candidate_id):
     if not candidate_id:
         return {}
@@ -172,17 +195,26 @@ def active_assessments(connection, candidate_id):
 def assessment_lookup(connection,candidate_id):
     active = active_assessments(connection,candidate_id)
     originals = list(active.values())
-    keys = [row['record_key'] for row in originals]
-    exact = job_identities(connection,keys,prefer_verified=False)
-    current = job_identities(connection,keys)
+    current, exact, proofs = posting_aliases(connection)
     for row in originals:
         frozen_exact = row['score'].get('_exact_posting_identity')
         key = row['record_key']
-        # A failed refresh must not erase completion for the same exact source.
-        # A different positively verified requisition must never borrow it.
-        if (frozen_exact and exact.get(key)==frozen_exact
-                and current.get(key,'').startswith('exact:')):
+        if not frozen_exact or exact.get(key) != frozen_exact:
+            continue
+        known = proofs.get(frozen_exact, set())
+        identity = row['job_identity']
+        # Never bridge competing positive requisitions, or an assessment whose
+        # source now positively identifies a different verified posting.
+        if len(known) > 1 or (identity.startswith('verified:') and known - {identity}):
+            continue
+        if identity.startswith('verified:'):
+            # Prefer the established verified assessment over an accidental
+            # exact-scope duplicate; no persisted pointer or history is changed.
             active[frozen_exact] = row
+        elif current.get(key, '').startswith('exact:'):
+            active.setdefault(frozen_exact, row)
+        if len(known) == 1:
+            active.setdefault(next(iter(known)), row)
     return active
 
 def completed_record_keys(connection, resume_hash):
@@ -231,6 +263,10 @@ def assessment_complete(score):
 def append_assessment(connection,candidate_id,identity,score,*,manual=False,origin=None,imported_key=None):
     if not assessment_complete(score):
         raise AssessmentConflict('Incomplete assessment cannot become authoritative')
+    if not manual:
+        completed = assessment_lookup(connection, candidate_id).get(identity)
+        if completed:
+            return completed['assessment_id'], False
     current = connection.execute('SELECT assessment_id FROM candidate_active_assessments WHERE candidate_id=? AND job_identity=?',[candidate_id,identity]).fetchone()
     if current and not manual:
         return current[0],False
@@ -247,7 +283,7 @@ def append_assessment(connection,candidate_id,identity,score,*,manual=False,orig
 
 
 @contextmanager
-def scoring_claim(resume_hash,job,*,manual=False):
+def scoring_claim(resume_hash,job,*,manual=False,details=None):
     """Atomic claim before providers; no time-based automatic retry of a live claim."""
     token = None
     candidate = None
@@ -255,11 +291,24 @@ def scoring_claim(resume_hash,job,*,manual=False):
     with database.get_connection() as c:
         candidate = candidate_for_resume(c,resume_hash)
         if candidate:
-            identity = job_identities(c,[job['record_key']]).get(job['record_key'])
-            if identity is None:
+            identity = scoring_identity(c, job['record_key'])
+            if details is not None:
+                details.update(identity=identity, exact_identity=job_identities(c, [job['record_key']], prefer_verified=False).get(job['record_key']))
+            if identity is None and not job_identities(c,[job['record_key']],prefer_verified=False).get(job['record_key']):
                 raise AssessmentConflict('Job has no exact identity')
-            if not manual and identity in assessment_lookup(c,candidate):
+            from src.repositories.recommendation_repository import automatic_statuses
+            if identity is None:
                 yield_value = False
+                if details is not None:
+                    details['reason'] = 'conflicting_verified_posting_evidence'
+            elif not manual and automatic_statuses(c, [job['record_key']]).get(job['record_key'], 'new') != 'new':
+                yield_value = False
+                if details is not None:
+                    details['reason'] = 'application_status_already_handled'
+            elif not manual and identity in assessment_lookup(c,candidate):
+                yield_value = False
+                if details is not None:
+                    details['reason'] = 'candidate_already_completed'
             else:
                 token = str(uuid.uuid4())
                 try:
@@ -270,6 +319,25 @@ def scoring_claim(resume_hash,job,*,manual=False):
                         raise
                     token = None
                 yield_value = token is not None
+                if not yield_value and details is not None:
+                    details['reason'] = 'claimed_by_another_run'
+                if token and not manual:
+                    # A competing worker can finish and release its claim
+                    # between our initial lookup and INSERT. Recheck while
+                    # owning the unique claim, before any provider is called.
+                    reason = None
+                    if identity in assessment_lookup(c, candidate):
+                        reason = 'candidate_already_completed'
+                    elif automatic_statuses(c, [job['record_key']]).get(job['record_key'], 'new') != 'new':
+                        reason = 'application_status_already_handled'
+                    elif scoring_identity(c, job['record_key']) != identity:
+                        reason = 'posting_identity_changed_before_scoring'
+                    if reason:
+                        c.execute('DELETE FROM candidate_scoring_claims WHERE token=?', [token])
+                        token = None
+                        yield_value = False
+                        if details is not None:
+                            details['reason'] = reason
         else:
             yield_value = True # Unmigrated legacy callers retain existing behavior.
     try:
@@ -285,12 +353,12 @@ def persist_score(connection,resume_hash,score):
     candidate = candidate_for_resume(connection,resume_hash)
     if not candidate:
         return None
-    identity = job_identities(connection,[score['record_key']]).get(score['record_key'])
+    identity = scoring_identity(connection, score['record_key'])
     claim = connection.execute('SELECT manual FROM candidate_scoring_claims WHERE candidate_id=? AND job_identity=?',[candidate,identity]).fetchone()
     if not claim:
         raise AssessmentConflict('Candidate scoring requires an explicit scoring claim')
     if claim[0]:
-        active = active_assessments(connection,candidate).get(identity)
+        active = assessment_lookup(connection,candidate).get(identity)
         if active and active['job_identity'] != identity:
             connection.execute('DELETE FROM candidate_active_assessments WHERE candidate_id=? AND job_identity=?',[candidate,active['job_identity']])
     return append_assessment(connection,candidate,identity,score,manual=claim[0])

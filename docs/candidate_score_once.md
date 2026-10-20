@@ -64,3 +64,28 @@ failure rolls back. Keep the backup. Never run scoring as part of migration.
 The initial implementation is a local application, not an authentication or
 multi-tenant access-control system. Candidate IDs isolate score queries; this
 must not be presented as remote-user authorization.
+
+## Automatic queue safeguards
+
+A compatible exact source-posting alias reuses a completed verified assessment.
+Claims use the unique trusted verified scope even when the selected raw sibling
+has no verification metadata. Competing positive requisitions never share an
+assessment; an unverified sibling with conflicting proof is held. Existing
+assessment rows and active pointers are not consolidated or promoted by lookup.
+
+Automatic selectors use the display's exact-status-first, trusted-verified-status
+fallback, including explicit New overrides. Applied and Removed openings are
+excluded before queue limits. A claim rechecks status before provider calls.
+
+Failed eligibility screens are reported with sanitized reasons and record keys,
+and held out of the current execution. They are not cached as completed decisions;
+a later controlled run can retry them. Genuinely unscreened jobs retain their
+existing admission policy. Screening failure counts are separate from fit-score
+failure counts. Selected fit-scoring positions reconcile to saved, failed and
+skipped outcomes, with identity and reason recorded for skips and unattempted
+positions after a provider stop.
+
+After the existing bounded Gemini score-request retries exhaust HTTP 503,
+the existing OpenAI fallback may take over. Validation/policy errors and generic
+minute-rate-limit errors do not trigger that switch. No prompts, weights,
+requirement rules, historical evidence or retry limits change.

@@ -29,13 +29,13 @@ from src.ai.resume_profiler import (
     profile_resume,
 )
 from src.resume.extractor import ExtractedResume, ResumeExtractionError, extract_resume
-from src.job_screening import screen_unscreened_jobs
+from src.job_screening import screen_unscreened_jobs, screening_failed_for_job
 from src.repositories.recommendation_repository import (
     count_cached_canonical_scores,
     load_candidate_jobs,
     load_recommendations,
 )
-from src.scoring_diagnostics import log_scoring_failure
+from src.scoring_diagnostics import log_scoring_failure, log_scoring_skip, exhausted_gemini_503, log_job_identity
 from src.scoring_run_repository import (
     finish_scoring_run,
     start_scoring_run,
@@ -79,6 +79,8 @@ class ScoringSummary:
     new_score_count: int
     dbt_was_run: bool
     log_lines: tuple[str, ...] = ()
+    jobs_skipped: int = 0
+    screening_failures: int = 0
 
 
 class JobRecommendationServiceError(Exception):
@@ -264,6 +266,8 @@ def process_resume_upload(
     openai_score_count = 0
     cached_score_count = 0
     candidate_jobs: list[dict[str, Any]] = []
+    jobs_skipped = 0
+    screening_failures = 0
     quota_exhausted = False
     dbt_was_run = False
 
@@ -278,7 +282,7 @@ def process_resume_upload(
                 reuse_any_model=True,
             )
 
-            screen_unscreened_jobs(
+            screening_summary = screen_unscreened_jobs(
                 resume_hash=resume.resume_hash,
                 resume_profile=resume_profile,
                 limit=limit,
@@ -294,6 +298,9 @@ def process_resume_upload(
                 reuse_any_model=True,
             )
 
+            failed_keys = getattr(screening_summary, "failed_record_keys", ())
+            screening_failures = len(failed_keys) if isinstance(failed_keys,(tuple,list,set,frozenset)) else 0
+            print(f"Eligibility screening failures: {screening_failures}")
             use_openai_fallback = False
 
             for index, job in enumerate(
@@ -301,9 +308,15 @@ def process_resume_upload(
                 start=1,
             ):
                 from src.candidate_assessments import scoring_claim
-                with scoring_claim(resume.resume_hash, job) as acquired:
+                if screening_failed_for_job(screening_summary, job):
+                    jobs_skipped += 1
+                    log_scoring_skip(job,index,len(candidate_jobs),"screening_failed_this_execution")
+                    continue
+                claim_details = {}
+                with scoring_claim(resume.resume_hash, job, details=claim_details) as acquired:
                     if not acquired:
-                        print("Skipped: candidate already scored or another scoring run owns this job.")
+                        jobs_skipped += 1
+                        log_scoring_skip(job,index,len(candidate_jobs),claim_details.get("reason", "candidate_already_completed_or_claimed"),claim_details)
                         continue
                     title = job.get("title") or "Untitled job"
                     company = (
@@ -315,6 +328,7 @@ def process_resume_upload(
                         f"{title} | {company}"
                     )
 
+                    log_job_identity(job, claim_details)
                     try:
                         if use_openai_fallback:
                             match = score_resume_against_job_openai(
@@ -347,12 +361,12 @@ def process_resume_upload(
 
                         if (
                             not use_openai_fallback
-                            and is_gemini_quota_exhausted(error)
+                            and (is_gemini_quota_exhausted(error) or exhausted_gemini_503(error))
                         ):
-                            quota_exhausted = True
+                            quota_exhausted = is_gemini_quota_exhausted(error)
                             print(
-                                "Gemini daily quota is exhausted. "
-                                "Switching to OpenAI fallback."
+                                "Gemini daily quota is exhausted. Switching to OpenAI fallback."
+                                if quota_exhausted else "Gemini service is unavailable after retries. Switching to OpenAI fallback."
                             )
                             use_openai_fallback = True
 
@@ -430,6 +444,7 @@ def process_resume_upload(
                         f"({match.analysis.confidence} confidence)"
                     )
 
+            print(f"Scoring outcomes: selected={len(candidate_jobs)}; saved={successful_score_count}; failed={failed_score_count}; skipped={jobs_skipped}; screening_failures={screening_failures}")
             if successful_score_count:
                 print("Refreshing dbt analytics...")
                 run_dbt_build()
@@ -455,6 +470,8 @@ def process_resume_upload(
             gemini_score_count=gemini_score_count,
             openai_score_count=openai_score_count,
             new_score_count=successful_score_count,
+            jobs_skipped=jobs_skipped,
+            screening_failures=screening_failures,
             dbt_was_run=dbt_was_run,
             log_lines=log_lines,
         )
@@ -555,7 +572,7 @@ def rescore_saved_job(record_key: str, resume_hash: str) -> None:
             match = score_resume_against_job(profile, job, resume_text=text, model_name=get_model_name())
         except ResumeMatcherError as exc:
             log_scoring_failure(job, 1, 1, 'Gemini', exc)
-            if not (is_gemini_daily_quota_error(exc) or 'PERMISSION_DENIED' in str(exc) or 'denied access' in str(exc).casefold()):
+            if not (is_gemini_daily_quota_error(exc) or exhausted_gemini_503(exc) or 'PERMISSION_DENIED' in str(exc) or 'denied access' in str(exc).casefold()):
                 raise
             match = score_resume_against_job_openai(profile, job, resume_text=text, model_name=get_openai_model_name())
         save_job_score(resume_hash=resume_hash, match=match)

@@ -16,6 +16,7 @@ from src.ai.job_eligibility import (
     get_openai_screening_model_name,
 )
 from src.ai.resume_matcher import ResumeMatcherError
+from src.scoring_diagnostics import log_scoring_failure
 from src.ai.resume_profiler import ResumeProfile
 from src.repositories.recommendation_repository import (
     load_unscreened_job_eligibility_candidates,
@@ -35,6 +36,8 @@ class JobScreeningSummary:
     gemini_screened: int
     openai_screened: int
     quota_exhausted: bool
+    failed_record_keys: tuple[str, ...] = ()
+    failed_posting_keys: tuple[str, ...] = ()
 
 
 def is_gemini_quota_exhausted(error: ResumeMatcherError) -> bool:
@@ -97,6 +100,13 @@ def screen_unscreened_jobs(
     needs_description = 0
     excluded = 0
     failed = 0
+    failed_records = []
+    failed_postings = []
+
+    def record_failure(job, index, provider, error):
+        failed_records.append(job["record_key"])
+        failed_postings.append(job.get("canonical_job_key") or job["record_key"])
+        log_scoring_failure(job,index,len(jobs),provider,error,stage="Eligibility screening")
     gemini_screened = 0
     openai_screened = 0
     quota_exhausted = False
@@ -131,6 +141,7 @@ def screen_unscreened_jobs(
                 gemini_screened += 1
 
         except ResumeMatcherError as error:
+            log_scoring_failure(job,index,len(jobs),"OpenAI" if use_openai_fallback else "Gemini",error,stage="Eligibility screening attempt")
             if should_switch_to_openai(error):
                 if is_gemini_quota_exhausted(error):
                     quota_exhausted = True
@@ -156,6 +167,7 @@ def screen_unscreened_jobs(
                     openai_screened += 1
                 except ResumeMatcherError as fallback_error:
                     failed += 1
+                    record_failure(job,index,"OpenAI",fallback_error)
                     print("OpenAI fallback failed during screening.")
 
                     if is_openai_quota_exhausted(fallback_error):
@@ -168,6 +180,7 @@ def screen_unscreened_jobs(
                     continue
             else:
                 failed += 1
+                record_failure(job,index,"OpenAI" if use_openai_fallback else "Gemini",error)
                 print("Eligibility screening failed for this job.")
                 continue
 
@@ -197,4 +210,17 @@ def screen_unscreened_jobs(
         gemini_screened=gemini_screened,
         openai_screened=openai_screened,
         quota_exhausted=quota_exhausted,
+        failed_record_keys=tuple(failed_records),
+        failed_posting_keys=tuple(failed_postings),
     )
+
+
+def screening_failed_for_job(summary, job):
+    """Failures are a run-local hold, never a cached eligibility decision."""
+    records = getattr(summary, 'failed_record_keys', ())
+    postings = getattr(summary, 'failed_posting_keys', ())
+    # Older orchestration adapters may provide only the original summary fields.
+    records = records if isinstance(records, (tuple,list,set,frozenset)) else ()
+    postings = postings if isinstance(postings, (tuple,list,set,frozenset)) else ()
+    return (job.get('record_key') in records
+            or (job.get('canonical_job_key') or job.get('record_key')) in postings)
