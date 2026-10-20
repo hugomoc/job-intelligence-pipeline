@@ -71,7 +71,7 @@ def description_requirement_clauses(description: str) -> list[dict[str, Any]]:
             if re.fullmatch(r"(?:minimum |required |basic |core )?(?:requirements|qualifications)|required(?: skills and experience)?|requirements for .+|what you (?:ll |will )?bring|what we (?:re |are )looking for|who you are|about you", heading):
                 section = "required"
                 continue
-            if re.fullmatch(r"(?:preferred|desired|bonus) (?:qualifications|requirements|skills)|nice.to.have|optional (?:qualifications|requirements|skills)", heading):
+            if re.fullmatch(r"(?:preferred|desired|bonus) (?:qualifications|requirements|skills)|nice.to.haves?|optional (?:qualifications|requirements|skills)", heading):
                 section = "optional"
                 continue
             if heading in {"responsibilities", "benefits", "about us", "about the company", "what you ll do", "what you will do", "why you ll love it here", "why you will love it here", "compensation and benefits", "compensation", "how we ll take care of you", "total rewards", "our tech stack"}:
