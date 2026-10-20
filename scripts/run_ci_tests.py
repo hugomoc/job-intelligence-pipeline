@@ -27,6 +27,7 @@ CI_TESTS = [
     "src/test_audit_49_scores.py",
     "src/test_promote_reviewed_49.py",
     "src/test_shared_requirement_policy.py",
+    "src/test_requirement_language_regression.py",
     "src/test_description_quality.py",
     "src/test_verified_official_description.py",
     "src/test_aggregator_visibility.py",

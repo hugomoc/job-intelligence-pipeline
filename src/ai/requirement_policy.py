@@ -57,7 +57,7 @@ def description_requirement_clauses(description: str) -> list[dict[str, Any]]:
         tag.insert_after("\n")
     text = soup.get_text().replace("\r", "\n")
     # Stored plain text may have lost HTML heading boundaries.
-    text = re.sub(r"\b(Minimum qualifications|Required qualifications|Basic qualifications|Preferred qualifications|Desired Qualifications|Required Skills and Experience|Nice to have)\b", r"\n\1\n", text, flags=re.I)
+    text = re.sub(r"\b(Minimum qualifications|Required qualifications|Basic qualifications|Core Requirements|Preferred qualifications|Desired Qualifications|Required Skills and Experience|Nice to have)\b", r"\n\1\n", text, flags=re.I)
     text = re.sub(r"\bU\.S\.(?:C\.)?", lambda match: match.group().replace(".", ""), text, flags=re.I)
     text = text.replace("’", "'")
     section = "unknown"
@@ -68,10 +68,10 @@ def description_requirement_clauses(description: str) -> list[dict[str, Any]]:
             continue
         heading = normalize_match_text(line).strip(" .:")
         if len(line) < 90:
-            if re.fullmatch(r"(?:minimum |required |basic )?(?:requirements|qualifications)|required(?: skills and experience)?|requirements for .+|what you (?:ll |will )?bring|what we (?:re |are )looking for|who you are|about you", heading):
+            if re.fullmatch(r"(?:minimum |required |basic |core )?(?:requirements|qualifications)|required(?: skills and experience)?|requirements for .+|what you (?:ll |will )?bring|what we (?:re |are )looking for|who you are|about you", heading):
                 section = "required"
                 continue
-            if re.search(r"preferred qualifications|desired qualifications|nice.to.have|bonus qualifications", heading):
+            if re.fullmatch(r"(?:preferred|desired|bonus) (?:qualifications|requirements|skills)|nice.to.haves?|optional (?:qualifications|requirements|skills)", heading):
                 section = "optional"
                 continue
             if heading in {"responsibilities", "benefits", "about us", "about the company", "what you ll do", "what you will do", "why you ll love it here", "why you will love it here", "compensation and benefits", "compensation", "how we ll take care of you", "total rewards", "our tech stack"}:
@@ -603,7 +603,7 @@ def personal_fact_kind(text: str) -> str | None:
         "relocation": r"relocat(?:e|ion|ing)",
         "travel": r"travel (?:willingness|flexibility|up to|requirement)|willing to travel",
     }
-    return next((kind for kind, pattern in patterns.items() if re.search(pattern, value)), None)
+    return next((kind for kind, pattern in patterns.items() if re.search(pattern, value) and (kind != "language" or _required_language_names(text))), None)
 
 
 US_REGION_ALIASES = {
@@ -652,20 +652,27 @@ def _mentioned_us_regions(text: str) -> set[str]:
     return mentioned
 
 
+# Only recognized human languages may trigger personal-language eligibility.
+# Technical proficiency (SQL/Python/dbt, etc.) is evaluated as a skill instead.
+HUMAN_LANGUAGES = frozenset({
+    "english", "portuguese", "spanish", "french", "german", "italian",
+    "mandarin", "cantonese", "chinese", "japanese", "korean", "arabic",
+    "hindi", "urdu", "russian", "ukrainian", "polish", "dutch",
+    "swedish", "norwegian", "danish", "finnish", "greek", "turkish",
+    "hebrew", "vietnamese", "thai", "indonesian", "malay", "bengali",
+    "punjabi", "tamil", "telugu", "persian", "farsi", "swahili",
+    "tagalog", "filipino", "romanian", "czech", "slovak", "hungarian",
+})
+
+
 def _required_language_names(text: str) -> set[str]:
-    patterns = (
-        r"(?:fluen(?:t|cy)|proficien(?:t|cy))\s+(?:in\s+)?(?:both\s+)?([A-Za-z]+)(?:\s+and\s+([A-Za-z]+))?",
-        r"(?:spoken|written)\s+([A-Za-z]+)(?:\s+and\s+([A-Za-z]+))?",
-    )
-    languages: set[str] = set()
-
-    for pattern in patterns:
-        for match in re.finditer(pattern, text, re.I):
-            for value in match.groups():
-                if value:
-                    languages.add(value.casefold())
-
-    return languages
+    """Extract explicit human languages, never arbitrary proficiency tokens."""
+    names = "|".join(sorted(HUMAN_LANGUAGES, key=len, reverse=True))
+    return {
+        match.group(0).casefold()
+        for match in re.finditer(rf"\b(?:{names})\b", text, re.I)
+        if re.search(r"\b(?:fluen(?:t|cy)|proficien(?:t|cy)|language|spoken|written|bilingual)\b", text, re.I)
+    }
 
 
 def personal_requirement_evidence(gap: str, description: str, profile: ResumeProfile, _kind: str | None = None) -> dict[str, Any] | None:
@@ -677,7 +684,16 @@ def personal_requirement_evidence(gap: str, description: str, profile: ResumePro
     # Never infer personal status from the profile summary, residence or country
     # configured for actionability. Empty lists are explicit negatives; None is unknown.
     supporting = [row["clause"] for row in description_requirement_clauses(description) if personal_fact_kind(row["clause"]) == kind]
-    text = (gap + " " + " ".join(supporting)).casefold()
+    if kind == "language":
+        # Optional languages elsewhere in the JD must not turn a satisfied
+        # mandatory language requirement into a false hard failure.
+        requested = _required_language_names(gap)
+        supporting = [row["clause"] for row in description_requirement_clauses(description)
+                      if row["mandatory"] and not row["optional"]
+                      and personal_fact_kind(row["clause"]) == "language"]
+        text = gap if requested else " ".join(supporting)
+    else:
+        text = (gap + " " + " ".join(supporting)).casefold()
     if kind == "work_authorization":
         countries = facts.authorized_work_countries
         if countries is not None and re.search(r"\b(?:u\.?s\.?|united states|america)\b", text):
