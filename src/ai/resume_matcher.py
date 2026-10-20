@@ -1879,11 +1879,240 @@ def build_resume_job_match(
     )
 
 
+def _request_gemini_fit(
+    client: Any,
+    model_name: str,
+    prompt: str,
+) -> Any:
+    """Call Gemini with up to two transient retries."""
+    for attempt in range(3):
+        try:
+            return client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=FitAnalysis,
+                    temperature=0.1,
+                ),
+            )
+        except Exception as error:
+            if (
+                attempt < 2
+                and is_retryable_provider_error(error)
+            ):
+                _retry_sleep(attempt)
+                continue
+
+            raise ResumeMatcherError(
+                "Gemini was unable to score the job. "
+                f"{type(error).__name__}: {error}"
+            ) from error
+
+    raise ResumeMatcherError(
+        "Gemini was unable to score the job."
+    )
+
+
+def _valid_gemini_fit(
+    client: Any,
+    model_name: str,
+    prompt: str,
+) -> FitAnalysis:
+    """Retry one malformed/invalid structured response."""
+    last_error: ResumeMatcherError | None = None
+
+    for attempt in range(2):
+        response = _request_gemini_fit(
+            client=client,
+            model_name=model_name,
+            prompt=prompt,
+        )
+
+        try:
+            return parse_fit_analysis_response(
+                response
+            )
+        except ResumeMatcherError as error:
+            last_error = error
+
+            if attempt == 0:
+                continue
+
+            raise
+
+    assert last_error is not None
+    raise last_error
+
+
+def _request_openai_fit(
+    client: Any,
+    model_name: str,
+    prompt: str,
+) -> str | None:
+    """Call OpenAI with up to two transient retries."""
+    for attempt in range(3):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Return only valid JSON matching the supplied "
+                            "schema. Evaluate the actual resume against the "
+                            "full JD. Do not invent evidence. Work arrangement "
+                            "must not affect fit_score."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "fit_analysis",
+                        "schema": get_openai_fit_schema(),
+                        "strict": True,
+                    },
+                },
+                temperature=0.1,
+            )
+
+            return response.choices[0].message.content
+
+        except Exception as error:
+            if (
+                attempt < 2
+                and is_retryable_provider_error(error)
+            ):
+                _retry_sleep(attempt)
+                continue
+
+            raise ResumeMatcherError(
+                "OpenAI was unable to score the job. "
+                f"{type(error).__name__}: {error}"
+            ) from error
+
+    raise ResumeMatcherError(
+        "OpenAI was unable to score the job."
+    )
+
+
+def _valid_openai_fit(
+    client: Any,
+    model_name: str,
+    prompt: str,
+) -> FitAnalysis:
+    """Retry one malformed/invalid structured response."""
+    last_error: ResumeMatcherError | None = None
+
+    for attempt in range(2):
+        content = _request_openai_fit(
+            client=client,
+            model_name=model_name,
+            prompt=prompt,
+        )
+
+        try:
+            return parse_openai_fit_content(
+                content
+            )
+        except ResumeMatcherError as error:
+            last_error = error
+
+            if attempt == 0:
+                continue
+
+            raise
+
+    assert last_error is not None
+    raise last_error
+
+
+def _validate_or_correct_gemini_fit(
+    client: Any,
+    model_name: str,
+    prompt: str,
+    analysis: FitAnalysis,
+) -> FitAnalysis:
+    contradictions = fit_output_contradictions(
+        analysis
+    )
+
+    if not contradictions:
+        return analysis
+
+    corrected = _valid_gemini_fit(
+        client=client,
+        model_name=model_name,
+        prompt=build_fit_correction_prompt(
+            original_prompt=prompt,
+            analysis=analysis,
+            contradictions=contradictions,
+        ),
+    )
+
+    remaining = fit_output_contradictions(
+        corrected
+    )
+
+    if remaining:
+        raise ResumeMatcherError(
+            "Gemini fit result remained internally inconsistent after "
+            "one correction retry: "
+            + "; ".join(remaining)
+        )
+
+    return corrected
+
+
+def _validate_or_correct_openai_fit(
+    client: Any,
+    model_name: str,
+    prompt: str,
+    analysis: FitAnalysis,
+) -> FitAnalysis:
+    contradictions = fit_output_contradictions(
+        analysis
+    )
+
+    if not contradictions:
+        return analysis
+
+    corrected = _valid_openai_fit(
+        client=client,
+        model_name=model_name,
+        prompt=build_fit_correction_prompt(
+            original_prompt=prompt,
+            analysis=analysis,
+            contradictions=contradictions,
+        ),
+    )
+
+    remaining = fit_output_contradictions(
+        corrected
+    )
+
+    if remaining:
+        raise ResumeMatcherError(
+            "OpenAI fit result remained internally inconsistent after "
+            "one correction retry: "
+            + "; ".join(remaining)
+        )
+
+    return corrected
+
+
 def score_resume_against_job(
     resume_profile: ResumeProfile,
     job: dict[str, Any],
     model_name: str | None = None,
+    resume_text: str | None = None,
 ) -> ResumeJobMatch:
+    """Score one job from the actual resume text and full JD."""
     resume_profile = apply_candidate_eligibility_overrides(
         resume_profile
     )
@@ -1895,7 +2124,9 @@ def score_resume_against_job(
     ) = get_description_information(job)
 
     if not description_complete:
-        raise ResumeMatcherError("A current FULL_JD is required before AI scoring.")
+        raise ResumeMatcherError(
+            "A current FULL_JD is required before AI scoring."
+        )
 
     selected_model = (
         model_name
@@ -1904,36 +2135,29 @@ def score_resume_against_job(
 
     prompt = build_job_match_prompt(
         resume_profile=resume_profile,
+        resume_text=resume_text,
         job=job,
         description=description,
-        description_complete=(
-            description_complete
-        ),
+        description_complete=description_complete,
     )
 
     client = get_gemini_client()
 
-    try:
-        response = client.models.generate_content(
-            model=selected_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type=(
-                    "application/json"
-                ),
-                response_schema=JobMatchAnalysis,
-                temperature=0.1,
-            ),
-        )
+    fit_analysis = _valid_gemini_fit(
+        client=client,
+        model_name=selected_model,
+        prompt=prompt,
+    )
 
-    except Exception as error:
-        raise ResumeMatcherError(
-            "Gemini was unable to score the job. "
-            f"{type(error).__name__}: {error}"
-        ) from error
+    fit_analysis = _validate_or_correct_gemini_fit(
+        client=client,
+        model_name=selected_model,
+        prompt=prompt,
+        analysis=fit_analysis,
+    )
 
-    analysis = parse_job_match_response(
-        response
+    analysis = fit_analysis_to_job_match_analysis(
+        fit_analysis
     )
 
     return build_resume_job_match(
@@ -1950,7 +2174,9 @@ def score_resume_against_job_openai(
     resume_profile: ResumeProfile,
     job: dict[str, Any],
     model_name: str | None = None,
+    resume_text: str | None = None,
 ) -> ResumeJobMatch:
+    """OpenAI fallback using the same actual-resume v7 contract."""
     resume_profile = apply_candidate_eligibility_overrides(
         resume_profile
     )
@@ -1977,7 +2203,9 @@ def score_resume_against_job_openai(
     ) = get_description_information(job)
 
     if not description_complete:
-        raise ResumeMatcherError("A current FULL_JD is required before AI scoring.")
+        raise ResumeMatcherError(
+            "A current FULL_JD is required before AI scoring."
+        )
 
     selected_model = (
         model_name
@@ -1986,58 +2214,31 @@ def score_resume_against_job_openai(
 
     prompt = build_job_match_prompt(
         resume_profile=resume_profile,
+        resume_text=resume_text,
         job=job,
         description=description,
-        description_complete=(
-            description_complete
-        ),
+        description_complete=description_complete,
     )
 
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(
+        api_key=api_key
+    )
 
-    try:
-        response = client.chat.completions.create(
-            model=selected_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Return only valid JSON matching the supplied schema. "
-                        "You must populate overall_score and recommendation in addition "
-                        "to the component fit scores, requirement comparisons, strengths, "
-                        "gaps, risks, confidence, and summary. overall_score and all *_fit "
-                        "fields must be integers "
-                        "from 0 to 100. recommendation must be apply, review, or skip and "
-                        "must agree with the score bands in the user prompt."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "job_match_analysis",
-                    "schema": (
-                        get_openai_job_match_schema()
-                    ),
-                    "strict": True,
-                },
-            },
-            temperature=0.1,
-        )
+    fit_analysis = _valid_openai_fit(
+        client=client,
+        model_name=selected_model,
+        prompt=prompt,
+    )
 
-    except Exception as error:
-        raise ResumeMatcherError(
-            "OpenAI was unable to score the job. "
-            f"{type(error).__name__}: {error}"
-        ) from error
+    fit_analysis = _validate_or_correct_openai_fit(
+        client=client,
+        model_name=selected_model,
+        prompt=prompt,
+        analysis=fit_analysis,
+    )
 
-    content = response.choices[0].message.content
-    analysis = parse_openai_job_match_content(
-        content
+    analysis = fit_analysis_to_job_match_analysis(
+        fit_analysis
     )
 
     return build_resume_job_match(
@@ -2048,3 +2249,4 @@ def score_resume_against_job_openai(
         description_word_count=description_word_count,
         description_complete=description_complete,
     )
+
