@@ -1238,17 +1238,44 @@ def fit_analysis_to_job_match_analysis(
     )
 
 
+def is_gemini_daily_quota_error(
+    error: Exception | str,
+) -> bool:
+    """Identify explicit Gemini daily quota exhaustion.
+
+    Generic 429/RESOURCE_EXHAUSTED/"quota exceeded" responses are ambiguous and
+    commonly represent per-minute throttling. Those must be retried instead of
+    switching the remainder of a batch to OpenAI.
+    """
+    message = str(error).casefold()
+
+    daily_markers = (
+        "generaterequestsperday",
+        "generate requests per day",
+        "requestsperday",
+        "requests per day",
+        "per_day",
+        "per day",
+        "daily quota",
+    )
+
+    return (
+        ("429" in message or "resource_exhausted" in message)
+        and any(marker in message for marker in daily_markers)
+    )
+
+
 def is_retryable_provider_error(
     error: Exception,
 ) -> bool:
     message = str(error).casefold()
 
-    # Daily/project quota exhaustion should fall through to the existing
-    # provider-fallback logic rather than burning retry calls.
+    # Explicit daily Gemini exhaustion and OpenAI account quota should fall
+    # through to provider-fallback/stop logic. A generic Gemini 429 is treated
+    # as a temporary rate limit and retried.
     if (
-        "generaterequestsperday" in message
+        is_gemini_daily_quota_error(error)
         or "insufficient_quota" in message
-        or "quota exceeded" in message
     ):
         return False
 
@@ -1274,8 +1301,61 @@ def is_retryable_provider_error(
     )
 
 
-def _retry_sleep(attempt: int) -> None:
-    time.sleep(1.0 * (2 ** attempt))
+def provider_retry_delay_seconds(
+    error: Exception,
+    attempt: int,
+) -> float:
+    """Choose a bounded retry delay, honoring provider retry hints when present."""
+    message = str(error)
+
+    hint_patterns = (
+        r"retry(?:Delay| delay)?[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)s",
+        r"retry in[^0-9]{0,10}([0-9]+(?:\.[0-9]+)?)",
+        r"retry-after[^0-9]{0,10}([0-9]+(?:\.[0-9]+)?)",
+    )
+
+    for pattern in hint_patterns:
+        match = re.search(
+            pattern,
+            message,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return min(
+                max(float(match.group(1)), 1.0),
+                65.0,
+            )
+
+    lowered = message.casefold()
+
+    if (
+        "429" in lowered
+        or "rate limit" in lowered
+        or "resource_exhausted" in lowered
+    ):
+        # Gemini free/low-tier RPM windows can require waiting for most of a
+        # minute. Two retries at 20s and 40s avoid immediately abandoning the
+        # provider while still bounding the wait.
+        return (20.0, 40.0)[min(attempt, 1)]
+
+    return 1.0 * (2 ** attempt)
+
+
+def _retry_sleep(
+    attempt: int,
+    error: Exception,
+    provider_name: str,
+) -> None:
+    delay = provider_retry_delay_seconds(
+        error,
+        attempt,
+    )
+    print(
+        f"{provider_name} temporary rate limit/service error. "
+        f"Retrying in {delay:.1f}s "
+        f"(retry {attempt + 1}/2)."
+    )
+    time.sleep(delay)
 
 
 def parse_job_match_payload(
@@ -1915,7 +1995,11 @@ def _request_gemini_fit(
                 attempt < 2
                 and is_retryable_provider_error(error)
             ):
-                _retry_sleep(attempt)
+                _retry_sleep(
+                    attempt,
+                    error,
+                    "Gemini",
+                )
                 continue
 
             raise ResumeMatcherError(
@@ -2002,7 +2086,11 @@ def _request_openai_fit(
                 attempt < 2
                 and is_retryable_provider_error(error)
             ):
-                _retry_sleep(attempt)
+                _retry_sleep(
+                    attempt,
+                    error,
+                    "OpenAI",
+                )
                 continue
 
             raise ResumeMatcherError(

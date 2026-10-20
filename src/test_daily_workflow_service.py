@@ -15,6 +15,11 @@ from src.enrichment.job_description import JobDescriptionResult
 from src.enrichment.official_job_resolver import OfficialJobResolutionResult
 from src.repositories import recommendation_repository
 from src.score_backlog import BacklogSummary, load_latest_resume_hash
+from src.scoring_run_repository import (
+    finish_scoring_run,
+    load_latest_scoring_run,
+    start_scoring_run,
+)
 from src.ui import daily_workflow_service
 from src.score_jobs_ai import load_cached_profile, save_resume_profile
 from src.test_resume_matcher_validation import make_profile
@@ -69,6 +74,8 @@ def test_run_unscored_job_backlog_uses_broader_enrichment_limit() -> None:
     observed_limits: list[int] = []
     original_enrichment = daily_workflow_service.run_description_enrichment
     original_capture = daily_workflow_service.capture_stdout_lines
+    original_start_run = daily_workflow_service.start_scoring_run
+    original_finish_run = daily_workflow_service.finish_scoring_run
 
     def fake_enrichment(**kwargs) -> EnrichmentSummary:
         observed_limits.append(kwargs["limit"])
@@ -108,6 +115,12 @@ def test_run_unscored_job_backlog_uses_broader_enrichment_limit() -> None:
     try:
         daily_workflow_service.run_description_enrichment = fake_enrichment
         daily_workflow_service.capture_stdout_lines = fake_capture
+        daily_workflow_service.start_scoring_run = (
+            lambda **kwargs: "fixture-run"
+        )
+        daily_workflow_service.finish_scoring_run = (
+            lambda *args, **kwargs: None
+        )
 
         run_unscored_job_backlog(
             resume_hash="resume",
@@ -124,11 +137,62 @@ def test_run_unscored_job_backlog_uses_broader_enrichment_limit() -> None:
             original_enrichment
         )
         daily_workflow_service.capture_stdout_lines = original_capture
+        daily_workflow_service.start_scoring_run = original_start_run
+        daily_workflow_service.finish_scoring_run = original_finish_run
 
     assert observed_limits == [
         DEFAULT_ENRICHMENT_LIMIT,
         50,
     ]
+
+
+def test_scoring_run_history_persists_latest_log() -> None:
+    with TemporaryDirectory() as directory:
+        data_dir = Path(directory)
+
+        with patch.object(
+            database,
+            "DATA_DIR",
+            data_dir,
+        ), patch.object(
+            database,
+            "DATABASE_PATH",
+            data_dir / "jobs.duckdb",
+        ):
+            first_run = start_scoring_run(
+                resume_hash="resume-123",
+                workflow="score_unscored",
+            )
+            finish_scoring_run(
+                first_run,
+                status="completed",
+                model_name="gemini-test",
+                candidates_selected=20,
+                already_scored=10,
+                scores_saved=19,
+                jobs_failed=1,
+                gemini_scores_saved=19,
+                openai_scores_saved=0,
+                quota_exhausted=False,
+                log_lines=(
+                    "Scoring 1/20: Example | Company",
+                    "Saved score: 85% APPLY",
+                ),
+            )
+
+            latest = load_latest_scoring_run(
+                "resume-123"
+            )
+
+            assert latest is not None
+            assert latest.workflow == "score_unscored"
+            assert latest.scores_saved == 19
+            assert latest.gemini_scores_saved == 19
+            assert latest.openai_scores_saved == 0
+            assert latest.log_lines == (
+                "Scoring 1/20: Example | Company",
+                "Saved score: 85% APPLY",
+            )
 
 
 @contextmanager
@@ -302,6 +366,7 @@ def main() -> None:
     test_automatic_enrichment_limit_uses_shared_default()
     test_automatic_enrichment_limit_expands_with_larger_ai_limit()
     test_run_unscored_job_backlog_uses_broader_enrichment_limit()
+    test_scoring_run_history_persists_latest_log()
     test_daily_workflow_completes_after_real_guard_rejection()
     test_orchestration_failure_still_has_generic_error()
     test_streamlit_renders_partial_enrichment_diagnostics()

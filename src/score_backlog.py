@@ -14,6 +14,7 @@ from src.ai.resume_matcher import (
     MATCHER_PROMPT_VERSION,
     ResumeMatcherError,
     get_openai_model_name,
+    is_gemini_daily_quota_error,
     score_resume_against_job,
     score_resume_against_job_openai,
 )
@@ -49,15 +50,8 @@ class BacklogSummary:
 
 
 def is_quota_exhausted(error: ResumeMatcherError) -> bool:
-    error_message = str(error)
-
-    return (
-        "429 RESOURCE_EXHAUSTED" in error_message
-        and (
-            "GenerateRequestsPerDay" in error_message
-            or "quota exceeded" in error_message.casefold()
-        )
-    )
+    """Return true only for explicit Gemini daily quota exhaustion."""
+    return is_gemini_daily_quota_error(error)
 
 
 def is_openai_quota_exhausted(error: ResumeMatcherError) -> bool:

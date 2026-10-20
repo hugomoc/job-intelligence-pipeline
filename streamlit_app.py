@@ -19,6 +19,7 @@ from src.repositories.recommendation_repository import (
     update_application_status,
 )
 from src.resume.extractor import ResumeExtractionError, create_resume_hash
+from src.scoring_run_repository import load_latest_scoring_run
 from src.ui.daily_workflow_service import (
     DailyWorkflowError,
     load_scoring_backlog_status,
@@ -207,6 +208,51 @@ def render_run_log(
 
     with st.expander(title):
         st.code("\n".join(log_lines), language="text")
+
+
+def render_persisted_scoring_log(
+    resume_hash: str | None,
+) -> None:
+    latest_run = load_latest_scoring_run(
+        resume_hash=resume_hash,
+    )
+
+    if latest_run is None:
+        return
+
+    completed = (
+        latest_run.completed_at
+        or latest_run.started_at
+    )
+    completed_text = completed.astimezone().strftime(
+        "%Y-%m-%d %H:%M:%S %Z"
+    )
+
+    with st.expander(
+        f"AI scoring log — {completed_text}"
+    ):
+        st.caption(
+            " | ".join(
+                [
+                    f"Workflow: {latest_run.workflow}",
+                    f"Status: {latest_run.status}",
+                    f"Prompt: {latest_run.prompt_version}",
+                    f"Gemini: {latest_run.gemini_scores_saved}",
+                    f"OpenAI: {latest_run.openai_scores_saved}",
+                    f"Failed: {latest_run.jobs_failed}",
+                ]
+            )
+        )
+
+        if latest_run.log_lines:
+            st.code(
+                "\n".join(latest_run.log_lines),
+                language="text",
+            )
+        else:
+            st.caption(
+                "No detailed log lines were recorded for this run."
+            )
 
 
 def render_scoring_backlog_status(
@@ -869,6 +915,11 @@ if resume_preparation_succeeded and (
                 resume_hash=st.session_state.get("resume_hash"),
                 limit=int(daily_score_limit),
                 minimum_rule_score=int(daily_minimum_rule_score),
+                workflow=(
+                    "ingest_enrich_score"
+                    if run_daily_clicked
+                    else "score_unscored"
+                ),
             )
             if (backlog_result.scores_saved or getattr(backlog_result, "enrichment_jobs_processed", 0)
                     or st.session_state.get("resume_hash") != backlog_result.resume_hash):
@@ -882,10 +933,6 @@ if resume_preparation_succeeded and (
             st.write(f"OpenAI scores saved: {backlog_result.openai_scores_saved}")
             st.write(f"Jobs that could not be scored: {backlog_result.jobs_failed}")
             st.write("dbt build: " + ("run" if backlog_result.dbt_was_run else "not needed"))
-            render_run_log(
-                "AI scoring log",
-                getattr(backlog_result, "log_lines", ()),
-            )
             status.update(label="Scoring complete", state="complete")
             st.session_state["show_saved_jobs"] = True
             render_scoring_backlog_status(
@@ -897,6 +944,10 @@ if resume_preparation_succeeded and (
     except DailyWorkflowError:
         invalidate_data(st.session_state, "pipeline workflow error; possible partial writes")
         st.error("Unscored jobs could not be scored. Please try again later.")
+
+render_persisted_scoring_log(
+    st.session_state.get("resume_hash")
+)
 
 jobs_tab, operations_tab = st.tabs(
     [
