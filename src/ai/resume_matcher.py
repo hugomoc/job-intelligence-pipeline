@@ -1439,6 +1439,11 @@ def confirmed_mandatory_personal_mismatches(
         if not clause or kind is None:
             continue
 
+        # Work arrangement and logistics are informational in v7 and must
+        # never reduce the resume-to-JD fit score.
+        if kind in {"location", "relocation", "travel"}:
+            continue
+
         evidence = personal_requirement_evidence(
             clause,
             description,
@@ -1471,6 +1476,10 @@ def normalize_personal_eligibility(
 
         if evidence is None:
             hard_missing.append(gap)
+            continue
+
+        if evidence["kind"] in {"location", "relocation", "travel"}:
+            saw_nonfailing_personal = True
             continue
 
         state = evidence["state"]
