@@ -36,6 +36,10 @@ from src.score_jobs import (
 )
 from src.score_backlog import BacklogSummary, score_backlog
 from src.score_backlog import load_latest_resume_hash
+from src.scoring_run_repository import (
+    finish_scoring_run,
+    start_scoring_run,
+)
 from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
 from src.ai.resume_profiler import get_model_name
 from src.repositories.recommendation_repository import (
@@ -325,7 +329,23 @@ def run_unscored_job_backlog(
     resume_hash: str | None,
     limit: int,
     minimum_rule_score: int,
+    workflow: str = "score_unscored",
 ) -> UiBacklogSummary:
+    selected_resume_hash = (
+        resume_hash
+        or load_latest_resume_hash(
+            get_model_name()
+        )
+    )
+    run_id = (
+        start_scoring_run(
+            resume_hash=selected_resume_hash,
+            workflow=workflow,
+        )
+        if selected_resume_hash
+        else None
+    )
+
     try:
         enrichment_limit = automatic_enrichment_limit(limit)
         enrichment_summary = run_description_enrichment(
@@ -366,7 +386,7 @@ def run_unscored_job_backlog(
             + log_lines
         )
 
-        return UiBacklogSummary(
+        result = UiBacklogSummary(
             resume_hash=summary.resume_hash,
             model_name=summary.model_name,
             candidates_selected=summary.candidates_selected,
@@ -381,7 +401,41 @@ def run_unscored_job_backlog(
             enrichment_jobs_processed=enrichment_summary.jobs_processed,
         )
 
+        if run_id:
+            finish_scoring_run(
+                run_id,
+                status="completed",
+                model_name=summary.model_name,
+                candidates_selected=summary.candidates_selected,
+                already_scored=summary.already_scored,
+                scores_saved=summary.scores_saved,
+                jobs_failed=summary.jobs_failed,
+                gemini_scores_saved=summary.gemini_scores_saved,
+                openai_scores_saved=summary.openai_scores_saved,
+                quota_exhausted=summary.quota_exhausted,
+                log_lines=combined_log_lines,
+            )
+
+        return result
+
     except Exception as error:
+        if run_id:
+            finish_scoring_run(
+                run_id,
+                status="failed",
+                model_name=get_model_name(),
+                candidates_selected=0,
+                already_scored=0,
+                scores_saved=0,
+                jobs_failed=0,
+                gemini_scores_saved=0,
+                openai_scores_saved=0,
+                quota_exhausted=False,
+                log_lines=(
+                    "Scoring workflow failed before completion.",
+                ),
+            )
+
         print(
             "Backlog scoring failed: "
             f"{type(error).__name__}: {error}"
