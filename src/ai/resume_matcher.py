@@ -350,92 +350,361 @@ def build_job_match_prompt(
     job: dict[str, Any],
     description: str,
     description_complete: bool,
+    resume_text: str | None = None,
 ) -> str:
-    """Build the full-JD, AI-first fit-scoring prompt."""
+    """Build the v7 actual-resume, requirements-first scoring prompt."""
     completeness = (
         "COMPLETE"
         if description_complete
         else "INCOMPLETE"
     )
 
+    evidence_text = (
+        redact_personal_information(resume_text).strip()
+        if resume_text
+        else resume_profile.model_dump_json(indent=2)
+    )
+
+    eligibility_text = (
+        resume_profile.personal_eligibility.model_dump_json(
+            indent=2
+        )
+    )
+
     return f"""
-You are an expert technical recruiter evaluating one candidate against one
-specific job. Read the ENTIRE job description and the ENTIRE candidate profile
-before deciding.
+Evaluate ONE RESUME against ONE JOB DESCRIPTION.
 
-Your job is to make the same holistic judgment a strong recruiter would make,
-not to count keywords.
+Answer one question:
 
-Rules:
+HOW STRONGLY DOES THE EXPERIENCE ACTUALLY DEMONSTRATED IN THIS RESUME
+MATCH WHAT THIS JOB DESCRIPTION ACTUALLY REQUIRES?
 
-1. Use only evidence in the candidate profile and job information. Never invent
-   experience, skills, eligibility, location, language fluency, or credentials.
-2. Distinguish professional production experience from portfolio/project work.
-3. Identify the role's CORE RESPONSIBILITIES even when a responsibility bullet
-   does not contain words such as "required" or "must". A central hands-on duty
-   can be a major gap if the candidate has no demonstrated experience with it.
-4. Distinguish core/required qualifications from preferred or nice-to-have
-   qualifications. Do not penalize heavily for preferred-only technologies.
-5. Evaluate alternatives correctly. "A or B", "such as", examples, and
-   "or equivalent" do not require every named technology.
-6. Consider genuinely transferable experience, but do not treat a different
-   tool as equivalent when the job specifically requires hands-on use of a
-   technology, language, platform, or domain that is central to the work.
-7. Evaluate practical eligibility from the full JD, including explicit
-   geography, required language fluency, travel, clearance, and work
-   authorization constraints. personal_eligibility contains explicit
-   candidate-supplied facts and must be treated as authoritative.
-8. Never turn an UNKNOWN personal fact into a failed requirement. Unknown
-   location, language, work authorization, clearance, relocation, or travel
-   information may create REVIEW uncertainty, but UNKNOWN by itself must never
-   produce SKIP. When an explicit personal_eligibility fact satisfies the
-   requirement, do not list that requirement as a gap. A confirmed mismatch
-   against a mandatory personal eligibility requirement must produce SKIP.
-9. Do not let a matching title or many generic skills overwhelm one major
-   missing core responsibility.
-10. Treat years-of-experience requirements as minimums unless the JD gives a
-    maximum or bounded range. More experience is not a negative by itself.
-11. Put missing explicit requirements AND missing central hands-on
-    responsibilities in hard_requirements_missing. Put preferred-only gaps in
-    preferred_qualifications_missing.
-12. Return overall_score as your HOLISTIC final fit score. Do not derive it from
-    a fixed weighted average of the component scores.
-13. Use these final decision rules consistently:
-      APPLY  = 75-100 and no major core/eligibility blocker
-      REVIEW = 50-100 when meaningful gaps or uncertainty make APPLY premature;
-               scores of 75+ may still be REVIEW when the fit is strong but a
-               material concern needs human confirmation
-      SKIP   = 0-49, including clear practical ineligibility or a major mismatch
-14. recommendation must agree with overall_score and the stated gaps.
-15. Keep strengths, gaps, risks, and summary concise and specific enough that a
-    human can understand why the score was assigned.
-16. Populate requirement_matches with the 6-10 most important requirements,
-    core responsibilities, and explicit eligibility constraints from the JD.
-    For each row, compare the requirement with concise candidate evidence and
-    label it excellent, strong, partial, or gap. Do not invent evidence. For
-    personal eligibility, use PARTIAL when the fact is unknown and GAP only for
-    a confirmed mismatch. Keep these rows explanatory only: do not calculate
-    overall_score by counting or averaging the row labels.
+Return a direct fit_score from 0 to 100.
 
-CANDIDATE PROFILE:
+============================================================
+PRIMARY RULE
+============================================================
 
-{resume_profile.model_dump_json(indent=2)}
+Judge only evidence actually demonstrated in the resume.
 
-JOB INFORMATION:
+Do not infer stronger experience simply because related keywords appear
+in different places.
+
+Do not calculate the score from a rigid point formula.
+
+============================================================
+WHAT MATTERS MOST
+============================================================
+
+Base fit_score primarily on:
+
+- required qualifications
+- required technical skills
+- core responsibilities
+- required experience and seniority
+
+Preferred qualifications should have only a small effect.
+
+Do not score whether the candidate personally wants the job.
+
+Do not penalize employer industry unless prior domain experience is
+explicitly required by the JD.
+
+============================================================
+WHOLE-REQUIREMENT EVIDENCE
+============================================================
+
+A requirement is satisfied only when the resume supports the COMPLETE
+meaning of the requirement.
+
+Do not match isolated keywords.
+
+Examples:
+
+"deep hands-on experience in dbt"
+
+is NOT fully satisfied merely because:
+
+- dbt appears in Skills
+- dbt appears in portfolio projects
+- the candidate has many years of general data experience
+
+If dbt is demonstrated but deep professional production usage is not,
+classify it as PARTIAL.
+
+
+"Python scripting within SCADA/BMS frameworks"
+
+is NOT satisfied merely because Python appears in the resume.
+
+The resume must demonstrate Python specifically in the requested
+SCADA/BMS context.
+
+
+"PySpark experience"
+
+is NOT automatically satisfied by combining Python and Spark unless
+the resume actually demonstrates PySpark or clearly demonstrates Python
+being used with Spark.
+
+If adjacent evidence exists but the requested specialization is not fully
+demonstrated, classify it as PARTIAL.
+
+============================================================
+DO NOT MANUFACTURE EXPERIENCE
+============================================================
+
+Never combine unrelated resume facts to manufacture stronger experience.
+
+Examples:
+
+12 years data engineering + dbt in Skills
+does NOT equal 12 years of dbt experience.
+
+Python + Spark does NOT automatically equal production PySpark expertise.
+
+Python + automation does NOT equal Python automation in SCADA/BMS.
+
+A technology appearing in a skills list proves familiarity only. It does
+not automatically prove deep, extensive, expert, production, or multi-year
+experience.
+
+============================================================
+GAP VS PARTIAL — STRICT
+============================================================
+
+Use GAP only when the resume provides essentially NO meaningful evidence
+for the required capability.
+
+Use PARTIAL when the underlying capability is demonstrated, but the JD
+asks for greater:
+
+- scope
+- seniority
+- organizational influence
+- depth
+- duration
+- specialization
+- context
+
+Do not use GAP merely because the resume does not prove the full requested
+scope.
+
+============================================================
+OR / AND — STRICT
+============================================================
+
+Respect logical alternatives exactly as written.
+
+If a requirement says "A OR B", demonstrating either A or B satisfies it.
+Do not require both and do not create a gap for the other side.
+
+If a requirement says "A AND B", both must be demonstrated.
+
+============================================================
+REQUIRED VS PREFERRED — STRICT
+============================================================
+
+Before placing anything in required_partial or required_gaps, verify that
+the JD actually makes it required.
+
+If the JD uses wording such as:
+
+- preferred
+- ideally
+- a plus
+- bonus
+- nice to have
+- desirable
+- highly desirable
+- comparable experience welcome
+
+then it MUST NOT appear in required_gaps.
+
+Optional qualifications belong only in preferred_matches,
+preferred_partial, or preferred_gaps.
+
+============================================================
+EQUIVALENT TECHNOLOGIES
+============================================================
+
+If the JD explicitly permits comparable, equivalent, adjacent, or similar
+technologies, evaluate the underlying capability rather than requiring the
+exact named example.
+
+Do not create a gap for an example technology when an explicitly accepted
+equivalent is demonstrated.
+
+============================================================
+NO DOUBLE COUNTING
+============================================================
+
+Classify each qualification once.
+
+Do not put the same requirement into MATCH and PARTIAL, PARTIAL and GAP,
+or both required and preferred categories.
+
+Do not represent a comparable capability as PARTIAL and separately create
+a GAP for the exact example technology when the JD accepts equivalents.
+
+============================================================
+CLASSIFICATION
+============================================================
+
+required_matches:
+Actually required qualifications or core responsibilities demonstrated at
+the requested level, depth, duration, specialization, scope, and context.
+
+required_partial:
+Actually required items where meaningful evidence exists, but the requested
+depth, duration, specialization, scope, organizational influence, or context
+is only partially demonstrated.
+
+required_gaps:
+Actually required qualifications where the underlying capability is
+materially absent.
+
+preferred_matches:
+Preferred or optional items fully demonstrated.
+
+preferred_partial:
+Preferred or optional items with related evidence but not fully demonstrated.
+
+preferred_gaps:
+Preferred or optional items not demonstrated.
+
+============================================================
+FIT SCORE
+============================================================
+
+Use professional recruiting judgment.
+
+90-100:
+Exceptional match. Nearly all important requirements are directly and
+convincingly demonstrated.
+
+80-89:
+Strong match. Most requirements are demonstrated, with one or a few
+meaningful partial areas.
+
+70-79:
+Good but imperfect match. Several meaningful requirements are partial or
+one significant required area is weak.
+
+60-69:
+Moderate match. Transferable experience exists, but multiple important
+requirements are not demonstrated strongly enough.
+
+40-59:
+Weak match. Some relevant experience exists, but major required areas are
+missing.
+
+0-39:
+Poor match. The background substantially differs from the role's core
+requirements.
+
+============================================================
+WORK ARRANGEMENT
+============================================================
+
+Do NOT include any of these in fit_score:
+
+- remote / hybrid / onsite
+- city
+- commute
+- relocation
+- salary
+- compensation
+- schedule
+
+Report the work arrangement separately in work_arrangement, including city
+and required office days when stated.
+
+Examples:
+
+Remote
+
+Hybrid — San Francisco, CA — Tuesdays and Wednesdays
+
+Onsite — San Diego, CA
+
+============================================================
+PERSONAL ELIGIBILITY
+============================================================
+
+The explicit candidate eligibility facts below are supplied separately so
+you do not invent personal facts.
+
+Do not use location, hybrid/onsite schedule, commute, relocation, salary, or
+travel logistics to increase or decrease fit_score.
+
+Do not convert UNKNOWN eligibility facts into resume-skill gaps.
+
+============================================================
+SUMMARY CONSISTENCY
+============================================================
+
+The summary MUST be consistent with every classification.
+
+If an item is absent, it cannot be described as a match.
+
+If an item is PARTIAL, do not describe it as fully demonstrated, deep,
+extensive, expert, or production-grade unless the resume evidence supports
+that stronger wording.
+
+Do not add stronger adjectives in the summary than the resume supports.
+
+============================================================
+FINAL REVIEW
+============================================================
+
+Before returning:
+
+1. Re-read the entire JD.
+2. Re-read the entire resume.
+3. Verify every MATCH against the complete requirement.
+4. Respect OR and AND exactly as written.
+5. Do not use keyword overlap alone.
+6. Do not combine unrelated facts to manufacture experience.
+7. Verify depth and duration with actual evidence.
+8. Verify context-specific requirements with context-specific evidence.
+9. Distinguish professional work from portfolio/project experience.
+10. Verify every required_partial and required_gap is actually required.
+11. Move optional qualifications into the preferred section.
+12. Verify GAP vs PARTIAL using the underlying-capability rule.
+13. Ensure the summary does not contradict or exaggerate classifications.
+14. Keep work arrangement completely outside fit_score.
+
+Return only the final reviewed assessment.
+
+============================================================
+ACTUAL RESUME
+============================================================
+
+{evidence_text}
+
+============================================================
+EXPLICIT CANDIDATE ELIGIBILITY FACTS
+============================================================
+
+{eligibility_text}
+
+============================================================
+JOB INFORMATION
+============================================================
 
 Title: {job.get("title") or "Not provided"}
 Company: {job.get("company_name") or "Not provided"}
 Location: {job.get("location") or "Not provided"}
-Salary: {job.get("salary_text") or "Not provided"}
 Source: {job.get("source") or "Not provided"}
-
 Job-description completeness: {completeness}
 
-FULL JOB DESCRIPTION:
+============================================================
+FULL JOB DESCRIPTION
+============================================================
 
 {description or "No complete job description is available."}
 """.strip()
-
 
 
 
