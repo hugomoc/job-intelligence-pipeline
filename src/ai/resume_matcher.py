@@ -58,6 +58,7 @@ from src.ai.matcher_capabilities import (
 import json
 import os
 import re
+import time
 
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
@@ -71,6 +72,7 @@ from src.ai.resume_profiler import (
     apply_candidate_eligibility_overrides,
     get_gemini_client,
     get_model_name,
+    redact_personal_information,
 )
 
 
@@ -89,6 +91,33 @@ from src.description_quality import MINIMUM_FULL_DESCRIPTION_WORDS, assess_descr
 
 
 
+
+
+class FitAnalysis(BaseModel):
+    """Simple resume-to-JD assessment used by v7 production scoring."""
+
+    fit_score: int = Field(
+        ge=0,
+        le=100,
+        description="Direct holistic resume-to-JD requirements fit score.",
+    )
+    required_matches: list[str] = Field(default_factory=list)
+    required_partial: list[str] = Field(default_factory=list)
+    required_gaps: list[str] = Field(default_factory=list)
+    preferred_matches: list[str] = Field(default_factory=list)
+    preferred_partial: list[str] = Field(default_factory=list)
+    preferred_gaps: list[str] = Field(default_factory=list)
+    work_arrangement: str = Field(
+        description=(
+            "Remote/hybrid/onsite arrangement and city/schedule when stated. "
+            "This is informational only and must not affect fit_score."
+        )
+    )
+    summary: str = Field(
+        description=(
+            "Concise evidence-based explanation consistent with the classifications."
+        )
+    )
 
 
 class RequirementMatch(BaseModel):
@@ -321,92 +350,361 @@ def build_job_match_prompt(
     job: dict[str, Any],
     description: str,
     description_complete: bool,
+    resume_text: str | None = None,
 ) -> str:
-    """Build the full-JD, AI-first fit-scoring prompt."""
+    """Build the v7 actual-resume, requirements-first scoring prompt."""
     completeness = (
         "COMPLETE"
         if description_complete
         else "INCOMPLETE"
     )
 
+    evidence_text = (
+        redact_personal_information(resume_text).strip()
+        if resume_text
+        else resume_profile.model_dump_json(indent=2)
+    )
+
+    eligibility_text = (
+        resume_profile.personal_eligibility.model_dump_json(
+            indent=2
+        )
+    )
+
     return f"""
-You are an expert technical recruiter evaluating one candidate against one
-specific job. Read the ENTIRE job description and the ENTIRE candidate profile
-before deciding.
+Evaluate ONE RESUME against ONE JOB DESCRIPTION.
 
-Your job is to make the same holistic judgment a strong recruiter would make,
-not to count keywords.
+Answer one question:
 
-Rules:
+HOW STRONGLY DOES THE EXPERIENCE ACTUALLY DEMONSTRATED IN THIS RESUME
+MATCH WHAT THIS JOB DESCRIPTION ACTUALLY REQUIRES?
 
-1. Use only evidence in the candidate profile and job information. Never invent
-   experience, skills, eligibility, location, language fluency, or credentials.
-2. Distinguish professional production experience from portfolio/project work.
-3. Identify the role's CORE RESPONSIBILITIES even when a responsibility bullet
-   does not contain words such as "required" or "must". A central hands-on duty
-   can be a major gap if the candidate has no demonstrated experience with it.
-4. Distinguish core/required qualifications from preferred or nice-to-have
-   qualifications. Do not penalize heavily for preferred-only technologies.
-5. Evaluate alternatives correctly. "A or B", "such as", examples, and
-   "or equivalent" do not require every named technology.
-6. Consider genuinely transferable experience, but do not treat a different
-   tool as equivalent when the job specifically requires hands-on use of a
-   technology, language, platform, or domain that is central to the work.
-7. Evaluate practical eligibility from the full JD, including explicit
-   geography, required language fluency, travel, clearance, and work
-   authorization constraints. personal_eligibility contains explicit
-   candidate-supplied facts and must be treated as authoritative.
-8. Never turn an UNKNOWN personal fact into a failed requirement. Unknown
-   location, language, work authorization, clearance, relocation, or travel
-   information may create REVIEW uncertainty, but UNKNOWN by itself must never
-   produce SKIP. When an explicit personal_eligibility fact satisfies the
-   requirement, do not list that requirement as a gap. A confirmed mismatch
-   against a mandatory personal eligibility requirement must produce SKIP.
-9. Do not let a matching title or many generic skills overwhelm one major
-   missing core responsibility.
-10. Treat years-of-experience requirements as minimums unless the JD gives a
-    maximum or bounded range. More experience is not a negative by itself.
-11. Put missing explicit requirements AND missing central hands-on
-    responsibilities in hard_requirements_missing. Put preferred-only gaps in
-    preferred_qualifications_missing.
-12. Return overall_score as your HOLISTIC final fit score. Do not derive it from
-    a fixed weighted average of the component scores.
-13. Use these final decision rules consistently:
-      APPLY  = 75-100 and no major core/eligibility blocker
-      REVIEW = 50-100 when meaningful gaps or uncertainty make APPLY premature;
-               scores of 75+ may still be REVIEW when the fit is strong but a
-               material concern needs human confirmation
-      SKIP   = 0-49, including clear practical ineligibility or a major mismatch
-14. recommendation must agree with overall_score and the stated gaps.
-15. Keep strengths, gaps, risks, and summary concise and specific enough that a
-    human can understand why the score was assigned.
-16. Populate requirement_matches with the 6-10 most important requirements,
-    core responsibilities, and explicit eligibility constraints from the JD.
-    For each row, compare the requirement with concise candidate evidence and
-    label it excellent, strong, partial, or gap. Do not invent evidence. For
-    personal eligibility, use PARTIAL when the fact is unknown and GAP only for
-    a confirmed mismatch. Keep these rows explanatory only: do not calculate
-    overall_score by counting or averaging the row labels.
+Return a direct fit_score from 0 to 100.
 
-CANDIDATE PROFILE:
+============================================================
+PRIMARY RULE
+============================================================
 
-{resume_profile.model_dump_json(indent=2)}
+Judge only evidence actually demonstrated in the resume.
 
-JOB INFORMATION:
+Do not infer stronger experience simply because related keywords appear
+in different places.
+
+Do not calculate the score from a rigid point formula.
+
+============================================================
+WHAT MATTERS MOST
+============================================================
+
+Base fit_score primarily on:
+
+- required qualifications
+- required technical skills
+- core responsibilities
+- required experience and seniority
+
+Preferred qualifications should have only a small effect.
+
+Do not score whether the candidate personally wants the job.
+
+Do not penalize employer industry unless prior domain experience is
+explicitly required by the JD.
+
+============================================================
+WHOLE-REQUIREMENT EVIDENCE
+============================================================
+
+A requirement is satisfied only when the resume supports the COMPLETE
+meaning of the requirement.
+
+Do not match isolated keywords.
+
+Examples:
+
+"deep hands-on experience in dbt"
+
+is NOT fully satisfied merely because:
+
+- dbt appears in Skills
+- dbt appears in portfolio projects
+- the candidate has many years of general data experience
+
+If dbt is demonstrated but deep professional production usage is not,
+classify it as PARTIAL.
+
+
+"Python scripting within SCADA/BMS frameworks"
+
+is NOT satisfied merely because Python appears in the resume.
+
+The resume must demonstrate Python specifically in the requested
+SCADA/BMS context.
+
+
+"PySpark experience"
+
+is NOT automatically satisfied by combining Python and Spark unless
+the resume actually demonstrates PySpark or clearly demonstrates Python
+being used with Spark.
+
+If adjacent evidence exists but the requested specialization is not fully
+demonstrated, classify it as PARTIAL.
+
+============================================================
+DO NOT MANUFACTURE EXPERIENCE
+============================================================
+
+Never combine unrelated resume facts to manufacture stronger experience.
+
+Examples:
+
+12 years data engineering + dbt in Skills
+does NOT equal 12 years of dbt experience.
+
+Python + Spark does NOT automatically equal production PySpark expertise.
+
+Python + automation does NOT equal Python automation in SCADA/BMS.
+
+A technology appearing in a skills list proves familiarity only. It does
+not automatically prove deep, extensive, expert, production, or multi-year
+experience.
+
+============================================================
+GAP VS PARTIAL — STRICT
+============================================================
+
+Use GAP only when the resume provides essentially NO meaningful evidence
+for the required capability.
+
+Use PARTIAL when the underlying capability is demonstrated, but the JD
+asks for greater:
+
+- scope
+- seniority
+- organizational influence
+- depth
+- duration
+- specialization
+- context
+
+Do not use GAP merely because the resume does not prove the full requested
+scope.
+
+============================================================
+OR / AND — STRICT
+============================================================
+
+Respect logical alternatives exactly as written.
+
+If a requirement says "A OR B", demonstrating either A or B satisfies it.
+Do not require both and do not create a gap for the other side.
+
+If a requirement says "A AND B", both must be demonstrated.
+
+============================================================
+REQUIRED VS PREFERRED — STRICT
+============================================================
+
+Before placing anything in required_partial or required_gaps, verify that
+the JD actually makes it required.
+
+If the JD uses wording such as:
+
+- preferred
+- ideally
+- a plus
+- bonus
+- nice to have
+- desirable
+- highly desirable
+- comparable experience welcome
+
+then it MUST NOT appear in required_gaps.
+
+Optional qualifications belong only in preferred_matches,
+preferred_partial, or preferred_gaps.
+
+============================================================
+EQUIVALENT TECHNOLOGIES
+============================================================
+
+If the JD explicitly permits comparable, equivalent, adjacent, or similar
+technologies, evaluate the underlying capability rather than requiring the
+exact named example.
+
+Do not create a gap for an example technology when an explicitly accepted
+equivalent is demonstrated.
+
+============================================================
+NO DOUBLE COUNTING
+============================================================
+
+Classify each qualification once.
+
+Do not put the same requirement into MATCH and PARTIAL, PARTIAL and GAP,
+or both required and preferred categories.
+
+Do not represent a comparable capability as PARTIAL and separately create
+a GAP for the exact example technology when the JD accepts equivalents.
+
+============================================================
+CLASSIFICATION
+============================================================
+
+required_matches:
+Actually required qualifications or core responsibilities demonstrated at
+the requested level, depth, duration, specialization, scope, and context.
+
+required_partial:
+Actually required items where meaningful evidence exists, but the requested
+depth, duration, specialization, scope, organizational influence, or context
+is only partially demonstrated.
+
+required_gaps:
+Actually required qualifications where the underlying capability is
+materially absent.
+
+preferred_matches:
+Preferred or optional items fully demonstrated.
+
+preferred_partial:
+Preferred or optional items with related evidence but not fully demonstrated.
+
+preferred_gaps:
+Preferred or optional items not demonstrated.
+
+============================================================
+FIT SCORE
+============================================================
+
+Use professional recruiting judgment.
+
+90-100:
+Exceptional match. Nearly all important requirements are directly and
+convincingly demonstrated.
+
+80-89:
+Strong match. Most requirements are demonstrated, with one or a few
+meaningful partial areas.
+
+70-79:
+Good but imperfect match. Several meaningful requirements are partial or
+one significant required area is weak.
+
+60-69:
+Moderate match. Transferable experience exists, but multiple important
+requirements are not demonstrated strongly enough.
+
+40-59:
+Weak match. Some relevant experience exists, but major required areas are
+missing.
+
+0-39:
+Poor match. The background substantially differs from the role's core
+requirements.
+
+============================================================
+WORK ARRANGEMENT
+============================================================
+
+Do NOT include any of these in fit_score:
+
+- remote / hybrid / onsite
+- city
+- commute
+- relocation
+- salary
+- compensation
+- schedule
+
+Report the work arrangement separately in work_arrangement, including city
+and required office days when stated.
+
+Examples:
+
+Remote
+
+Hybrid — San Francisco, CA — Tuesdays and Wednesdays
+
+Onsite — San Diego, CA
+
+============================================================
+PERSONAL ELIGIBILITY
+============================================================
+
+The explicit candidate eligibility facts below are supplied separately so
+you do not invent personal facts.
+
+Do not use location, hybrid/onsite schedule, commute, relocation, salary, or
+travel logistics to increase or decrease fit_score.
+
+Do not convert UNKNOWN eligibility facts into resume-skill gaps.
+
+============================================================
+SUMMARY CONSISTENCY
+============================================================
+
+The summary MUST be consistent with every classification.
+
+If an item is absent, it cannot be described as a match.
+
+If an item is PARTIAL, do not describe it as fully demonstrated, deep,
+extensive, expert, or production-grade unless the resume evidence supports
+that stronger wording.
+
+Do not add stronger adjectives in the summary than the resume supports.
+
+============================================================
+FINAL REVIEW
+============================================================
+
+Before returning:
+
+1. Re-read the entire JD.
+2. Re-read the entire resume.
+3. Verify every MATCH against the complete requirement.
+4. Respect OR and AND exactly as written.
+5. Do not use keyword overlap alone.
+6. Do not combine unrelated facts to manufacture experience.
+7. Verify depth and duration with actual evidence.
+8. Verify context-specific requirements with context-specific evidence.
+9. Distinguish professional work from portfolio/project experience.
+10. Verify every required_partial and required_gap is actually required.
+11. Move optional qualifications into the preferred section.
+12. Verify GAP vs PARTIAL using the underlying-capability rule.
+13. Ensure the summary does not contradict or exaggerate classifications.
+14. Keep work arrangement completely outside fit_score.
+
+Return only the final reviewed assessment.
+
+============================================================
+ACTUAL RESUME
+============================================================
+
+{evidence_text}
+
+============================================================
+EXPLICIT CANDIDATE ELIGIBILITY FACTS
+============================================================
+
+{eligibility_text}
+
+============================================================
+JOB INFORMATION
+============================================================
 
 Title: {job.get("title") or "Not provided"}
 Company: {job.get("company_name") or "Not provided"}
 Location: {job.get("location") or "Not provided"}
-Salary: {job.get("salary_text") or "Not provided"}
 Source: {job.get("source") or "Not provided"}
-
 Job-description completeness: {completeness}
 
-FULL JOB DESCRIPTION:
+============================================================
+FULL JOB DESCRIPTION
+============================================================
 
 {description or "No complete job description is available."}
 """.strip()
-
 
 
 
@@ -496,6 +794,489 @@ def determine_recommendation(
         return "apply"
 
     return "review"
+
+
+FIT_SUMMARY_NEGATIONS = (
+    " absent",
+    " missing",
+    " lacks",
+    " lack of",
+    " not demonstrated",
+    " does not demonstrate",
+    " not shown",
+    " no direct",
+    " no experience",
+)
+
+FIT_SUMMARY_OVERCLAIMS = (
+    "deep ",
+    "extensive ",
+    "expert",
+    "production-grade",
+    "production grade",
+    "mastery",
+    "fully demonstrated",
+    "fully satisfies",
+)
+
+FIT_ITEM_STOPWORDS = {
+    "and", "or", "the", "with", "for", "from", "into", "using", "use",
+    "required", "requirement", "requirements", "preferred", "experience",
+    "skills", "skill", "strong", "working", "knowledge", "ability",
+    "demonstrated", "hands", "hand", "level", "years", "year", "such",
+    "including", "include", "includes", "highly", "desirable", "plus",
+    "deep", "extensive", "expert", "production", "grade", "mastery",
+}
+
+
+def parse_fit_analysis_payload(
+    payload: Any,
+    provider_name: str,
+) -> FitAnalysis:
+    if not isinstance(payload, dict):
+        raise ResumeMatcherError(
+            f"{provider_name} returned an unexpected "
+            f"response type: {type(payload).__name__}."
+        )
+
+    list_fields = [
+        "required_matches",
+        "required_partial",
+        "required_gaps",
+        "preferred_matches",
+        "preferred_partial",
+        "preferred_gaps",
+    ]
+
+    for field_name in list_fields:
+        if payload.get(field_name) is None:
+            payload[field_name] = []
+
+    try:
+        return FitAnalysis.model_validate(payload)
+    except ValidationError as error:
+        response_preview = json.dumps(
+            payload,
+            indent=2,
+            ensure_ascii=False,
+        )[:3_000]
+        raise ResumeMatcherError(
+            f"{provider_name} returned an invalid fit response.\n\n"
+            f"Validation details:\n{error}\n\n"
+            f"Response preview:\n{response_preview}"
+        ) from error
+
+
+def parse_fit_analysis_response(
+    response: Any,
+) -> FitAnalysis:
+    if isinstance(response.parsed, FitAnalysis):
+        return response.parsed
+
+    payload: Any = None
+
+    if response.parsed is not None:
+        if isinstance(response.parsed, BaseModel):
+            payload = response.parsed.model_dump()
+        else:
+            payload = response.parsed
+    elif response.text:
+        try:
+            payload = json.loads(response.text)
+        except json.JSONDecodeError as error:
+            preview = response.text[:2_000]
+            raise ResumeMatcherError(
+                "Gemini returned invalid JSON. "
+                f"JSON error: {error}. "
+                f"Response preview: {preview}"
+            ) from error
+    else:
+        raise ResumeMatcherError(
+            "Gemini returned an empty response."
+        )
+
+    return parse_fit_analysis_payload(
+        payload=payload,
+        provider_name="Gemini",
+    )
+
+
+def get_openai_fit_schema() -> dict[str, Any]:
+    schema = FitAnalysis.model_json_schema()
+
+    def make_strict(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "object" or "properties" in node:
+                node["additionalProperties"] = False
+                properties = node.get("properties")
+                if isinstance(properties, dict):
+                    node["required"] = list(properties.keys())
+
+            for value in node.values():
+                make_strict(value)
+        elif isinstance(node, list):
+            for value in node:
+                make_strict(value)
+
+    make_strict(schema)
+    return schema
+
+
+def parse_openai_fit_content(
+    content: str | None,
+) -> FitAnalysis:
+    if not content:
+        raise ResumeMatcherError(
+            "OpenAI returned an empty response."
+        )
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as error:
+        preview = content[:2_000]
+        raise ResumeMatcherError(
+            "OpenAI returned invalid JSON. "
+            f"JSON error: {error}. "
+            f"Response preview: {preview}"
+        ) from error
+
+    return parse_fit_analysis_payload(
+        payload=payload,
+        provider_name="OpenAI",
+    )
+
+
+def _normalize_fit_item(value: str) -> str:
+    normalized = value.casefold().replace("start-up", "startup")
+    normalized = re.sub(r"[^a-z0-9+#.]+", " ", normalized)
+    return " ".join(normalized.split())
+
+
+def _fit_item_terms(value: str) -> set[str]:
+    return {
+        term
+        for term in _normalize_fit_item(value).split()
+        if len(term) >= 3
+        and term not in FIT_ITEM_STOPWORDS
+    }
+
+
+def _summary_sentences(summary: str) -> list[str]:
+    return [
+        sentence.strip().casefold().replace("start-up", "startup")
+        for sentence in re.split(r"(?<=[.!?])\s+", summary)
+        if sentence.strip()
+    ]
+
+
+def _sentence_matches_item(
+    sentence: str,
+    item: str,
+) -> bool:
+    terms = _fit_item_terms(item)
+
+    if not terms:
+        return False
+
+    sentence_terms = set(
+        _normalize_fit_item(sentence).split()
+    )
+    shared = terms & sentence_terms
+    needed = 1 if len(terms) == 1 else 2
+    return len(shared) >= needed
+
+
+def fit_output_contradictions(
+    analysis: FitAnalysis,
+) -> list[str]:
+    """Return deterministic output-contract contradictions worth one retry."""
+    contradictions: list[str] = []
+
+    groups = {
+        "required_matches": analysis.required_matches,
+        "required_partial": analysis.required_partial,
+        "required_gaps": analysis.required_gaps,
+        "preferred_matches": analysis.preferred_matches,
+        "preferred_partial": analysis.preferred_partial,
+        "preferred_gaps": analysis.preferred_gaps,
+    }
+
+    normalized_groups = {
+        name: {
+            _normalize_fit_item(item)
+            for item in items
+            if _normalize_fit_item(item)
+        }
+        for name, items in groups.items()
+    }
+
+    conflict_pairs = [
+        ("required_matches", "required_partial"),
+        ("required_matches", "required_gaps"),
+        ("required_partial", "required_gaps"),
+        ("preferred_matches", "preferred_partial"),
+        ("preferred_matches", "preferred_gaps"),
+        ("preferred_partial", "preferred_gaps"),
+    ]
+
+    for left_name, right_name in conflict_pairs:
+        overlap = (
+            normalized_groups[left_name]
+            & normalized_groups[right_name]
+        )
+        if overlap:
+            contradictions.append(
+                f"Same qualification appears in {left_name} and {right_name}: "
+                + "; ".join(sorted(overlap))
+            )
+
+    summary_sentences = _summary_sentences(
+        analysis.summary
+    )
+
+    for item in (
+        analysis.required_matches
+        + analysis.preferred_matches
+    ):
+        for sentence in summary_sentences:
+            if (
+                _sentence_matches_item(sentence, item)
+                and any(
+                    phrase in f" {sentence}"
+                    for phrase in FIT_SUMMARY_NEGATIONS
+                )
+            ):
+                contradictions.append(
+                    "Summary describes a MATCH as absent or missing: "
+                    f"{item}"
+                )
+                break
+
+    for item in (
+        analysis.required_partial
+        + analysis.preferred_partial
+        + analysis.required_gaps
+        + analysis.preferred_gaps
+    ):
+        for sentence in summary_sentences:
+            if (
+                _sentence_matches_item(sentence, item)
+                and any(
+                    phrase in sentence
+                    for phrase in FIT_SUMMARY_OVERCLAIMS
+                )
+                and not any(
+                    marker in sentence
+                    for marker in (
+                        "partial",
+                        "not ",
+                        "rather than",
+                        "only ",
+                        "limited",
+                        "lacks",
+                        "absent",
+                        "missing",
+                    )
+                )
+            ):
+                contradictions.append(
+                    "Summary overstates a PARTIAL/GAP qualification: "
+                    f"{item}"
+                )
+                break
+
+    return list(dict.fromkeys(contradictions))
+
+
+def build_fit_correction_prompt(
+    original_prompt: str,
+    analysis: FitAnalysis,
+    contradictions: list[str],
+) -> str:
+    issues = "\n".join(
+        f"- {item}"
+        for item in contradictions
+    )
+
+    return (
+        original_prompt
+        + "\n\n"
+        + "============================================================\n"
+        + "CORRECTION PASS\n"
+        + "============================================================\n\n"
+        + "Your previous structured answer had the following internal "
+        + "contract contradiction(s):\n"
+        + issues
+        + "\n\nPREVIOUS ANSWER:\n"
+        + analysis.model_dump_json(indent=2)
+        + "\n\nReturn a corrected final assessment using the SAME resume "
+        + "and JD evidence. Fix only unsupported or inconsistent "
+        + "classifications/wording. Do not invent evidence. Keep fit_score "
+        + "unchanged unless the contradiction itself materially changes the "
+        + "requirements-fit judgment."
+    )
+
+
+def _legacy_recommendation_for_fit(
+    analysis: FitAnalysis,
+) -> Literal["apply", "review", "skip"]:
+    """Map the direct AI fit score to the existing UI recommendation labels."""
+    if analysis.fit_score < 50:
+        return "skip"
+
+    if analysis.required_gaps:
+        return "review"
+
+    if analysis.fit_score >= 75:
+        return "apply"
+
+    return "review"
+
+
+def fit_analysis_to_job_match_analysis(
+    analysis: FitAnalysis,
+) -> JobMatchAnalysis:
+    """Adapt the simple v7 result to the existing durable score schema."""
+    requirement_rows: list[RequirementMatch] = []
+
+    def add_rows(
+        items: list[str],
+        match: Literal["excellent", "strong", "partial", "gap"],
+        evidence: str,
+        prefix: str = "",
+    ) -> None:
+        for item in items:
+            if len(requirement_rows) >= 10:
+                return
+            requirement_rows.append(
+                RequirementMatch(
+                    job_requirement=(
+                        f"{prefix}{item}"
+                        if prefix
+                        else item
+                    ),
+                    candidate_background=evidence,
+                    match=match,
+                )
+            )
+
+    add_rows(
+        analysis.required_matches,
+        "strong",
+        "Demonstrated by the actual resume.",
+    )
+    add_rows(
+        analysis.required_partial,
+        "partial",
+        "Related resume evidence exists, but the full requested level is not demonstrated.",
+    )
+    add_rows(
+        analysis.required_gaps,
+        "gap",
+        "The required capability is not meaningfully demonstrated by the resume.",
+    )
+    add_rows(
+        analysis.preferred_matches,
+        "strong",
+        "Demonstrated by the actual resume.",
+        prefix="Preferred: ",
+    )
+    add_rows(
+        analysis.preferred_partial,
+        "partial",
+        "Related evidence exists, but the preferred qualification is only partially demonstrated.",
+        prefix="Preferred: ",
+    )
+    add_rows(
+        analysis.preferred_gaps,
+        "gap",
+        "The preferred qualification is not demonstrated by the resume.",
+        prefix="Preferred: ",
+    )
+
+    risks = [
+        f"Partial required qualification: {item}"
+        for item in analysis.required_partial
+    ] + [
+        f"Partial preferred qualification: {item}"
+        for item in analysis.preferred_partial
+    ]
+
+    score = analysis.fit_score
+
+    return JobMatchAnalysis(
+        title_fit=score,
+        skills_fit=score,
+        experience_fit=score,
+        seniority_fit=score,
+        industry_fit=score,
+        location_fit=100,
+        overall_score=score,
+        recommendation=_legacy_recommendation_for_fit(
+            analysis
+        ),
+        confidence="high",
+        matching_strengths=list(
+            dict.fromkeys(
+                analysis.required_matches
+                + analysis.preferred_matches
+            )
+        ),
+        hard_requirements_missing=list(
+            dict.fromkeys(
+                analysis.required_gaps
+            )
+        ),
+        preferred_qualifications_missing=list(
+            dict.fromkeys(
+                analysis.preferred_gaps
+            )
+        ),
+        risk_factors=list(dict.fromkeys(risks)),
+        requirement_matches=requirement_rows,
+        summary=analysis.summary,
+    )
+
+
+def is_retryable_provider_error(
+    error: Exception,
+) -> bool:
+    message = str(error).casefold()
+
+    # Daily/project quota exhaustion should fall through to the existing
+    # provider-fallback logic rather than burning retry calls.
+    if (
+        "generaterequestsperday" in message
+        or "insufficient_quota" in message
+        or "quota exceeded" in message
+    ):
+        return False
+
+    retry_markers = (
+        "timeout",
+        "timed out",
+        "429",
+        "rate limit",
+        "resource_exhausted",
+        "500",
+        "502",
+        "503",
+        "504",
+        "internal server",
+        "service unavailable",
+        "temporarily unavailable",
+        "connection reset",
+    )
+
+    return any(
+        marker in message
+        for marker in retry_markers
+    )
+
+
+def _retry_sleep(attempt: int) -> None:
+    time.sleep(1.0 * (2 ** attempt))
+
 
 def parse_job_match_payload(
     payload: Any,
@@ -672,6 +1453,11 @@ def confirmed_mandatory_personal_mismatches(
         if not clause or kind is None:
             continue
 
+        # Work arrangement and logistics are informational in v7 and must
+        # never reduce the resume-to-JD fit score.
+        if kind in {"location", "relocation", "travel"}:
+            continue
+
         evidence = personal_requirement_evidence(
             clause,
             description,
@@ -704,6 +1490,10 @@ def normalize_personal_eligibility(
 
         if evidence is None:
             hard_missing.append(gap)
+            continue
+
+        if evidence["kind"] in {"location", "relocation", "travel"}:
+            saw_nonfailing_personal = True
             continue
 
         state = evidence["state"]
@@ -1103,11 +1893,240 @@ def build_resume_job_match(
     )
 
 
+def _request_gemini_fit(
+    client: Any,
+    model_name: str,
+    prompt: str,
+) -> Any:
+    """Call Gemini with up to two transient retries."""
+    for attempt in range(3):
+        try:
+            return client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=FitAnalysis,
+                    temperature=0.1,
+                ),
+            )
+        except Exception as error:
+            if (
+                attempt < 2
+                and is_retryable_provider_error(error)
+            ):
+                _retry_sleep(attempt)
+                continue
+
+            raise ResumeMatcherError(
+                "Gemini was unable to score the job. "
+                f"{type(error).__name__}: {error}"
+            ) from error
+
+    raise ResumeMatcherError(
+        "Gemini was unable to score the job."
+    )
+
+
+def _valid_gemini_fit(
+    client: Any,
+    model_name: str,
+    prompt: str,
+) -> FitAnalysis:
+    """Retry one malformed/invalid structured response."""
+    last_error: ResumeMatcherError | None = None
+
+    for attempt in range(2):
+        response = _request_gemini_fit(
+            client=client,
+            model_name=model_name,
+            prompt=prompt,
+        )
+
+        try:
+            return parse_fit_analysis_response(
+                response
+            )
+        except ResumeMatcherError as error:
+            last_error = error
+
+            if attempt == 0:
+                continue
+
+            raise
+
+    assert last_error is not None
+    raise last_error
+
+
+def _request_openai_fit(
+    client: Any,
+    model_name: str,
+    prompt: str,
+) -> str | None:
+    """Call OpenAI with up to two transient retries."""
+    for attempt in range(3):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Return only valid JSON matching the supplied "
+                            "schema. Evaluate the actual resume against the "
+                            "full JD. Do not invent evidence. Work arrangement "
+                            "must not affect fit_score."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "fit_analysis",
+                        "schema": get_openai_fit_schema(),
+                        "strict": True,
+                    },
+                },
+                temperature=0.1,
+            )
+
+            return response.choices[0].message.content
+
+        except Exception as error:
+            if (
+                attempt < 2
+                and is_retryable_provider_error(error)
+            ):
+                _retry_sleep(attempt)
+                continue
+
+            raise ResumeMatcherError(
+                "OpenAI was unable to score the job. "
+                f"{type(error).__name__}: {error}"
+            ) from error
+
+    raise ResumeMatcherError(
+        "OpenAI was unable to score the job."
+    )
+
+
+def _valid_openai_fit(
+    client: Any,
+    model_name: str,
+    prompt: str,
+) -> FitAnalysis:
+    """Retry one malformed/invalid structured response."""
+    last_error: ResumeMatcherError | None = None
+
+    for attempt in range(2):
+        content = _request_openai_fit(
+            client=client,
+            model_name=model_name,
+            prompt=prompt,
+        )
+
+        try:
+            return parse_openai_fit_content(
+                content
+            )
+        except ResumeMatcherError as error:
+            last_error = error
+
+            if attempt == 0:
+                continue
+
+            raise
+
+    assert last_error is not None
+    raise last_error
+
+
+def _validate_or_correct_gemini_fit(
+    client: Any,
+    model_name: str,
+    prompt: str,
+    analysis: FitAnalysis,
+) -> FitAnalysis:
+    contradictions = fit_output_contradictions(
+        analysis
+    )
+
+    if not contradictions:
+        return analysis
+
+    corrected = _valid_gemini_fit(
+        client=client,
+        model_name=model_name,
+        prompt=build_fit_correction_prompt(
+            original_prompt=prompt,
+            analysis=analysis,
+            contradictions=contradictions,
+        ),
+    )
+
+    remaining = fit_output_contradictions(
+        corrected
+    )
+
+    if remaining:
+        raise ResumeMatcherError(
+            "Gemini fit result remained internally inconsistent after "
+            "one correction retry: "
+            + "; ".join(remaining)
+        )
+
+    return corrected
+
+
+def _validate_or_correct_openai_fit(
+    client: Any,
+    model_name: str,
+    prompt: str,
+    analysis: FitAnalysis,
+) -> FitAnalysis:
+    contradictions = fit_output_contradictions(
+        analysis
+    )
+
+    if not contradictions:
+        return analysis
+
+    corrected = _valid_openai_fit(
+        client=client,
+        model_name=model_name,
+        prompt=build_fit_correction_prompt(
+            original_prompt=prompt,
+            analysis=analysis,
+            contradictions=contradictions,
+        ),
+    )
+
+    remaining = fit_output_contradictions(
+        corrected
+    )
+
+    if remaining:
+        raise ResumeMatcherError(
+            "OpenAI fit result remained internally inconsistent after "
+            "one correction retry: "
+            + "; ".join(remaining)
+        )
+
+    return corrected
+
+
 def score_resume_against_job(
     resume_profile: ResumeProfile,
     job: dict[str, Any],
     model_name: str | None = None,
+    resume_text: str | None = None,
 ) -> ResumeJobMatch:
+    """Score one job from the actual resume text and full JD."""
     resume_profile = apply_candidate_eligibility_overrides(
         resume_profile
     )
@@ -1119,7 +2138,9 @@ def score_resume_against_job(
     ) = get_description_information(job)
 
     if not description_complete:
-        raise ResumeMatcherError("A current FULL_JD is required before AI scoring.")
+        raise ResumeMatcherError(
+            "A current FULL_JD is required before AI scoring."
+        )
 
     selected_model = (
         model_name
@@ -1128,36 +2149,29 @@ def score_resume_against_job(
 
     prompt = build_job_match_prompt(
         resume_profile=resume_profile,
+        resume_text=resume_text,
         job=job,
         description=description,
-        description_complete=(
-            description_complete
-        ),
+        description_complete=description_complete,
     )
 
     client = get_gemini_client()
 
-    try:
-        response = client.models.generate_content(
-            model=selected_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type=(
-                    "application/json"
-                ),
-                response_schema=JobMatchAnalysis,
-                temperature=0.1,
-            ),
-        )
+    fit_analysis = _valid_gemini_fit(
+        client=client,
+        model_name=selected_model,
+        prompt=prompt,
+    )
 
-    except Exception as error:
-        raise ResumeMatcherError(
-            "Gemini was unable to score the job. "
-            f"{type(error).__name__}: {error}"
-        ) from error
+    fit_analysis = _validate_or_correct_gemini_fit(
+        client=client,
+        model_name=selected_model,
+        prompt=prompt,
+        analysis=fit_analysis,
+    )
 
-    analysis = parse_job_match_response(
-        response
+    analysis = fit_analysis_to_job_match_analysis(
+        fit_analysis
     )
 
     return build_resume_job_match(
@@ -1174,7 +2188,9 @@ def score_resume_against_job_openai(
     resume_profile: ResumeProfile,
     job: dict[str, Any],
     model_name: str | None = None,
+    resume_text: str | None = None,
 ) -> ResumeJobMatch:
+    """OpenAI fallback using the same actual-resume v7 contract."""
     resume_profile = apply_candidate_eligibility_overrides(
         resume_profile
     )
@@ -1201,7 +2217,9 @@ def score_resume_against_job_openai(
     ) = get_description_information(job)
 
     if not description_complete:
-        raise ResumeMatcherError("A current FULL_JD is required before AI scoring.")
+        raise ResumeMatcherError(
+            "A current FULL_JD is required before AI scoring."
+        )
 
     selected_model = (
         model_name
@@ -1210,58 +2228,31 @@ def score_resume_against_job_openai(
 
     prompt = build_job_match_prompt(
         resume_profile=resume_profile,
+        resume_text=resume_text,
         job=job,
         description=description,
-        description_complete=(
-            description_complete
-        ),
+        description_complete=description_complete,
     )
 
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(
+        api_key=api_key
+    )
 
-    try:
-        response = client.chat.completions.create(
-            model=selected_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Return only valid JSON matching the supplied schema. "
-                        "You must populate overall_score and recommendation in addition "
-                        "to the component fit scores, requirement comparisons, strengths, "
-                        "gaps, risks, confidence, and summary. overall_score and all *_fit "
-                        "fields must be integers "
-                        "from 0 to 100. recommendation must be apply, review, or skip and "
-                        "must agree with the score bands in the user prompt."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "job_match_analysis",
-                    "schema": (
-                        get_openai_job_match_schema()
-                    ),
-                    "strict": True,
-                },
-            },
-            temperature=0.1,
-        )
+    fit_analysis = _valid_openai_fit(
+        client=client,
+        model_name=selected_model,
+        prompt=prompt,
+    )
 
-    except Exception as error:
-        raise ResumeMatcherError(
-            "OpenAI was unable to score the job. "
-            f"{type(error).__name__}: {error}"
-        ) from error
+    fit_analysis = _validate_or_correct_openai_fit(
+        client=client,
+        model_name=selected_model,
+        prompt=prompt,
+        analysis=fit_analysis,
+    )
 
-    content = response.choices[0].message.content
-    analysis = parse_openai_job_match_content(
-        content
+    analysis = fit_analysis_to_job_match_analysis(
+        fit_analysis
     )
 
     return build_resume_job_match(
@@ -1272,3 +2263,4 @@ def score_resume_against_job_openai(
         description_word_count=description_word_count,
         description_complete=description_complete,
     )
+

@@ -24,6 +24,9 @@ class ScoringDiagnosticsTests(unittest.TestCase):
         replacements = dict(
             initialize_ai_tables=Mock(), get_model_name=Mock(return_value='fixture-model'),
             load_cached_profile=Mock(return_value=object()),
+            load_cached_resume_text=Mock(
+                return_value="Fixture resume with SQL, Python, and data engineering experience."
+            ),
             count_cached_canonical_scores=Mock(return_value=0),
             screen_unscreened_jobs=Mock(return_value=SimpleNamespace(screened=0)),
             load_candidate_jobs=Mock(return_value=jobs),

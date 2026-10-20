@@ -24,6 +24,7 @@ from src.ai.resume_profiler import (
     apply_candidate_eligibility_overrides,
     get_model_name,
     profile_resume,
+    redact_personal_information,
 )
 from src.database import (
     get_connection,
@@ -47,6 +48,7 @@ def initialize_ai_tables() -> None:
                 filename VARCHAR NOT NULL,
                 model_name VARCHAR NOT NULL,
                 profile_json VARCHAR NOT NULL,
+                redacted_resume_text VARCHAR,
                 created_at TIMESTAMPTZ
                     DEFAULT CURRENT_TIMESTAMP
             )
@@ -111,6 +113,14 @@ def initialize_ai_tables() -> None:
             """
         )
 
+        connection.execute(
+            """
+            ALTER TABLE resume_profiles
+            ADD COLUMN IF NOT EXISTS
+                redacted_resume_text VARCHAR
+            """
+        )
+
 
 def load_cached_profile(
     resume_hash: str,
@@ -146,15 +156,83 @@ def load_cached_profile(
     )
 
 
+def load_cached_resume_text(
+    resume_hash: str,
+) -> str | None:
+    """Load redacted resume text used by the v7 scorer."""
+    initialize_ai_tables()
+
+    with get_connection() as connection:
+        result = connection.execute(
+            """
+            SELECT redacted_resume_text
+            FROM resume_profiles
+            WHERE resume_hash = ?
+            """,
+            [resume_hash],
+        ).fetchone()
+
+    if not result:
+        return None
+
+    value = str(result[0] or "").strip()
+    return value or None
+
+
+def save_cached_resume_text(
+    resume_hash: str,
+    resume_text: str,
+) -> None:
+    """Persist contact-redacted resume text for exact-resume scoring."""
+    redacted_text = redact_personal_information(
+        resume_text
+    ).strip()
+
+    if not redacted_text:
+        return
+
+    initialize_ai_tables()
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE resume_profiles
+            SET redacted_resume_text = ?
+            WHERE resume_hash = ?
+            """,
+            [redacted_text, resume_hash],
+        )
+
+
 def save_resume_profile(
     resume_hash: str,
     filename: str,
     model_name: str,
     profile: ResumeProfile,
+    resume_text: str | None = None,
 ) -> None:
     initialize_ai_tables()
 
+    redacted_text = (
+        redact_personal_information(resume_text).strip()
+        if resume_text is not None
+        else None
+    )
+
     with get_connection() as connection:
+        if redacted_text is None:
+            existing = connection.execute(
+                """
+                SELECT redacted_resume_text
+                FROM resume_profiles
+                WHERE resume_hash = ?
+                """,
+                [resume_hash],
+            ).fetchone()
+
+            if existing:
+                redacted_text = existing[0]
+
         connection.execute(
             """
             DELETE FROM resume_profiles
@@ -169,15 +247,17 @@ def save_resume_profile(
                 resume_hash,
                 filename,
                 model_name,
-                profile_json
+                profile_json,
+                redacted_resume_text
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
             """,
             [
                 resume_hash,
                 filename,
                 model_name,
                 profile.model_dump_json(),
+                redacted_text,
             ],
         )
 
@@ -647,6 +727,10 @@ def main() -> None:
             print(
                 "Using cached resume profile."
             )
+            save_cached_resume_text(
+                resume_hash=resume.resume_hash,
+                resume_text=resume.text,
+            )
 
         else:
             print(
@@ -667,6 +751,7 @@ def main() -> None:
                 filename=resume.filename,
                 model_name=model_name,
                 profile=resume_profile,
+                resume_text=resume.text,
             )
 
         jobs = load_candidate_jobs(
@@ -725,6 +810,7 @@ def main() -> None:
             try:
                 match = score_resume_against_job(
                     resume_profile=resume_profile,
+                    resume_text=resume.text,
                     job=job,
                     model_name=model_name,
                 )
