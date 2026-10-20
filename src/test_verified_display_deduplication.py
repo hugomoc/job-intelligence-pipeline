@@ -159,9 +159,12 @@ class VerifiedDisplayTests(unittest.TestCase):
                 self.assertEqual({j['record_key'] for j in namespace['filtered_jobs']}, expected)
             indicator = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
                 and ast.unparse(node.test) == "job.get('similar_job_previously_removed')")
+            # The warning now shares one compact caption with the other notes.
+            notes_caption = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                and ast.unparse(node.test) == 'notes')
             ui = Mock()
-            exec(compile(ast.Module(body=[indicator], type_ignores=[]),
-                'streamlit_app.py', 'exec'), dict(job=new, st=ui))
+            exec(compile(ast.Module(body=[indicator, notes_caption], type_ignores=[]),
+                'streamlit_app.py', 'exec'), dict(job=new, st=ui, notes=[]))
             ui.caption.assert_called_once_with('Similar job previously removed')
         # Derived hints must disappear after the older dismissal is restored to NEW.
         old.update(application_status='new')

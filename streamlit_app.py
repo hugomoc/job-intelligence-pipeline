@@ -316,9 +316,9 @@ def render_job_listing(job: dict) -> None:
     current_actionability = effective_status(job)
 
     with st.container(border=True):
-        header_left, header_right = st.columns([4, 1])
+        header, assessment, actions = st.columns([4, 2, 5], gap="small")
 
-        with header_left:
+        with header:
             st.subheader(job["title"])
             st.caption(
                 " | ".join(
@@ -333,130 +333,112 @@ def render_job_listing(job: dict) -> None:
                 )
             )
 
-        with header_right:
+        with assessment:
             if job.get("ai_score") is not None:
-                st.metric(
-                    "AI fit",
-                    f"{job['ai_score']}%",
+                recommendation = str(job.get("recommendation") or "").lower()
+                st.markdown(
+                    f"**AI fit {job['ai_score']}% · "
+                    f"{STATUS_LABELS.get(recommendation, recommendation.upper())}**"
                 )
             else:
                 st.caption(pipeline_state.label)
+            st.caption(APPLICATION_STATUS_LABELS.get(application_status, application_status))
 
-            st.caption(
-                APPLICATION_STATUS_LABELS.get(
-                    application_status,
-                    application_status,
-                )
-            )
-
-            if job.get('candidate_assessment_id'):
-                st.button('Rescore this job', key='rescore-'+job['record_key'],
-                    help='Creates a new assessment using your latest resume; keeps previous assessments.',
-                    on_click=manual_rescore, args=(job['record_key'],))
-
-            if job.get("similar_job_previously_removed"):
-                st.caption("Similar job previously removed")
-
-            if job.get("application_status_scope") == "verified_posting":
-                st.caption(
-                    "Previously "
-                    f"{application_status} via "
-                    f"{job.get('application_status_source') or 'another source'}"
-                )
-
-            if job.get("has_current_complete_ai_assessment"):
-                st.caption({"ACTIVE": "Active", "INACTIVE": "Inactive / posting closed",
-                    "LOCATION_MISMATCH": "Location mismatch", "UNKNOWN": "Current status unknown"}[current_actionability])
-                if job.get("actionability_reason"):
-                    st.caption(job["actionability_reason"])
-            open_target = select_job_open_target(job)
-            if open_target.url:
-                st.link_button(open_target.label, open_target.url)
-
-            if open_target.note:
-                st.caption(open_target.note)
-
+        open_target = select_job_open_target(job)
+        with actions:
+            open_action, apply_action, remove_action = st.columns(3, gap="small")
+            with open_action:
+                if open_target.url:
+                    st.link_button(open_target.label, open_target.url, width="stretch")
             if application_status == "new":
-                st.button(
-                    "Mark applied", key=f"apply-{record_key}", type="primary",
-                    on_click=change_application_status,
-                    args=(record_key, "applied"),
-                )
-                st.button(
-                    "Mark removed", key=f"remove-{record_key}",
-                    on_click=change_application_status,
-                    args=(record_key, "removed"),
-                )
+                with apply_action:
+                    st.button(
+                        "Mark applied", key=f"apply-{record_key}", type="primary",
+                        on_click=change_application_status,
+                        args=(record_key, "applied"), width="stretch",
+                    )
+                with remove_action:
+                    st.button(
+                        "Mark removed", key=f"remove-{record_key}",
+                        on_click=change_application_status,
+                        args=(record_key, "removed"), width="stretch",
+                    )
 
+        metadata = []
         if job.get("posted_age_text"):
-            st.caption(f"Posted: {job['posted_age_text']}")
-
+            metadata.append(f"Posted: {job['posted_age_text']}")
         sent_date = format_seen_date(job.get("discovered_at"))
-
         if sent_date:
-            st.caption(f"Email date: {sent_date}")
-
+            metadata.append(f"Email date: {sent_date}")
         if job.get("best_search_title"):
-            st.caption(
-                "Best search: "
-                f"{job['best_search_title']} "
-                f"({job.get('rule_score') or 0})"
+            metadata.append(
+                f"Best search: {job['best_search_title']} ({job.get('rule_score') or 0})"
             )
-
-        title_fit = TITLE_FIT_LABELS.get(
-            job.get("title_classification"),
-            "Possible",
-        )
-        title_reason = job.get("title_filter_reason")
+        title_fit = TITLE_FIT_LABELS.get(job.get("title_classification"), "Possible")
         title_score = job.get("title_match_score")
         title_caption = f"Title Fit: {title_fit}"
-
         if title_score is not None:
             title_caption += f" ({title_score})"
+        metadata.extend([
+            title_caption,
+            f"Fit priority: {fit_priority_label(job)}",
+            f"Description: {DESCRIPTION_STATE_LABELS.get(job.get('description_state'), 'Unknown')}",
+        ])
+        st.caption(" · ".join(metadata))
 
-        if title_reason:
-            title_caption += f" - {title_reason}"
-
-        st.caption(title_caption)
-        st.caption(
-            "Fit priority: "
-            f"{fit_priority_label(job)}"
-        )
-        st.caption(
-            "Priority source: "
-            f"{fit_priority_source(job)}"
-        )
-        st.caption(
-            "Description: "
-            f"{DESCRIPTION_STATE_LABELS.get(job.get('description_state'), 'Unknown')}"
-        )
-
-        if job.get("has_incomplete_description"):
-            description_word_count = job.get(
-                "description_word_count"
+        notes = []
+        if job.get("similar_job_previously_removed"):
+            notes.append("Similar job previously removed")
+        if job.get("application_status_scope") == "verified_posting":
+            notes.append(
+                f"Previously {application_status} via "
+                f"{job.get('application_status_source') or 'another source'}"
             )
-            if description_word_count is not None:
-                st.warning(
-                    "Incomplete job description "
-                    f"({description_word_count} words)."
-                )
-            else:
-                st.warning("Incomplete job description.")
+        if job.get("has_current_complete_ai_assessment"):
+            notes.append({"ACTIVE": "Active", "INACTIVE": "Inactive / posting closed",
+                "LOCATION_MISMATCH": "Location mismatch", "UNKNOWN": "Current status unknown"}[current_actionability])
+        if open_target.note:
+            notes.append(open_target.note)
+        if job.get("has_incomplete_description"):
+            word_count = job.get("description_word_count")
+            notes.append(
+                f"Incomplete job description ({word_count} words)."
+                if word_count is not None else "Incomplete job description."
+            )
+        if job.get("enrichment_status") == "resolution_rejected":
+            notes.append("Enrichment: identity mismatch rejected.")
+        if notes:
+            st.caption(" · ".join(notes))
 
-        if job.get("enrichment_status"):
-            status_text = job.get("enrichment_status")
-
-            if status_text == "resolution_rejected":
-                st.warning("Enrichment: identity mismatch rejected.")
+        if job.get("ai_score") is not None:
+            with st.expander("Scoring details"):
+                if job.get("summary"):
+                    st.write(job["summary"])
+                for label, field in (
+                    ("Matching strengths", "matching_strengths"),
+                    ("Missing hard requirements", "hard_requirements_missing"),
+                    ("Missing preferred qualifications", "preferred_qualifications_missing"),
+                    ("Risks", "risk_factors"),
+                ):
+                    if job.get(field):
+                        st.caption(label)
+                        render_list(label, job[field])
 
         if (
             pipeline_state.details
             or job.get("enrichment_status")
             or job.get("official_job_url")
             or job.get("verified_posting_key")
+            or job.get("actionability_reason")
+            or job.get("title_filter_reason")
         ):
             with st.expander("Enrichment details"):
                 st.caption(f"Pipeline state: {pipeline_state.label}")
+                st.caption(f"Priority source: {fit_priority_source(job)}")
+                if job.get("title_filter_reason"):
+                    st.caption(f"Title fit reason: {job['title_filter_reason']}")
+                if job.get("actionability_reason"):
+                    st.caption(job["actionability_reason"])
 
                 for detail_label, detail_value in pipeline_state.details:
                     st.caption(f"{detail_label}: {detail_value}")
@@ -526,6 +508,15 @@ def render_job_listing(job: dict) -> None:
                         "Official validation: "
                         f"{job['official_url_validation_reason']}"
                     )
+
+        if job.get("candidate_assessment_id"):
+            with st.expander("Advanced actions"):
+                st.button(
+                    "Rescore this job", key=f"rescore-{record_key}",
+                    help="Creates a new assessment using your latest resume; keeps previous assessments.",
+                    on_click=manual_rescore, args=(record_key,),
+                )
+
 
 st.set_page_config(
     page_title="Job Intelligence",
