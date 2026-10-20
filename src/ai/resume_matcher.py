@@ -795,6 +795,475 @@ def determine_recommendation(
 
     return "review"
 
+
+FIT_SUMMARY_NEGATIONS = (
+    " absent",
+    " missing",
+    " lacks",
+    " lack of",
+    " not demonstrated",
+    " does not demonstrate",
+    " not shown",
+    " no direct",
+    " no experience",
+)
+
+FIT_SUMMARY_OVERCLAIMS = (
+    "deep ",
+    "extensive ",
+    "expert",
+    "production-grade",
+    "production grade",
+    "mastery",
+    "fully demonstrated",
+    "fully satisfies",
+)
+
+FIT_ITEM_STOPWORDS = {
+    "and", "or", "the", "with", "for", "from", "into", "using", "use",
+    "required", "requirement", "requirements", "preferred", "experience",
+    "skills", "skill", "strong", "working", "knowledge", "ability",
+    "demonstrated", "hands", "hand", "level", "years", "year", "such",
+    "including", "include", "includes", "highly", "desirable", "plus",
+}
+
+
+def parse_fit_analysis_payload(
+    payload: Any,
+    provider_name: str,
+) -> FitAnalysis:
+    if not isinstance(payload, dict):
+        raise ResumeMatcherError(
+            f"{provider_name} returned an unexpected "
+            f"response type: {type(payload).__name__}."
+        )
+
+    list_fields = [
+        "required_matches",
+        "required_partial",
+        "required_gaps",
+        "preferred_matches",
+        "preferred_partial",
+        "preferred_gaps",
+    ]
+
+    for field_name in list_fields:
+        if payload.get(field_name) is None:
+            payload[field_name] = []
+
+    try:
+        return FitAnalysis.model_validate(payload)
+    except ValidationError as error:
+        response_preview = json.dumps(
+            payload,
+            indent=2,
+            ensure_ascii=False,
+        )[:3_000]
+        raise ResumeMatcherError(
+            f"{provider_name} returned an invalid fit response.\n\n"
+            f"Validation details:\n{error}\n\n"
+            f"Response preview:\n{response_preview}"
+        ) from error
+
+
+def parse_fit_analysis_response(
+    response: Any,
+) -> FitAnalysis:
+    if isinstance(response.parsed, FitAnalysis):
+        return response.parsed
+
+    payload: Any = None
+
+    if response.parsed is not None:
+        if isinstance(response.parsed, BaseModel):
+            payload = response.parsed.model_dump()
+        else:
+            payload = response.parsed
+    elif response.text:
+        try:
+            payload = json.loads(response.text)
+        except json.JSONDecodeError as error:
+            preview = response.text[:2_000]
+            raise ResumeMatcherError(
+                "Gemini returned invalid JSON. "
+                f"JSON error: {error}. "
+                f"Response preview: {preview}"
+            ) from error
+    else:
+        raise ResumeMatcherError(
+            "Gemini returned an empty response."
+        )
+
+    return parse_fit_analysis_payload(
+        payload=payload,
+        provider_name="Gemini",
+    )
+
+
+def get_openai_fit_schema() -> dict[str, Any]:
+    schema = FitAnalysis.model_json_schema()
+
+    def make_strict(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "object" or "properties" in node:
+                node["additionalProperties"] = False
+                properties = node.get("properties")
+                if isinstance(properties, dict):
+                    node["required"] = list(properties.keys())
+
+            for value in node.values():
+                make_strict(value)
+        elif isinstance(node, list):
+            for value in node:
+                make_strict(value)
+
+    make_strict(schema)
+    return schema
+
+
+def parse_openai_fit_content(
+    content: str | None,
+) -> FitAnalysis:
+    if not content:
+        raise ResumeMatcherError(
+            "OpenAI returned an empty response."
+        )
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as error:
+        preview = content[:2_000]
+        raise ResumeMatcherError(
+            "OpenAI returned invalid JSON. "
+            f"JSON error: {error}. "
+            f"Response preview: {preview}"
+        ) from error
+
+    return parse_fit_analysis_payload(
+        payload=payload,
+        provider_name="OpenAI",
+    )
+
+
+def _normalize_fit_item(value: str) -> str:
+    normalized = value.casefold().replace("start-up", "startup")
+    normalized = re.sub(r"[^a-z0-9+#.]+", " ", normalized)
+    return " ".join(normalized.split())
+
+
+def _fit_item_terms(value: str) -> set[str]:
+    return {
+        term
+        for term in _normalize_fit_item(value).split()
+        if len(term) >= 3
+        and term not in FIT_ITEM_STOPWORDS
+    }
+
+
+def _summary_sentences(summary: str) -> list[str]:
+    return [
+        sentence.strip().casefold().replace("start-up", "startup")
+        for sentence in re.split(r"(?<=[.!?])\s+", summary)
+        if sentence.strip()
+    ]
+
+
+def _sentence_matches_item(
+    sentence: str,
+    item: str,
+) -> bool:
+    terms = _fit_item_terms(item)
+
+    if not terms:
+        return False
+
+    sentence_terms = set(
+        _normalize_fit_item(sentence).split()
+    )
+    shared = terms & sentence_terms
+    needed = 1 if len(terms) == 1 else 2
+    return len(shared) >= needed
+
+
+def fit_output_contradictions(
+    analysis: FitAnalysis,
+) -> list[str]:
+    """Return deterministic output-contract contradictions worth one retry."""
+    contradictions: list[str] = []
+
+    groups = {
+        "required_matches": analysis.required_matches,
+        "required_partial": analysis.required_partial,
+        "required_gaps": analysis.required_gaps,
+        "preferred_matches": analysis.preferred_matches,
+        "preferred_partial": analysis.preferred_partial,
+        "preferred_gaps": analysis.preferred_gaps,
+    }
+
+    normalized_groups = {
+        name: {
+            _normalize_fit_item(item)
+            for item in items
+            if _normalize_fit_item(item)
+        }
+        for name, items in groups.items()
+    }
+
+    conflict_pairs = [
+        ("required_matches", "required_partial"),
+        ("required_matches", "required_gaps"),
+        ("required_partial", "required_gaps"),
+        ("preferred_matches", "preferred_partial"),
+        ("preferred_matches", "preferred_gaps"),
+        ("preferred_partial", "preferred_gaps"),
+    ]
+
+    for left_name, right_name in conflict_pairs:
+        overlap = (
+            normalized_groups[left_name]
+            & normalized_groups[right_name]
+        )
+        if overlap:
+            contradictions.append(
+                f"Same qualification appears in {left_name} and {right_name}: "
+                + "; ".join(sorted(overlap))
+            )
+
+    summary_sentences = _summary_sentences(
+        analysis.summary
+    )
+
+    for item in (
+        analysis.required_matches
+        + analysis.preferred_matches
+    ):
+        for sentence in summary_sentences:
+            if (
+                _sentence_matches_item(sentence, item)
+                and any(
+                    phrase in f" {sentence}"
+                    for phrase in FIT_SUMMARY_NEGATIONS
+                )
+            ):
+                contradictions.append(
+                    "Summary describes a MATCH as absent or missing: "
+                    f"{item}"
+                )
+                break
+
+    for item in (
+        analysis.required_partial
+        + analysis.preferred_partial
+        + analysis.required_gaps
+        + analysis.preferred_gaps
+    ):
+        for sentence in summary_sentences:
+            if (
+                _sentence_matches_item(sentence, item)
+                and any(
+                    phrase in sentence
+                    for phrase in FIT_SUMMARY_OVERCLAIMS
+                )
+            ):
+                contradictions.append(
+                    "Summary overstates a PARTIAL/GAP qualification: "
+                    f"{item}"
+                )
+                break
+
+    return list(dict.fromkeys(contradictions))
+
+
+def build_fit_correction_prompt(
+    original_prompt: str,
+    analysis: FitAnalysis,
+    contradictions: list[str],
+) -> str:
+    issues = "\n".join(
+        f"- {item}"
+        for item in contradictions
+    )
+
+    return (
+        original_prompt
+        + "\n\n"
+        + "============================================================\n"
+        + "CORRECTION PASS\n"
+        + "============================================================\n\n"
+        + "Your previous structured answer had the following internal "
+        + "contract contradiction(s):\n"
+        + issues
+        + "\n\nPREVIOUS ANSWER:\n"
+        + analysis.model_dump_json(indent=2)
+        + "\n\nReturn a corrected final assessment using the SAME resume "
+        + "and JD evidence. Fix only unsupported or inconsistent "
+        + "classifications/wording. Do not invent evidence. Keep fit_score "
+        + "unchanged unless the contradiction itself materially changes the "
+        + "requirements-fit judgment."
+    )
+
+
+def _legacy_recommendation_for_fit(
+    analysis: FitAnalysis,
+) -> Literal["apply", "review", "skip"]:
+    """Map the direct AI fit score to the existing UI recommendation labels."""
+    if analysis.fit_score < 50:
+        return "skip"
+
+    if analysis.required_gaps:
+        return "review"
+
+    if analysis.fit_score >= 75:
+        return "apply"
+
+    return "review"
+
+
+def fit_analysis_to_job_match_analysis(
+    analysis: FitAnalysis,
+) -> JobMatchAnalysis:
+    """Adapt the simple v7 result to the existing durable score schema."""
+    requirement_rows: list[RequirementMatch] = []
+
+    def add_rows(
+        items: list[str],
+        match: Literal["excellent", "strong", "partial", "gap"],
+        evidence: str,
+        prefix: str = "",
+    ) -> None:
+        for item in items:
+            if len(requirement_rows) >= 10:
+                return
+            requirement_rows.append(
+                RequirementMatch(
+                    job_requirement=(
+                        f"{prefix}{item}"
+                        if prefix
+                        else item
+                    ),
+                    candidate_background=evidence,
+                    match=match,
+                )
+            )
+
+    add_rows(
+        analysis.required_matches,
+        "strong",
+        "Demonstrated by the actual resume.",
+    )
+    add_rows(
+        analysis.required_partial,
+        "partial",
+        "Related resume evidence exists, but the full requested level is not demonstrated.",
+    )
+    add_rows(
+        analysis.required_gaps,
+        "gap",
+        "The required capability is not meaningfully demonstrated by the resume.",
+    )
+    add_rows(
+        analysis.preferred_matches,
+        "strong",
+        "Demonstrated by the actual resume.",
+        prefix="Preferred: ",
+    )
+    add_rows(
+        analysis.preferred_partial,
+        "partial",
+        "Related evidence exists, but the preferred qualification is only partially demonstrated.",
+        prefix="Preferred: ",
+    )
+    add_rows(
+        analysis.preferred_gaps,
+        "gap",
+        "The preferred qualification is not demonstrated by the resume.",
+        prefix="Preferred: ",
+    )
+
+    risks = [
+        f"Partial required qualification: {item}"
+        for item in analysis.required_partial
+    ] + [
+        f"Partial preferred qualification: {item}"
+        for item in analysis.preferred_partial
+    ]
+
+    score = analysis.fit_score
+
+    return JobMatchAnalysis(
+        title_fit=score,
+        skills_fit=score,
+        experience_fit=score,
+        seniority_fit=score,
+        industry_fit=score,
+        location_fit=100,
+        overall_score=score,
+        recommendation=_legacy_recommendation_for_fit(
+            analysis
+        ),
+        confidence="high",
+        matching_strengths=list(
+            dict.fromkeys(
+                analysis.required_matches
+                + analysis.preferred_matches
+            )
+        ),
+        hard_requirements_missing=list(
+            dict.fromkeys(
+                analysis.required_gaps
+            )
+        ),
+        preferred_qualifications_missing=list(
+            dict.fromkeys(
+                analysis.preferred_gaps
+            )
+        ),
+        risk_factors=list(dict.fromkeys(risks)),
+        requirement_matches=requirement_rows,
+        summary=analysis.summary,
+    )
+
+
+def is_retryable_provider_error(
+    error: Exception,
+) -> bool:
+    message = str(error).casefold()
+
+    # Daily/project quota exhaustion should fall through to the existing
+    # provider-fallback logic rather than burning retry calls.
+    if (
+        "generaterequestsperday" in message
+        or "insufficient_quota" in message
+        or "quota exceeded" in message
+    ):
+        return False
+
+    retry_markers = (
+        "timeout",
+        "timed out",
+        "429",
+        "rate limit",
+        "resource_exhausted",
+        "500",
+        "502",
+        "503",
+        "504",
+        "internal server",
+        "service unavailable",
+        "temporarily unavailable",
+        "connection reset",
+    )
+
+    return any(
+        marker in message
+        for marker in retry_markers
+    )
+
+
+def _retry_sleep(attempt: int) -> None:
+    time.sleep(1.0 * (2 ** attempt))
+
+
 def parse_job_match_payload(
     payload: Any,
     provider_name: str,
