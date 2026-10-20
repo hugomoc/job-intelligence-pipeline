@@ -58,6 +58,7 @@ from src.ai.matcher_capabilities import (
 import json
 import os
 import re
+import time
 
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
@@ -71,6 +72,7 @@ from src.ai.resume_profiler import (
     apply_candidate_eligibility_overrides,
     get_gemini_client,
     get_model_name,
+    redact_personal_information,
 )
 
 
@@ -89,6 +91,33 @@ from src.description_quality import MINIMUM_FULL_DESCRIPTION_WORDS, assess_descr
 
 
 
+
+
+class FitAnalysis(BaseModel):
+    """Simple resume-to-JD assessment used by v7 production scoring."""
+
+    fit_score: int = Field(
+        ge=0,
+        le=100,
+        description="Direct holistic resume-to-JD requirements fit score.",
+    )
+    required_matches: list[str] = Field(default_factory=list)
+    required_partial: list[str] = Field(default_factory=list)
+    required_gaps: list[str] = Field(default_factory=list)
+    preferred_matches: list[str] = Field(default_factory=list)
+    preferred_partial: list[str] = Field(default_factory=list)
+    preferred_gaps: list[str] = Field(default_factory=list)
+    work_arrangement: str = Field(
+        description=(
+            "Remote/hybrid/onsite arrangement and city/schedule when stated. "
+            "This is informational only and must not affect fit_score."
+        )
+    )
+    summary: str = Field(
+        description=(
+            "Concise evidence-based explanation consistent with the classifications."
+        )
+    )
 
 
 class RequirementMatch(BaseModel):
