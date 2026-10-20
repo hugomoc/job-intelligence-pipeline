@@ -34,6 +34,7 @@ from src.repositories.recommendation_repository import (
 from src.score_jobs_ai import (
     initialize_ai_tables,
     load_cached_profile,
+    save_cached_resume_text,
     save_job_score,
     save_resume_profile,
 )
@@ -75,6 +76,10 @@ def get_or_create_resume_profile(
     )
 
     if cached_profile:
+        save_cached_resume_text(
+            resume_hash=resume.resume_hash,
+            resume_text=resume.text,
+        )
         return cached_profile, True
 
     profiled_resume = profile_resume(
@@ -87,6 +92,7 @@ def get_or_create_resume_profile(
         filename=resume.filename,
         model_name=model_name,
         profile=profiled_resume.profile,
+        resume_text=resume.text,
     )
 
     return profiled_resume.profile, False
@@ -197,6 +203,7 @@ def process_resume_upload(
                 if use_openai_fallback:
                     match = score_resume_against_job_openai(
                         resume_profile=resume_profile,
+                        resume_text=resume.text,
                         job=job,
                         model_name=get_openai_model_name(),
                     )
@@ -204,6 +211,7 @@ def process_resume_upload(
                 else:
                     match = score_resume_against_job(
                         resume_profile=resume_profile,
+                        resume_text=resume.text,
                         job=job,
                         model_name=model_name,
                     )
@@ -247,6 +255,7 @@ def process_resume_upload(
                     try:
                         match = score_resume_against_job_openai(
                             resume_profile=resume_profile,
+                            resume_text=resume.text,
                             job=job,
                             model_name=get_openai_model_name(),
                         )
