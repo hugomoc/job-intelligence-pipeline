@@ -1,8 +1,8 @@
-"""CLI workflow for catching up unscored jobs for a cached resume profile.
+"""CLI workflow for catching up unscored jobs for a cached resume.
 
-This is the non-Streamlit path for morning/backlog runs. It reuses cached
-resume profiles, screens jobs for eligibility, scores only unscored canonical
-jobs, and refreshes dbt analytics when new scores are saved.
+This is the non-Streamlit path for morning/backlog runs. It reuses the cached
+structured profile for screening and contact-redacted original resume text for
+fit scoring, then refreshes dbt analytics when new scores are saved.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from src.job_screening import screen_unscreened_jobs
 from src.score_jobs_ai import (
     initialize_ai_tables,
     load_cached_profile,
+    load_cached_resume_text,
     save_job_score,
 )
 from src.ui.job_recommendation_service import run_dbt_build
@@ -157,6 +158,17 @@ def score_backlog(
                 "Upload the resume in Streamlit once before running the backlog scorer."
             )
 
+    resume_text = load_cached_resume_text(
+        selected_resume_hash
+    )
+
+    if resume_text is None:
+        raise ValueError(
+            "The cached resume predates exact-resume scoring. "
+            "Upload the resume in Streamlit once to cache contact-redacted "
+            "resume text before scoring new jobs."
+        )
+
     already_scored = count_cached_canonical_scores(
         resume_hash=selected_resume_hash,
         model_name=model_name,
@@ -208,12 +220,14 @@ def score_backlog(
             if use_openai_fallback:
                 match = score_resume_against_job_openai(
                     resume_profile=resume_profile,
+                    resume_text=resume_text,
                     job=job,
                     model_name=get_openai_model_name(),
                 )
             else:
                 match = score_resume_against_job(
                     resume_profile=resume_profile,
+                    resume_text=resume_text,
                     job=job,
                     model_name=model_name,
                 )
@@ -240,6 +254,7 @@ def score_backlog(
                 try:
                     match = score_resume_against_job_openai(
                         resume_profile=resume_profile,
+                        resume_text=resume_text,
                         job=job,
                         model_name=get_openai_model_name(),
                     )
