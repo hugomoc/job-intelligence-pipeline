@@ -670,8 +670,8 @@ def _required_language_names(text: str) -> set[str]:
     names = "|".join(sorted(HUMAN_LANGUAGES, key=len, reverse=True))
     return {
         match.group(0).casefold()
-        for match in re.finditer(rf"\\b(?:{names})\\b", text, re.I)
-        if re.search(r"\\b(?:fluen(?:t|cy)|proficien(?:t|cy)|language|spoken|written|bilingual)\\b", text, re.I)
+        for match in re.finditer(rf"\b(?:{names})\b", text, re.I)
+        if re.search(r"\b(?:fluen(?:t|cy)|proficien(?:t|cy)|language|spoken|written|bilingual)\b", text, re.I)
     }
 
 
