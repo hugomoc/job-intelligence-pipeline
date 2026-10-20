@@ -682,6 +682,9 @@ def has_current_complete_ai_score(job: dict[str, Any]) -> bool:
     if job.get("ai_score") is None:
         return False
 
+    if job.get("candidate_assessment_id"):
+        return True  # Completed candidate assessments do not expire on resume/JD/prompt edits.
+
     if job.get("ai_prompt_version") not in (None, MATCHER_PROMPT_VERSION):
         return False
 
@@ -1311,6 +1314,14 @@ def resolve_display_resume_hash(
     if resume_hash:
         return resume_hash
 
+    from src.candidate_assessments import tables_exist, CandidateIdentityError
+    with get_connection() as connection:
+        if tables_exist(connection):
+            candidates = connection.execute('SELECT active_resume_hash FROM candidates ORDER BY created_at,candidate_id').fetchall()
+            if len(candidates) == 1:
+                return candidates[0][0] or ''
+            if len(candidates) > 1:
+                raise CandidateIdentityError('Select a candidate before loading saved jobs')
     return load_latest_cached_resume_hash() or ""
 
 
@@ -1439,6 +1450,7 @@ def apply_admission_gate(
 
         if (
             is_preserved_status
+            or bool(job.get("candidate_assessment_id"))
             or evaluation.admission_decision == "include"
             or is_soft_low_priority
         ):
@@ -2176,6 +2188,9 @@ def load_all_jobs(
         rows = cursor.fetchall()
 
     jobs = [dict(zip(columns, row)) for row in rows]
+    from src.candidate_assessments import overlay_saved_scores
+    with get_connection() as connection:
+        overlay_saved_scores(connection, selected_resume_hash, jobs)
     from src.actionability import attach_cached
     with get_connection() as connection:
         attach_cached(jobs, connection)
@@ -2428,28 +2443,15 @@ def prepare_job_display(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             verified_representatives[verified_key] = job
     display_jobs.extend(verified_representatives.values())
 
-    sorted_jobs = sorted(
-        display_jobs,
-        key=lambda job: (
-            {
-                "new": 2,
-                "applied": 1,
-                "removed": 0,
-            }.get(
-                job.get("application_status", "new"),
-                2,
-            ),
-            review_priority(job),
-            job.get("ai_score") or -1,
-            job.get("title_match_score") or 0,
-            job.get("sent_at") or datetime.min.replace(
-                tzinfo=timezone.utc
-            ),
-            job.get("title") or "",
-            job.get("company_name") or "",
-        ),
-        reverse=True,
-    )
+    def display_order(job):
+        score = job.get('ai_score')
+        ingested = normalize_datetime(job.get('discovered_at'))
+        return (score is None, -(score if score is not None else 0),
+                -(ingested.timestamp() if ingested else float('-inf')),
+                trusted_display_posting_key(job) or job.get('exact_posting_key')
+                or job.get('canonical_job_key') or job.get('record_key') or '')
+
+    sorted_jobs = sorted(display_jobs, key=display_order)
 
     deduplicated_jobs: list[dict[str, Any]] = []
     seen_display_keys: set[tuple[str, ...]] = set()
@@ -2600,6 +2602,8 @@ def load_candidate_jobs(
 
     with get_connection() as connection:
         register_exact_posting_identity_function(connection)
+        from src.candidate_assessments import register_completed_filter
+        register_completed_filter(connection, resume_hash)
         cursor = connection.execute(
             """
             WITH jobs AS (
@@ -2853,6 +2857,7 @@ def load_candidate_jobs(
                           ELSE 'POSSIBLE_MATCH'
                       END
                   ) <> 'FILTERED_OUT'
+                  AND NOT candidate_has_completed(jobs.record_key)
                   AND COALESCE(
                       latest_application_status.status,
                       'new'
@@ -2949,6 +2954,10 @@ def count_cached_canonical_scores(
     reuse_any_model: bool = False,
 ) -> int:
     with get_connection() as connection:
+        from src.candidate_assessments import candidate_for_resume, active_assessments
+        candidate = candidate_for_resume(connection, resume_hash)
+        if candidate:
+            return len(active_assessments(connection, candidate))
         register_exact_posting_identity_function(connection)
         result = connection.execute(
             """
@@ -3007,6 +3016,8 @@ def count_unscored_candidate_jobs(
 
     with get_connection() as connection:
         register_exact_posting_identity_function(connection)
+        from src.candidate_assessments import register_completed_filter
+        register_completed_filter(connection, resume_hash)
         result = connection.execute(
             """
             WITH jobs AS (
@@ -3152,6 +3163,7 @@ def count_unscored_candidate_jobs(
                           ELSE 'POSSIBLE_MATCH'
                       END
                   ) <> 'FILTERED_OUT'
+                  AND NOT candidate_has_completed(jobs.record_key)
                   AND COALESCE(
                       latest_application_status.status,
                       'new'
@@ -3218,6 +3230,8 @@ def load_unscreened_job_eligibility_candidates(
 
     with get_connection() as connection:
         register_exact_posting_identity_function(connection)
+        from src.candidate_assessments import register_completed_filter
+        register_completed_filter(connection, resume_hash)
         cursor = connection.execute(
             """
             WITH jobs AS (
@@ -3335,6 +3349,7 @@ def load_unscreened_job_eligibility_candidates(
                           ELSE 'POSSIBLE_MATCH'
                       END
                   ) <> 'FILTERED_OUT'
+                  AND NOT candidate_has_completed(jobs.record_key)
                   AND COALESCE(
                       latest_application_status.status,
                       'new'
@@ -3503,6 +3518,12 @@ def load_recommendations(
     resume_hash: str | None,
 ) -> list[dict[str, Any]]:
     selected_resume_hash = resolve_display_resume_hash(resume_hash)
+
+    from src.candidate_assessments import candidate_for_resume
+    with get_connection() as connection:
+        candidate = candidate_for_resume(connection, selected_resume_hash)
+    if candidate:
+        return [job for job in load_all_jobs(selected_resume_hash) if job.get('ai_score') is not None]
 
     with get_connection() as connection:
         cursor = connection.execute(

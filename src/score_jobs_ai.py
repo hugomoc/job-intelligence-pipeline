@@ -458,6 +458,24 @@ def save_job_score(
     ]
 
     with get_connection() as connection:
+        from src.candidate_assessments import candidate_for_resume, persist_score
+        if candidate_for_resume(connection, resume_hash):
+            from datetime import datetime, timezone
+            names = ['resume_hash','record_key','overall_score','recommendation','title_fit',
+                'skills_fit','experience_fit','seniority_fit','industry_fit','location_fit',
+                'confidence','requirement_matches','matching_strengths','hard_requirements_missing',
+                'preferred_qualifications_missing','risk_factors','summary',
+                'description_word_count','description_complete','model_name','prompt_version']
+            score = dict(zip(names, values))
+            score['scored_at'] = datetime.now(timezone.utc).isoformat()
+            connection.execute('BEGIN TRANSACTION')
+            try:
+                result = persist_score(connection, resume_hash, score)
+                connection.execute('COMMIT')
+                return result
+            except BaseException:
+                connection.execute('ROLLBACK')
+                raise
         connection.execute(
             """
             DELETE FROM resume_job_scores
@@ -716,6 +734,12 @@ def main() -> None:
             arguments.resume_path
         )
 
+        from src.candidate_assessments import latest_candidate_resume
+        with get_connection() as connection:
+            active_hash = latest_candidate_resume(connection, resume.resume_hash)
+            if active_hash != resume.resume_hash:
+                raise ValueError('Use the active candidate resume or run score_backlog for future jobs')
+
         model_name = get_model_name()
 
         resume_profile = load_cached_profile(
@@ -777,67 +801,72 @@ def main() -> None:
             jobs,
             start=1,
         ):
-            print(
-                f"\nScoring job "
-                f"{index} of {len(jobs)}..."
-            )
+            from src.candidate_assessments import scoring_claim
+            with scoring_claim(resume.resume_hash, job) as acquired:
+                if not acquired:
+                    print('Skipped: candidate already scored or job claimed by another run.')
+                    continue
+                print(
+                    f"\nScoring job "
+                    f"{index} of {len(jobs)}..."
+                )
 
-            cached_score = None
+                cached_score = None
 
-            if not arguments.force:
-                cached_score = (
-                    load_cached_job_score(
-                        resume_hash=(
-                            resume.resume_hash
-                        ),
-                        record_key=(
-                            job["record_key"]
-                        ),
-                        model_name=model_name,
-                        prompt_version=(
-                            MATCHER_PROMPT_VERSION
-                        ),
+                if not arguments.force:
+                    cached_score = (
+                        load_cached_job_score(
+                            resume_hash=(
+                                resume.resume_hash
+                            ),
+                            record_key=(
+                                job["record_key"]
+                            ),
+                            model_name=model_name,
+                            prompt_version=(
+                                MATCHER_PROMPT_VERSION
+                            ),
+                        )
                     )
+
+                if cached_score:
+                    print_cached_match(
+                        job=job,
+                        cached_score=cached_score,
+                    )
+                    continue
+
+                try:
+                    match = score_resume_against_job(
+                        resume_profile=resume_profile,
+                        resume_text=resume.text,
+                        job=job,
+                        model_name=model_name,
+                    )
+
+                except ResumeMatcherError as error:
+                    print(
+                        "\nUnable to score this job."
+                    )
+                    print(
+                        f"Job: {job['title']} | "
+                        f"{job['company_name']}"
+                    )
+                    print(f"Reason: {error}")
+                    print(
+                        "Continuing with the remaining jobs."
+                    )
+                    continue
+
+                save_job_score(
+                    resume_hash=resume.resume_hash,
+                    match=match,
                 )
 
-            if cached_score:
-                print_cached_match(
+                print_match(
                     job=job,
-                    cached_score=cached_score,
+                    match=match,
                 )
-                continue
-
-            try:
-                match = score_resume_against_job(
-                    resume_profile=resume_profile,
-                    resume_text=resume.text,
-                    job=job,
-                    model_name=model_name,
-                )
-
-            except ResumeMatcherError as error:
-                print(
-                    "\nUnable to score this job."
-                )
-                print(
-                    f"Job: {job['title']} | "
-                    f"{job['company_name']}"
-                )
-                print(f"Reason: {error}")
-                print(
-                    "Continuing with the remaining jobs."
-                )
-                continue
-
-            save_job_score(
-                resume_hash=resume.resume_hash,
-                match=match,
-            )
-
-            print_match(
-                job=job,
-                match=match,
-            )
 
     except (
         ResumeExtractionError,

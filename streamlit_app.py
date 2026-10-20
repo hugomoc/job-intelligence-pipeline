@@ -65,6 +65,15 @@ def change_application_status(record_key, status):
         st.session_state["status_change_error"] = "Could not update application status. Please retry."
 
 
+def manual_rescore(record_key):
+    from src.ui.job_recommendation_service import rescore_saved_job
+    try:
+        rescore_saved_job(record_key, st.session_state.get('resume_hash'))
+        invalidate_data(st.session_state, 'manual rescore completed')
+    except Exception:
+        st.error('Rescore failed. The previous saved assessment is unchanged.')
+
+
 STATUS_LABELS = {
     "apply": "APPLY",
     "review": "REVIEW",
@@ -143,7 +152,7 @@ def default_date_range(
     job_dates: list[date],
     days: int = 7,
 ) -> tuple[date, date]:
-    """Default the date filter to the newest useful window in the data."""
+    """Default to the complete inventory; only explicit user filters restrict age."""
     if not job_dates:
         today = date.today()
         return today, today
@@ -152,7 +161,7 @@ def default_date_range(
     max_job_date = max(job_dates)
 
     return (
-        max(min_job_date, max_job_date - timedelta(days=days - 1)),
+        min_job_date,
         max_job_date,
     )
 
@@ -340,6 +349,11 @@ def render_job_listing(job: dict) -> None:
                 )
             )
 
+            if job.get('candidate_assessment_id'):
+                st.button('Rescore this job', key='rescore-'+job['record_key'],
+                    help='Creates a new assessment using your latest resume; keeps previous assessments.',
+                    on_click=manual_rescore, args=(job['record_key'],))
+
             if job.get("similar_job_previously_removed"):
                 st.caption("Similar job previously removed")
 
@@ -377,7 +391,7 @@ def render_job_listing(job: dict) -> None:
         if job.get("posted_age_text"):
             st.caption(f"Posted: {job['posted_age_text']}")
 
-        sent_date = format_seen_date(job.get("sent_at"))
+        sent_date = format_seen_date(job.get("discovered_at"))
 
         if sent_date:
             st.caption(f"Email date: {sent_date}")
@@ -600,10 +614,40 @@ if show_saved_jobs_clicked:
 actionability_requested = False
 check_current_postings_clicked = st.sidebar.button("Check current postings")
 
+from src.ui.candidate_identity import candidates as registered_candidates, cache_token as candidate_cache_token
+candidate_choices = registered_candidates()
+if len(candidate_choices) == 1:
+    st.session_state['candidate_id'] = candidate_choices[0][0]
+    if not st.session_state.get('resume_hash'):
+        st.session_state['resume_hash'] = candidate_choices[0][3]
+elif candidate_choices:
+    chosen_candidate = st.sidebar.selectbox('Candidate', candidate_choices,
+        format_func=lambda row: f"{row[1]} {row[2]} ({row[0][:8]})")
+    if st.session_state.get('candidate_id') != chosen_candidate[0]:
+        invalidate_data(st.session_state, 'candidate changed')
+        st.session_state['candidate_id'] = chosen_candidate[0]
+        st.session_state['resume_hash'] = chosen_candidate[3]
+else:
+    with st.sidebar.form('register_candidate'):
+        st.caption('Register your identity once. Updated resumes stay linked to this candidate.')
+        candidate_first = st.text_input('First name')
+        candidate_last = st.text_input('Last name')
+        candidate_linkedin = st.text_input('LinkedIn profile URL (optional)')
+        confirm_identity = st.checkbox('I confirm this candidate identity')
+        register_clicked = st.form_submit_button('Register candidate')
+    if register_clicked and confirm_identity:
+        from src.ui.candidate_identity import register
+        try:
+            st.session_state['candidate_id'] = register(candidate_first, candidate_last, candidate_linkedin)
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
 uploaded_file = st.file_uploader(
     "Upload a resume",
     type=["pdf", "docx"],
     accept_multiple_files=False,
+    disabled=not bool(st.session_state.get("candidate_id")),
 )
 
 resume_preparation_succeeded = True
@@ -630,7 +674,7 @@ if uploaded_file:
                     expanded=False,
                 ) as status:
                     prepared_resume = prepare_resume_upload(
-                        uploaded_file
+                        uploaded_file, candidate_id=st.session_state.get("candidate_id")
                     )
                     status.update(
                         label="Resume ready for scoring",
@@ -705,6 +749,7 @@ if uploaded_file and score_uploaded_clicked:
         with st.status("Processing resume...", expanded=True) as status:
             result = process_resume_upload(
                 uploaded_file=uploaded_file,
+                candidate_id=st.session_state.get("candidate_id"),
                 limit=int(daily_score_limit),
                 minimum_rule_score=int(daily_minimum_rule_score),
             )
@@ -902,7 +947,8 @@ with jobs_tab:
         all_jobs = []
     else:
         jobs_snapshot(st.session_state, st.session_state.get("resume_hash"),
-            lambda **kwargs: load_all_jobs(**kwargs, for_session_snapshot=True))
+            lambda **kwargs: load_all_jobs(**kwargs, for_session_snapshot=True),
+            dataset_token=candidate_cache_token(st.session_state.get("resume_hash")))
         all_jobs = display_snapshot(st.session_state)
         # Network checks require a completed scoring workflow or explicit refresh.
         from src.actionability import refresh_daily

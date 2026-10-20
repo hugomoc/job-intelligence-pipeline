@@ -16,10 +16,12 @@ def invalidate_data(state, reason):
     state.pop('operations_snapshot', None)
 
 
-def jobs_snapshot(state, resume_hash, loader):
+def jobs_snapshot(state, resume_hash, loader, dataset_token=None):
     if ('jobs_snapshot' not in state or state.get('jobs_snapshot_dirty')
-            or state.get('jobs_snapshot_resume_hash') != resume_hash):
+            or state.get('jobs_snapshot_resume_hash') != resume_hash
+            or state.get('jobs_candidate_token') != dataset_token):
         jobs = loader(resume_hash=resume_hash)
+        state['jobs_candidate_token'] = dataset_token
         state['jobs_snapshot'] = jobs
         state['jobs_snapshot_resume_hash'] = resume_hash
         state['jobs_snapshot_dirty'] = False

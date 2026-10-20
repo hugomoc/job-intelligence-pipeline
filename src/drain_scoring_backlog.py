@@ -15,14 +15,26 @@ from src.drain_enrichment_backlog import write_report
 def drain_scores(resume_hash, *, batch_size=25, delay=0.5, report_path=None,
                  loader=None, score=None, fallback=None, save=None, profile=None,
                  emit=print, sleeper=time.sleep):
+    from src import database
+    from src.candidate_assessments import latest_candidate_resume
+    from src.score_jobs_ai import load_cached_resume_text
+    with database.get_connection() as connection:
+        resume_hash = latest_candidate_resume(connection, resume_hash)
     model = get_model_name()
     profile = profile or load_cached_profile(resume_hash, model)
     if profile is None:
         raise ValueError('No current cached resume profile')
     loader = loader or (lambda: load_candidate_jobs(resume_hash, model, 100000, 0,
                           prompt_version=MATCHER_PROMPT_VERSION, reuse_any_model=True))
-    score = score or score_resume_against_job
-    fallback = fallback or score_resume_against_job_openai
+    def using_cached_text(provider):
+        def call(**kwargs):
+            text = load_cached_resume_text(resume_hash)
+            if not text:
+                raise ValueError('Cached exact resume text is required')
+            return provider(**kwargs, resume_text=text)
+        return call
+    score = score or using_cached_text(score_resume_against_job)
+    fallback = fallback or using_cached_text(score_resume_against_job_openai)
     save = save or save_job_score
     started = time.monotonic()
     report = dict(resume_hash=resume_hash, prompt_version=MATCHER_PROMPT_VERSION,
@@ -46,36 +58,41 @@ def drain_scores(resume_hash, *, batch_size=25, delay=0.5, report_path=None,
         report['batches'] += 1
         before = {k:report[k] for k in ['selected','scored','cached_reused','gemini','openai','failed']}
         for job in jobs:
-            seen.add(job['canonical_job_key']);report['selected'] += 1
-            # An earlier score in this batch may now cover this exact/verified posting.
-            if job['canonical_job_key'] not in {j['canonical_job_key'] for j in loader()}:
-                report['cached_reused'] += 1
-                persist();continue
-            try:
-                fn = fallback if use_openai else score
-                match = fn(resume_profile=profile, job=job,
-                           model_name=get_openai_model_name() if use_openai else model)
-            except ResumeMatcherError as error:
-                message = str(error)
-                if any(t in message.lower() for t in ['quota', '429', 'resource_exhausted', 'rate limit']):
-                    report['failed'] += 1
-                    report['stop_reason'] = 'API quota/rate-limit safety: '+message
-                    persist();break
-                if not use_openai and should_switch_to_openai(error):
-                    use_openai = True
-                    try:
-                        match = fallback(resume_profile=profile,job=job,model_name=get_openai_model_name())
-                    except ResumeMatcherError as other:
+            from src.candidate_assessments import scoring_claim
+            with scoring_claim(resume_hash, job) as acquired:
+                if not acquired:
+                    report['cached_reused'] += 1
+                    continue
+                seen.add(job['canonical_job_key']);report['selected'] += 1
+                # An earlier score in this batch may now cover this exact/verified posting.
+                if job['canonical_job_key'] not in {j['canonical_job_key'] for j in loader()}:
+                    report['cached_reused'] += 1
+                    persist();continue
+                try:
+                    fn = fallback if use_openai else score
+                    match = fn(resume_profile=profile, job=job,
+                               model_name=get_openai_model_name() if use_openai else model)
+                except ResumeMatcherError as error:
+                    message = str(error)
+                    if any(t in message.lower() for t in ['quota', '429', 'resource_exhausted', 'rate limit']):
                         report['failed'] += 1
-                        report['stop_reason'] = 'provider safety: '+str(other)
+                        report['stop_reason'] = 'API quota/rate-limit safety: '+message
                         persist();break
-                else:
-                    report['failed'] += 1;persist();continue
-            save(resume_hash=resume_hash, match=match)
-            report['scored'] += 1;report['openai' if use_openai else 'gemini'] += 1
-            emit(f"Saved {report['scored']}: {job['title']} | {job['company_name']}")
-            persist()
-            if delay:sleeper(delay)
+                    if not use_openai and should_switch_to_openai(error):
+                        use_openai = True
+                        try:
+                            match = fallback(resume_profile=profile,job=job,model_name=get_openai_model_name())
+                        except ResumeMatcherError as other:
+                            report['failed'] += 1
+                            report['stop_reason'] = 'provider safety: '+str(other)
+                            persist();break
+                    else:
+                        report['failed'] += 1;persist();continue
+                save(resume_hash=resume_hash, match=match)
+                report['scored'] += 1;report['openai' if use_openai else 'gemini'] += 1
+                emit(f"Saved {report['scored']}: {job['title']} | {job['company_name']}")
+                persist()
+                if delay:sleeper(delay)
         previous = len(queue)
         queue = loader()
         report['cached_reused'] += max(0, previous-len(queue)-(report['scored']-before['scored'])-(report['cached_reused']-before['cached_reused']))

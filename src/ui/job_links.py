@@ -86,4 +86,5 @@ def select_job_open_target(job: dict[str, Any]) -> JobOpenTarget:
     return JobOpenTarget(
         label="Open job",
         url=source_url or None,
+        note="Verified official application link unavailable; this opens the source listing.",
     )
