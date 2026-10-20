@@ -933,10 +933,6 @@ if resume_preparation_succeeded and (
             st.write(f"OpenAI scores saved: {backlog_result.openai_scores_saved}")
             st.write(f"Jobs that could not be scored: {backlog_result.jobs_failed}")
             st.write("dbt build: " + ("run" if backlog_result.dbt_was_run else "not needed"))
-            render_run_log(
-                "AI scoring log",
-                getattr(backlog_result, "log_lines", ()),
-            )
             status.update(label="Scoring complete", state="complete")
             st.session_state["show_saved_jobs"] = True
             render_scoring_backlog_status(
