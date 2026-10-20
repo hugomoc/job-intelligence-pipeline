@@ -67,7 +67,10 @@ class ScoringDiagnosticsTests(unittest.TestCase):
             ),
         ], [ResumeMatcherError('OpenAI API error: HTTP 503 service unavailable'), self.match()])
         self.assertIn('Provider: Gemini', text)
-        self.assertIn('429 RESOURCE_EXHAUSTED quota exceeded', text)
+        self.assertIn(
+            '429 RESOURCE_EXHAUSTED GenerateRequestsPerDay quota exceeded',
+            text,
+        )
         self.assertIn('Provider: OpenAI', text)
         self.assertIn('OpenAI API error: HTTP 503 service unavailable', text)
         self.assertEqual((summary.scores_saved, summary.jobs_failed, summary.openai_scores_saved), (1, 1, 1))
