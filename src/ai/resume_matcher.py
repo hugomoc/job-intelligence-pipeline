@@ -825,6 +825,7 @@ FIT_ITEM_STOPWORDS = {
     "skills", "skill", "strong", "working", "knowledge", "ability",
     "demonstrated", "hands", "hand", "level", "years", "year", "such",
     "including", "include", "includes", "highly", "desirable", "plus",
+    "deep", "extensive", "expert", "production", "grade", "mastery",
 }
 
 
@@ -1063,6 +1064,19 @@ def fit_output_contradictions(
                 and any(
                     phrase in sentence
                     for phrase in FIT_SUMMARY_OVERCLAIMS
+                )
+                and not any(
+                    marker in sentence
+                    for marker in (
+                        "partial",
+                        "not ",
+                        "rather than",
+                        "only ",
+                        "limited",
+                        "lacks",
+                        "absent",
+                        "missing",
+                    )
                 )
             ):
                 contradictions.append(
