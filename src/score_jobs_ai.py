@@ -271,6 +271,8 @@ def load_candidate_jobs(
     which jobs should receive the more expensive AI review.
     """
     with get_connection() as connection:
+        from src.repositories.recommendation_repository import register_automatic_status_filter
+        register_automatic_status_filter(connection)
         cursor = connection.execute(
             """
             WITH ranked_rule_matches AS (
@@ -319,10 +321,12 @@ def load_candidate_jobs(
             FROM ranked_rule_matches
             WHERE rule_rank = 1
               AND rule_score >= ?
+              AND automatic_status_is_new(record_key)
             ORDER BY
                 rule_score DESC,
                 title,
-                company_name
+                company_name,
+                record_key
             LIMIT ?
             """,
             [

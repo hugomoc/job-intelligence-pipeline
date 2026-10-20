@@ -23,9 +23,9 @@ from src.repositories.recommendation_repository import (
     count_cached_canonical_scores,
     load_candidate_jobs,
 )
-from src.scoring_diagnostics import log_scoring_failure
+from src.scoring_diagnostics import log_scoring_failure, log_scoring_skip, exhausted_gemini_503, log_job_identity
 from src.database import get_connection
-from src.job_screening import screen_unscreened_jobs
+from src.job_screening import screen_unscreened_jobs, screening_failed_for_job
 from src.score_jobs_ai import (
     initialize_ai_tables,
     load_cached_profile,
@@ -47,6 +47,8 @@ class BacklogSummary:
     openai_scores_saved: int
     quota_exhausted: bool
     dbt_was_run: bool
+    jobs_skipped: int = 0
+    screening_failures: int = 0
 
 
 def is_quota_exhausted(error: ResumeMatcherError) -> bool:
@@ -78,6 +80,7 @@ def should_switch_to_openai(error: ResumeMatcherError) -> bool:
 
     return (
         is_quota_exhausted(error)
+        or exhausted_gemini_503(error)
         or "PERMISSION_DENIED" in error_message
         or "denied access" in error_message.casefold()
     )
@@ -199,17 +202,29 @@ def score_backlog(
     )
 
     scores_saved = 0
+    jobs_skipped = 0
+    failed_screen_keys = getattr(screening_summary, "failed_record_keys", ())
+    screening_failures = len(failed_screen_keys) if isinstance(failed_screen_keys,(tuple,list,set,frozenset)) else 0
+    print(f"Eligibility screening failures: {screening_failures}")
     jobs_failed = 0
     gemini_scores_saved = 0
     openai_scores_saved = 0
     quota_exhausted = False
     use_openai_fallback = False
 
+    last_position = 0
     for index, job in enumerate(candidate_jobs, start=1):
+        last_position = index
         from src.candidate_assessments import scoring_claim
-        with scoring_claim(selected_resume_hash, job) as acquired:
+        if screening_failed_for_job(screening_summary, job):
+            jobs_skipped += 1
+            log_scoring_skip(job,index,len(candidate_jobs),"screening_failed_this_execution")
+            continue
+        claim_details = {}
+        with scoring_claim(selected_resume_hash, job, details=claim_details) as acquired:
             if not acquired:
-                print("Skipped: candidate already scored or another scoring run owns this job.")
+                jobs_skipped += 1
+                log_scoring_skip(job,index,len(candidate_jobs),claim_details.get("reason", "candidate_already_completed_or_claimed"),claim_details)
                 continue
             title = job.get("title") or "Untitled job"
             company = job.get("company_name") or "Unknown company"
@@ -219,6 +234,7 @@ def score_backlog(
                 f"{title} | {company}"
             )
 
+            log_job_identity(job, claim_details)
             try:
                 if use_openai_fallback:
                     match = score_resume_against_job_openai(
@@ -328,6 +344,10 @@ def score_backlog(
                 f"({match.analysis.confidence} confidence)"
             )
 
+    for index, job in enumerate(candidate_jobs[last_position:], start=last_position+1):
+        jobs_skipped += 1
+        log_scoring_skip(job,index,len(candidate_jobs),"not_attempted_provider_stop")
+    print(f"Scoring outcomes: selected={len(candidate_jobs)}; saved={scores_saved}; failed={jobs_failed}; skipped={jobs_skipped}; screening_failures={screening_failures}")
     dbt_was_run = False
 
     if scores_saved:
@@ -346,6 +366,8 @@ def score_backlog(
         openai_scores_saved=openai_scores_saved,
         quota_exhausted=quota_exhausted,
         dbt_was_run=dbt_was_run,
+        jobs_skipped=jobs_skipped,
+        screening_failures=screening_failures,
     )
 
 
@@ -406,6 +428,8 @@ def main() -> None:
     print(f"Gemini scores saved: {summary.gemini_scores_saved}")
     print(f"OpenAI scores saved: {summary.openai_scores_saved}")
     print(f"Jobs failed: {summary.jobs_failed}")
+    print(f"Jobs skipped: {summary.jobs_skipped}")
+    print(f"Eligibility screening failures: {summary.screening_failures}")
     print(f"Quota exhausted: {summary.quota_exhausted}")
     print(f"dbt build run: {summary.dbt_was_run}")
 

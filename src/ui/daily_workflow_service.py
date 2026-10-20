@@ -96,6 +96,8 @@ class UiBacklogSummary:
     dbt_was_run: bool
     log_lines: tuple[str, ...]
     enrichment_jobs_processed: int = 0
+    jobs_skipped: int = 0
+    screening_failures: int = 0
 
 
 @dataclass(frozen=True)
@@ -399,6 +401,8 @@ def run_unscored_job_backlog(
             dbt_was_run=summary.dbt_was_run,
             log_lines=combined_log_lines,
             enrichment_jobs_processed=enrichment_summary.jobs_processed,
+            jobs_skipped=getattr(summary, "jobs_skipped", 0),
+            screening_failures=getattr(summary, "screening_failures", 0),
         )
 
         if run_id:

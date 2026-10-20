@@ -2589,6 +2589,72 @@ def update_application_status(
     return ApplicationStatusChange(record_keys, target[0], keys, overlays)
 
 
+def automatic_statuses(connection, record_keys=None):
+    """Snapshot the display's exact-first, trusted-verified status precedence."""
+    if not connection.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema='main' AND table_name='application_status'").fetchone()[0]:
+        return {}
+    register_exact_posting_identity_function(connection)
+    if not connection.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema='main' AND table_name='job_enrichment_attempts'").fetchone()[0]:
+        rows = connection.execute("""
+            WITH raw AS (
+                SELECT record_key,exact_posting_identity(source,source_job_id,apply_url,record_key) AS exact_key
+                FROM raw_jobs
+            ), statuses AS (
+                SELECT r.exact_key,s.status FROM application_status s JOIN raw r USING(record_key)
+                QUALIFY row_number() OVER (PARTITION BY r.exact_key
+                    ORDER BY s.updated_at DESC NULLS LAST,s.record_key)=1
+            )
+            SELECT r.record_key,coalesce(s.status,'new') FROM raw r LEFT JOIN statuses s USING(exact_key)
+        """).fetchall()
+        return dict(rows)
+    trusted = """lower(coalesce(e.verified_posting_key_trust,'')) = '{trust}'
+        AND lower(coalesce(e.verified_posting_key_source,'')) IN ({sources})
+        AND posting_key_can_be_trusted(e.verified_posting_key)
+        AND NOT posting_url_is_third_party(e.official_job_url)""".format(
+            trust=VERIFIED_KEY_TRUST_TRUSTED, sources=TRUSTED_VERIFIED_KEY_SOURCES_SQL)
+    where = 'WHERE r.record_key IN (SELECT unnest(?))' if record_keys is not None else ''
+    args = [list(record_keys)] if record_keys is not None else []
+    rows = connection.execute("""
+        WITH raw AS (
+            SELECT *,exact_posting_identity(source,source_job_id,apply_url,record_key) AS exact_key
+            FROM raw_jobs
+        ), exact_status AS (
+            SELECT r.exact_key,s.status
+            FROM application_status s JOIN raw r USING(record_key)
+            QUALIFY row_number() OVER (PARTITION BY r.exact_key
+                ORDER BY s.updated_at DESC NULLS LAST,s.record_key)=1
+        ), verified_status AS (
+            SELECT verified_identity_scope(e.verified_posting_key,e.official_job_url) AS scope,s.status
+            FROM application_status s JOIN raw r USING(record_key)
+            JOIN job_enrichment_attempts e USING(record_key)
+            WHERE {trusted}
+            QUALIFY row_number() OVER (
+                PARTITION BY verified_identity_scope(e.verified_posting_key,e.official_job_url)
+                ORDER BY s.updated_at DESC NULLS LAST,s.record_key)=1
+        ), attempts AS (
+            SELECT e.*,r.exact_key FROM job_enrichment_attempts e JOIN raw r USING(record_key)
+            QUALIFY row_number() OVER (PARTITION BY r.exact_key
+                ORDER BY CASE WHEN e.status='enriched' THEN 1 ELSE 0 END DESC,
+                    e.last_attempted_at DESC NULLS LAST,e.record_key)=1
+        )
+        SELECT r.record_key,coalesce(x.status,v.status,'new')
+        FROM raw r LEFT JOIN exact_status x ON x.exact_key=r.exact_key
+        LEFT JOIN attempts e ON e.exact_key=r.exact_key
+        LEFT JOIN verified_status v ON
+            v.scope=verified_identity_scope(e.verified_posting_key,e.official_job_url)
+            AND {trusted}
+        {where}
+        """.format(trusted=trusted,where=where),args).fetchall()
+    return dict(rows)
+
+
+def register_automatic_status_filter(connection):
+    statuses = automatic_statuses(connection)
+    connection.create_function('automatic_status_is_new',
+        lambda key: statuses.get(key, 'new') == 'new', [str], bool,
+        null_handling='special')
+
+
 def load_candidate_jobs(
     resume_hash: str,
     model_name: str | None,
@@ -2604,6 +2670,7 @@ def load_candidate_jobs(
         register_exact_posting_identity_function(connection)
         from src.candidate_assessments import register_completed_filter
         register_completed_filter(connection, resume_hash)
+        register_automatic_status_filter(connection)
         cursor = connection.execute(
             """
             WITH jobs AS (
@@ -2858,6 +2925,7 @@ def load_candidate_jobs(
                       END
                   ) <> 'FILTERED_OUT'
                   AND NOT candidate_has_completed(jobs.record_key)
+                  AND automatic_status_is_new(jobs.record_key)
                   AND COALESCE(
                       latest_application_status.status,
                       'new'
@@ -2907,7 +2975,8 @@ def load_candidate_jobs(
             ORDER BY
                 rule_score DESC,
                 title,
-                company_name
+                company_name,
+                record_key
             """.format(
                 excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
                 trusted_verified_key_sources=TRUSTED_VERIFIED_KEY_SOURCES_SQL,
@@ -3018,6 +3087,7 @@ def count_unscored_candidate_jobs(
         register_exact_posting_identity_function(connection)
         from src.candidate_assessments import register_completed_filter
         register_completed_filter(connection, resume_hash)
+        register_automatic_status_filter(connection)
         result = connection.execute(
             """
             WITH jobs AS (
@@ -3164,6 +3234,7 @@ def count_unscored_candidate_jobs(
                       END
                   ) <> 'FILTERED_OUT'
                   AND NOT candidate_has_completed(jobs.record_key)
+                  AND automatic_status_is_new(jobs.record_key)
                   AND COALESCE(
                       latest_application_status.status,
                       'new'
@@ -3232,6 +3303,7 @@ def load_unscreened_job_eligibility_candidates(
         register_exact_posting_identity_function(connection)
         from src.candidate_assessments import register_completed_filter
         register_completed_filter(connection, resume_hash)
+        register_automatic_status_filter(connection)
         cursor = connection.execute(
             """
             WITH jobs AS (
@@ -3350,6 +3422,7 @@ def load_unscreened_job_eligibility_candidates(
                       END
                   ) <> 'FILTERED_OUT'
                   AND NOT candidate_has_completed(jobs.record_key)
+                  AND automatic_status_is_new(jobs.record_key)
                   AND COALESCE(
                       latest_application_status.status,
                       'new'
@@ -3374,7 +3447,8 @@ def load_unscreened_job_eligibility_candidates(
             WHERE job_rank = 1
             ORDER BY
                 title,
-                company_name
+                company_name,
+                record_key
             """.format(
                 excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
             ),
