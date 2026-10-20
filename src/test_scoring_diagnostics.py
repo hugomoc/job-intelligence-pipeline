@@ -9,7 +9,12 @@ from unittest.mock import Mock, patch
 from pydantic import BaseModel, ValidationError
 
 from src import score_backlog as backlog
-from src.ai.resume_matcher import ResumeMatcherError
+from src.ai.resume_matcher import (
+    ResumeMatcherError,
+    is_gemini_daily_quota_error,
+    is_retryable_provider_error,
+    provider_retry_delay_seconds,
+)
 from src.scoring_diagnostics import log_scoring_failure, scoring_error_message, sanitize_diagnostic_text
 from src.ui.daily_workflow_service import capture_stdout_lines
 
@@ -57,7 +62,9 @@ class ScoringDiagnosticsTests(unittest.TestCase):
 
     def test_both_provider_failures_are_logged_and_fallback_stays_active(self):
         summary, text, saved, dbt, mocks = self.run_backlog([
-            ResumeMatcherError('429 RESOURCE_EXHAUSTED quota exceeded'),
+            ResumeMatcherError(
+                '429 RESOURCE_EXHAUSTED GenerateRequestsPerDay quota exceeded'
+            ),
         ], [ResumeMatcherError('OpenAI API error: HTTP 503 service unavailable'), self.match()])
         self.assertIn('Provider: Gemini', text)
         self.assertIn('429 RESOURCE_EXHAUSTED quota exceeded', text)
@@ -68,6 +75,56 @@ class ScoringDiagnosticsTests(unittest.TestCase):
         self.assertEqual(mocks['score_resume_against_job_openai'].call_count, 2)
         self.assertTrue(summary.quota_exhausted)
         saved.assert_called_once()
+
+    def test_generic_gemini_429_does_not_switch_whole_batch_to_openai(self):
+        summary, text, saved, dbt, mocks = self.run_backlog([
+            ResumeMatcherError(
+                '429 RESOURCE_EXHAUSTED quota exceeded; retry in 12s'
+            ),
+            self.match(),
+        ])
+
+        self.assertIn('Provider: Gemini', text)
+        self.assertFalse(summary.quota_exhausted)
+        self.assertEqual(summary.openai_scores_saved, 0)
+        self.assertEqual(summary.gemini_scores_saved, 1)
+        self.assertEqual(summary.jobs_failed, 1)
+        self.assertEqual(
+            mocks['score_resume_against_job'].call_count,
+            2,
+        )
+        mocks['score_resume_against_job_openai'].assert_not_called()
+        saved.assert_called_once()
+        dbt.assert_called_once()
+
+    def test_rate_limit_helpers_distinguish_minute_from_daily_quota(self):
+        minute_error = ResumeMatcherError(
+            '429 RESOURCE_EXHAUSTED quota exceeded; retry in 17.5s'
+        )
+        daily_error = ResumeMatcherError(
+            '429 RESOURCE_EXHAUSTED GenerateRequestsPerDay quota exceeded'
+        )
+
+        self.assertFalse(
+            is_gemini_daily_quota_error(minute_error)
+        )
+        self.assertTrue(
+            is_retryable_provider_error(minute_error)
+        )
+        self.assertEqual(
+            provider_retry_delay_seconds(
+                minute_error,
+                0,
+            ),
+            17.5,
+        )
+
+        self.assertTrue(
+            is_gemini_daily_quota_error(daily_error)
+        )
+        self.assertFalse(
+            is_retryable_provider_error(daily_error)
+        )
 
     def test_openai_active_provider_and_consistency_error_are_logged(self):
         summary, text, _, _, _ = self.run_backlog([
