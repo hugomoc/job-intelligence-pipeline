@@ -8,6 +8,7 @@ and AI scoring live in src/ so they can be tested without Streamlit.
 from __future__ import annotations
 
 from datetime import date, timedelta
+from html import escape
 
 import streamlit as st
 
@@ -303,6 +304,38 @@ def remove_generic_incomplete_risks(
     ]
 
 
+def render_assessment_badges(job: dict, pipeline_label: str) -> None:
+    """Render escaped, self-contained badges without changing page-wide styles."""
+    score = job.get("ai_score")
+    recommendation = str(job.get("recommendation") or "").lower()
+    background, foreground, border = {
+        "apply": ("#153d2b", "#86efac", "#347455"),
+        "review": ("#423313", "#fcd34d", "#806324"),
+    }.get(recommendation if score is not None else "", ("#282f3a", "#cbd5e1", "#4b5563"))
+    style = (
+        f"background:{background};color:{foreground};border:1px solid {border};"
+        "border-radius:8px;padding:6px 8px;min-height:40px;box-sizing:border-box;"
+        "display:inline-flex;align-items:center;font-weight:700;line-height:1;"
+    )
+    if score is None:
+        badges = (
+            f'<span style="{style}font-size:14px;" '
+            f'title="{escape(pipeline_label, quote=True)}">Unscored</span>'
+        )
+    else:
+        score_text = escape(f"{score}%", quote=True)
+        label = escape(STATUS_LABELS.get(recommendation, recommendation.upper()), quote=True)
+        badges = (
+            f'<span style="{style}font-size:24px;" aria-label="AI fit {score_text}">{score_text}</span>'
+            f'<span style="{style}font-size:12px;letter-spacing:0.04em;">{label}</span>'
+        )
+    st.html(
+        '<div role="group" aria-label="AI assessment" '
+        'style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">'
+        f'{badges}</div>'
+    )
+
+
 def render_job_listing(job: dict) -> None:
     record_key = job["record_key"]
     application_status = job.get(
@@ -334,14 +367,7 @@ def render_job_listing(job: dict) -> None:
             )
 
         with assessment:
-            if job.get("ai_score") is not None:
-                recommendation = str(job.get("recommendation") or "").lower()
-                st.markdown(
-                    f"**AI fit {job['ai_score']}% · "
-                    f"{STATUS_LABELS.get(recommendation, recommendation.upper())}**"
-                )
-            else:
-                st.caption(pipeline_state.label)
+            render_assessment_badges(job, pipeline_state.label)
             st.caption(APPLICATION_STATUS_LABELS.get(application_status, application_status))
 
         open_target = select_job_open_target(job)

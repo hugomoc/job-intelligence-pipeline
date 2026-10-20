@@ -44,7 +44,9 @@ def manual_rescore(record_key):
 def test_compact_card_header_and_collapsed_details():
     app = compact_card_app()
     assert not app.exception
-    assert any("AI fit 95% · APPLY" in item.value for item in app.markdown)
+    badges = app.get("html")[0].proto.body
+    assert 'aria-label="AI fit 95%"' in badges
+    assert '>95%</span>' in badges and '>APPLY</span>' in badges
     assert [item.label for item in app.expander] == [
         "Scoring details", "Enrichment details", "Advanced actions",
     ]
@@ -89,7 +91,28 @@ def test_compact_card_unscored_and_handled_states():
     assert "Scoring details" not in [item.label for item in app.expander]
     assert "Advanced actions" not in [item.label for item in app.expander]
     assert any(item.value == "Removed" for item in app.caption)
-    assert not any("AI fit" in item.value for item in app.markdown)
+    badges = app.get("html")[0].proto.body
+    assert '>Unscored</span>' in badges
+    assert '%' not in badges and '>APPLY</span>' not in badges
+
+
+
+def test_assessment_badge_colors_and_escaped_text():
+    for recommendation, score, foreground in (
+        ("apply", 98, "#86efac"), ("review", 75, "#fcd34d"), ("skip", 49, "#cbd5e1"),
+    ):
+        app = compact_card_app(ai_score=score, recommendation=recommendation)
+        assert not app.exception
+        badges = app.get("html")[0].proto.body
+        assert f'>{score}%</span>' in badges
+        assert f'>{recommendation.upper()}</span>' in badges
+        assert f'color:{foreground}' in badges
+        assert 'font-size:24px' in badges and 'border:1px solid' in badges
+        assert '<style' not in badges
+    app = compact_card_app(recommendation='<img src=x onerror="bad()">')
+    assert not app.exception
+    badges = app.get("html")[0].proto.body
+    assert '<img' not in badges and '&lt;IMG' in badges
 
 
 def main() -> None:
@@ -97,6 +120,7 @@ def main() -> None:
     test_compact_card_header_and_collapsed_details()
     test_compact_card_callbacks_keep_existing_keys_and_arguments()
     test_compact_card_unscored_and_handled_states()
+    test_assessment_badge_colors_and_escaped_text()
     print("Streamlit label tests passed.")
 
 
