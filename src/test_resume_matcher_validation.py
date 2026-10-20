@@ -5,15 +5,19 @@ from unittest.mock import patch
 from src.ai.resume_matcher import (
     MATCHER_PROMPT_VERSION,
     FitAnalysis,
+    FitScore,
     JobMatchAnalysis,
     RequirementMatch,
     ResumeMatcherError,
     build_job_match_prompt,
+    build_score_only_prompt,
     build_resume_job_match,
     get_openai_job_match_schema,
     determine_recommendation,
     fit_analysis_to_job_match_analysis,
+    fit_score_to_job_match_analysis,
     fit_output_contradictions,
+    get_openai_score_schema,
     validate_missing_qualifications,
 )
 from src.ai.resume_profiler import (
@@ -763,7 +767,7 @@ def test_repeated_specialization_is_treated_as_critical() -> None:
 
 
 def test_prompt_version_controls_cache_reuse() -> None:
-    assert MATCHER_PROMPT_VERSION == "v7"
+    assert MATCHER_PROMPT_VERSION == "v8"
 
     old_data_dir = database.DATA_DIR
     old_database_path = database.DATABASE_PATH
@@ -1238,6 +1242,78 @@ def test_ai_first_prompt_uses_actual_resume_and_requirements_rules() -> None:
 
 
 
+def test_v8_score_only_prompt_uses_actual_resume_and_returns_only_score() -> None:
+    profile = make_profile(
+        production_skills=["Cached profile skill that should not drive v8 scoring"],
+    )
+    prompt = build_score_only_prompt(
+        profile,
+        {
+            "title": "Senior Data Engineer",
+            "company_name": "Example",
+        },
+        (
+            "Responsibilities include SQL, Python, Snowflake, and data modeling. "
+            "Tableau is preferred."
+        ),
+        resume_text=(
+            "ACTUAL RESUME EVIDENCE\n"
+            "Built SQL and Python pipelines in production."
+        ),
+    )
+
+    assert "ACTUAL RESUME EVIDENCE" in prompt
+    assert "Cached profile skill that should not drive v8 scoring" not in prompt
+    assert "Return ONLY one integer fit score from 0 to 100" in prompt
+    assert "Do NOT return matches, gaps, partials" in prompt
+    assert "Preferred, bonus, nice-to-have" in prompt
+    assert "remote / hybrid / onsite arrangement" in prompt
+
+
+def test_v8_openai_schema_contains_only_fit_score() -> None:
+    schema = get_openai_score_schema()
+
+    assert set(schema["properties"]) == {"fit_score"}
+    assert schema["required"] == ["fit_score"]
+    assert schema["additionalProperties"] is False
+
+
+def test_v8_score_only_result_maps_directly_to_durable_score() -> None:
+    analysis = fit_score_to_job_match_analysis(
+        FitScore(fit_score=85)
+    )
+
+    assert analysis.overall_score == 85
+    assert analysis.recommendation == "apply"
+    assert analysis.title_fit == 85
+    assert analysis.skills_fit == 85
+    assert analysis.experience_fit == 85
+    assert analysis.seniority_fit == 85
+    assert analysis.industry_fit == 85
+    assert analysis.location_fit == 100
+    assert analysis.matching_strengths == []
+    assert analysis.hard_requirements_missing == []
+    assert analysis.preferred_qualifications_missing == []
+    assert analysis.risk_factors == []
+    assert analysis.requirement_matches == []
+    assert analysis.summary == ""
+
+
+def test_v8_score_only_recommendation_uses_score_band_only() -> None:
+    assert fit_score_to_job_match_analysis(
+        FitScore(fit_score=49)
+    ).recommendation == "skip"
+    assert fit_score_to_job_match_analysis(
+        FitScore(fit_score=50)
+    ).recommendation == "review"
+    assert fit_score_to_job_match_analysis(
+        FitScore(fit_score=74)
+    ).recommendation == "review"
+    assert fit_score_to_job_match_analysis(
+        FitScore(fit_score=75)
+    ).recommendation == "apply"
+
+
 def test_v7_fit_score_is_used_directly_without_component_formula() -> None:
     fit = FitAnalysis(
         fit_score=85,
@@ -1376,6 +1452,10 @@ def main() -> None:
     test_requirement_matches_are_explanatory_only()
     test_ai_first_rejects_apply_with_missing_core_requirement()
     test_ai_first_prompt_uses_actual_resume_and_requirements_rules()
+    test_v8_score_only_prompt_uses_actual_resume_and_returns_only_score()
+    test_v8_openai_schema_contains_only_fit_score()
+    test_v8_score_only_result_maps_directly_to_durable_score()
+    test_v8_score_only_recommendation_uses_score_band_only()
     test_v7_fit_score_is_used_directly_without_component_formula()
     test_v7_required_gap_keeps_high_score_in_review_not_apply()
     test_v7_output_validator_catches_match_negated_by_summary()

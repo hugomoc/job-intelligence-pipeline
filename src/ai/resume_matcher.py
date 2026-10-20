@@ -93,6 +93,16 @@ from src.description_quality import MINIMUM_FULL_DESCRIPTION_WORDS, assess_descr
 
 
 
+class FitScore(BaseModel):
+    """Score-only resume-to-JD assessment used by v8 production scoring."""
+
+    fit_score: int = Field(
+        ge=0,
+        le=100,
+        description="Direct holistic resume-to-JD requirements fit score.",
+    )
+
+
 class FitAnalysis(BaseModel):
     """Simple resume-to-JD assessment used by v7 production scoring."""
 
@@ -343,6 +353,148 @@ def get_description_information(
         word_count,
         description_complete,
     )
+
+
+def build_score_only_prompt(
+    resume_profile: ResumeProfile,
+    job: dict[str, Any],
+    description: str,
+    resume_text: str | None = None,
+) -> str:
+    """Build the v8 production prompt that returns only a fit score."""
+    evidence_text = (
+        redact_personal_information(resume_text).strip()
+        if resume_text
+        else resume_profile.model_dump_json(indent=2)
+    )
+
+    return f"""
+Evaluate how strongly this candidate's ACTUAL RESUME matches this JOB
+DESCRIPTION.
+
+Return ONLY one integer fit score from 0 to 100.
+
+The output schema contains only:
+
+{{
+  "fit_score": <0-100>
+}}
+
+Do the analysis internally. Do NOT return matches, gaps, partials,
+requirements, explanations, summaries, or recommendations.
+
+============================================================
+WHAT THE SCORE MEANS
+============================================================
+
+90-100:
+Exceptional fit. Nearly all important requirements are directly and
+convincingly demonstrated.
+
+80-89:
+Strong fit. Most important requirements are demonstrated, with only a few
+meaningful limitations.
+
+70-79:
+Good but imperfect fit. Strong transferable experience exists, but there
+are several meaningful limitations or one important weak area.
+
+60-69:
+Moderate fit. Relevant experience exists, but multiple important
+requirements are not demonstrated strongly enough.
+
+40-59:
+Weak fit. Some relevant experience exists, but major required capabilities
+are missing.
+
+0-39:
+Poor fit. The candidate's demonstrated background substantially differs
+from the core job requirements.
+
+============================================================
+SCORING RULES
+============================================================
+
+Judge ONLY experience actually demonstrated in the resume.
+
+Read the ENTIRE resume and the ENTIRE job description before deciding.
+
+Give the greatest weight to:
+- required qualifications
+- required technical skills
+- core responsibilities
+- required experience
+- seniority and scope
+
+Preferred, bonus, nice-to-have, desirable, and "a plus" qualifications
+should have only a small effect.
+
+Do not require identical wording between resume and JD.
+
+Evaluate the underlying capability when the JD describes a general
+capability.
+
+For example:
+- extensive professional SQL work supports SQL proficiency
+- professional Python engineering supports Python capability
+- dimensional/warehouse/semantic modeling supports data modeling
+- ETL/ELT and multi-source pipelines support data integration capability
+
+However, do NOT invent exact experience.
+
+If the JD explicitly requires a specific technology, industry/domain,
+certification, or specialized context, related experience does not
+automatically prove the exact requirement.
+
+A technology appearing only in a skills list proves familiarity, not
+necessarily deep or multi-year production expertise.
+
+Do not combine unrelated resume facts to manufacture experience.
+
+Respect OR requirements:
+if the JD says A OR B, either one can satisfy the requirement.
+
+Respect AND requirements:
+if the JD says A AND B, both matter.
+
+Do not penalize:
+- remote / hybrid / onsite arrangement
+- city
+- commute
+- relocation
+- salary
+- compensation
+- schedule
+
+Do not penalize employer industry unless prior industry/domain experience
+is explicitly required by the JD.
+
+Use professional recruiting judgment. Do NOT calculate the score using a
+rigid arithmetic formula.
+
+Before returning the score, internally check that it is consistent with
+the complete resume and the most important actual JD requirements.
+
+============================================================
+JOB
+============================================================
+
+Company:
+{job.get("company_name")}
+
+Title:
+{job.get("title")}
+
+Full job description:
+
+{description}
+
+============================================================
+ACTUAL RESUME
+============================================================
+
+{evidence_text}
+"""
 
 
 def build_job_match_prompt(
@@ -1131,6 +1283,38 @@ def _legacy_recommendation_for_fit(
         return "apply"
 
     return "review"
+
+
+def fit_score_to_job_match_analysis(
+    result: FitScore,
+) -> JobMatchAnalysis:
+    """Adapt a v8 score-only result to the existing durable storage schema."""
+    score = result.fit_score
+
+    if score < 50:
+        recommendation: Literal["apply", "review", "skip"] = "skip"
+    elif score >= 75:
+        recommendation = "apply"
+    else:
+        recommendation = "review"
+
+    return JobMatchAnalysis(
+        title_fit=score,
+        skills_fit=score,
+        experience_fit=score,
+        seniority_fit=score,
+        industry_fit=score,
+        location_fit=100,
+        overall_score=score,
+        recommendation=recommendation,
+        confidence="high",
+        matching_strengths=[],
+        hard_requirements_missing=[],
+        preferred_qualifications_missing=[],
+        risk_factors=[],
+        requirement_matches=[],
+        summary="",
+    )
 
 
 def fit_analysis_to_job_match_analysis(
@@ -1973,6 +2157,229 @@ def build_resume_job_match(
     )
 
 
+def get_openai_score_schema() -> dict[str, Any]:
+    """Return the strict v8 OpenAI schema containing only fit_score."""
+    schema = FitScore.model_json_schema()
+    schema["additionalProperties"] = False
+    schema["required"] = ["fit_score"]
+    return schema
+
+
+def parse_score_payload(
+    payload: Any,
+    provider_name: str,
+) -> FitScore:
+    if not isinstance(payload, dict):
+        raise ResumeMatcherError(
+            f"{provider_name} returned an unexpected "
+            f"response type: {type(payload).__name__}."
+        )
+
+    try:
+        return FitScore.model_validate(payload)
+    except ValidationError as error:
+        raise ResumeMatcherError(
+            f"{provider_name} returned an invalid score-only response: {error}"
+        ) from error
+
+
+def parse_gemini_score_response(
+    response: Any,
+) -> FitScore:
+    if isinstance(response.parsed, FitScore):
+        return response.parsed
+
+    if response.parsed is not None:
+        payload = (
+            response.parsed.model_dump()
+            if isinstance(response.parsed, BaseModel)
+            else response.parsed
+        )
+        return parse_score_payload(payload, "Gemini")
+
+    if response.text:
+        try:
+            payload = json.loads(response.text)
+        except json.JSONDecodeError as error:
+            raise ResumeMatcherError(
+                "Gemini returned invalid score-only JSON."
+            ) from error
+        return parse_score_payload(payload, "Gemini")
+
+    raise ResumeMatcherError(
+        "Gemini returned an empty score-only response."
+    )
+
+
+def parse_openai_score_content(
+    content: str | None,
+) -> FitScore:
+    if not content:
+        raise ResumeMatcherError(
+            "OpenAI returned an empty score-only response."
+        )
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise ResumeMatcherError(
+            "OpenAI returned invalid score-only JSON."
+        ) from error
+
+    return parse_score_payload(payload, "OpenAI")
+
+
+def _request_gemini_score(
+    client: Any,
+    model_name: str,
+    prompt: str,
+) -> Any:
+    """Call Gemini for a score-only response with transient retries."""
+    for attempt in range(3):
+        try:
+            return client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=FitScore,
+                    temperature=0.1,
+                ),
+            )
+        except Exception as error:
+            if (
+                attempt < 2
+                and is_retryable_provider_error(error)
+            ):
+                _retry_sleep(
+                    attempt,
+                    error,
+                    "Gemini",
+                )
+                continue
+
+            raise ResumeMatcherError(
+                "Gemini was unable to score the job. "
+                f"{type(error).__name__}: {error}"
+            ) from error
+
+    raise ResumeMatcherError(
+        "Gemini was unable to score the job."
+    )
+
+
+def _valid_gemini_score(
+    client: Any,
+    model_name: str,
+    prompt: str,
+) -> FitScore:
+    """Retry once if Gemini returns malformed score-only output."""
+    last_error: ResumeMatcherError | None = None
+
+    for attempt in range(2):
+        response = _request_gemini_score(
+            client=client,
+            model_name=model_name,
+            prompt=prompt,
+        )
+
+        try:
+            return parse_gemini_score_response(response)
+        except ResumeMatcherError as error:
+            last_error = error
+            if attempt == 0:
+                continue
+            raise
+
+    assert last_error is not None
+    raise last_error
+
+
+def _request_openai_score(
+    client: Any,
+    model_name: str,
+    prompt: str,
+) -> str | None:
+    """Call OpenAI for a score-only response with transient retries."""
+    for attempt in range(3):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Evaluate the complete resume against the complete "
+                            "job description. Return only the requested "
+                            "fit_score. Do all reasoning internally."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "score_only",
+                        "schema": get_openai_score_schema(),
+                        "strict": True,
+                    },
+                },
+                temperature=0.1,
+            )
+            return response.choices[0].message.content
+
+        except Exception as error:
+            if (
+                attempt < 2
+                and is_retryable_provider_error(error)
+            ):
+                _retry_sleep(
+                    attempt,
+                    error,
+                    "OpenAI",
+                )
+                continue
+
+            raise ResumeMatcherError(
+                "OpenAI was unable to score the job. "
+                f"{type(error).__name__}: {error}"
+            ) from error
+
+    raise ResumeMatcherError(
+        "OpenAI was unable to score the job."
+    )
+
+
+def _valid_openai_score(
+    client: Any,
+    model_name: str,
+    prompt: str,
+) -> FitScore:
+    """Retry once if OpenAI returns malformed score-only output."""
+    last_error: ResumeMatcherError | None = None
+
+    for attempt in range(2):
+        content = _request_openai_score(
+            client=client,
+            model_name=model_name,
+            prompt=prompt,
+        )
+
+        try:
+            return parse_openai_score_content(content)
+        except ResumeMatcherError as error:
+            last_error = error
+            if attempt == 0:
+                continue
+            raise
+
+    assert last_error is not None
+    raise last_error
+
+
 def _request_gemini_fit(
     client: Any,
     model_name: str,
@@ -2214,7 +2621,7 @@ def score_resume_against_job(
     model_name: str | None = None,
     resume_text: str | None = None,
 ) -> ResumeJobMatch:
-    """Score one job from the actual resume text and full JD."""
+    """Score one job using the v8 score-only contract."""
     resume_profile = apply_candidate_eligibility_overrides(
         resume_profile
     )
@@ -2235,31 +2642,23 @@ def score_resume_against_job(
         or get_model_name()
     )
 
-    prompt = build_job_match_prompt(
+    prompt = build_score_only_prompt(
         resume_profile=resume_profile,
         resume_text=resume_text,
         job=job,
         description=description,
-        description_complete=description_complete,
     )
 
     client = get_gemini_client()
 
-    fit_analysis = _valid_gemini_fit(
+    score_result = _valid_gemini_score(
         client=client,
         model_name=selected_model,
         prompt=prompt,
     )
 
-    fit_analysis = _validate_or_correct_gemini_fit(
-        client=client,
-        model_name=selected_model,
-        prompt=prompt,
-        analysis=fit_analysis,
-    )
-
-    analysis = fit_analysis_to_job_match_analysis(
-        fit_analysis
+    analysis = fit_score_to_job_match_analysis(
+        score_result
     )
 
     return build_resume_job_match(
@@ -2278,7 +2677,7 @@ def score_resume_against_job_openai(
     model_name: str | None = None,
     resume_text: str | None = None,
 ) -> ResumeJobMatch:
-    """OpenAI fallback using the same actual-resume v7 contract."""
+    """OpenAI fallback using the same v8 score-only contract."""
     resume_profile = apply_candidate_eligibility_overrides(
         resume_profile
     )
@@ -2314,33 +2713,25 @@ def score_resume_against_job_openai(
         or get_openai_model_name()
     )
 
-    prompt = build_job_match_prompt(
+    prompt = build_score_only_prompt(
         resume_profile=resume_profile,
         resume_text=resume_text,
         job=job,
         description=description,
-        description_complete=description_complete,
     )
 
     client = OpenAI(
         api_key=api_key
     )
 
-    fit_analysis = _valid_openai_fit(
+    score_result = _valid_openai_score(
         client=client,
         model_name=selected_model,
         prompt=prompt,
     )
 
-    fit_analysis = _validate_or_correct_openai_fit(
-        client=client,
-        model_name=selected_model,
-        prompt=prompt,
-        analysis=fit_analysis,
-    )
-
-    analysis = fit_analysis_to_job_match_analysis(
-        fit_analysis
+    analysis = fit_score_to_job_match_analysis(
+        score_result
     )
 
     return build_resume_job_match(
