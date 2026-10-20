@@ -727,6 +727,10 @@ def main() -> None:
             print(
                 "Using cached resume profile."
             )
+            save_cached_resume_text(
+                resume_hash=resume.resume_hash,
+                resume_text=resume.text,
+            )
 
         else:
             print(
