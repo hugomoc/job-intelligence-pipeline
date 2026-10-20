@@ -980,8 +980,9 @@ def test_unknown_location_gap_cannot_force_skip() -> None:
     assert match.overall_score == 50
     assert match.recommendation == "review"
     assert match.analysis.hard_requirements_missing == []
-    assert any(
-        "UNKNOWN personal eligibility" in risk
+    assert not any(
+        "location" in risk.casefold()
+        or "UNKNOWN personal eligibility" in risk
         for risk in match.analysis.risk_factors
     )
 
