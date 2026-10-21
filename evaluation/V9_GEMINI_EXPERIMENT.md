@@ -4,6 +4,47 @@ This command is an **isolated** comparison tool. It does not import the producti
 scoring queue, open DuckDB, create assessments, call OpenAI, or modify any scores.
 The first run should use **one frozen job and the resume used for its original score**.
 
+## No manual JSON preparation: read original active assessment from DuckDB
+
+From the repository root after merging this PR:
+
+```sh
+git switch main
+git pull --ff-only
+python -m evaluation.run_v9_gemini \
+  --from-db aurora \
+  --output ~/job-eval/v9/aurora_dry_run.json
+```
+
+This is a zero-API-call dry run. It opens the existing local DuckDB **read-only**,
+selects the exact frozen Aurora record key from the October 20 audit, joins its
+current active assessment, complete stored job description and **that
+assessment's original resume hash**. If the active record is missing,
+ambiguous or missing the original text, it fails rather than selecting a
+similarly named job or a different resume.
+
+After checking the dry run, a single *explicitly authorized* Gemini request:
+
+```sh
+python -m evaluation.run_v9_gemini \
+  --from-db aurora \
+  --output ~/job-eval/v9/aurora_live.json \
+  --live --max-calls 1
+```
+
+The five supported names are `aurora`, `netomi`, `tesla`,
+`centerwell`, and `constructor`. Each invocation selects **one** case and
+uses a fresh output path. The original score is not sent to Gemini.
+
+The database path defaults to the application's `src.database.DATABASE_PATH`.
+Use `--database /path/to/jobs.duckdb` only if you explicitly need an
+alternative database. The dry run does not import Gemini clients or load API
+keys. Private result JSON remains outside Git. No application assessments or
+scores are written. If your active pointer has changed since the October 20
+audit, this selects the current active assessment for the frozen record key,
+not necessarily its earlier audit snapshot; check that before interpreting
+the result.
+
 ## Private input
 
 Create JSON outside the Git repository, for example at

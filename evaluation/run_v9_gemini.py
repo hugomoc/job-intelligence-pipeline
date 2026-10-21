@@ -124,19 +124,29 @@ def evaluate(cases: list[dict], *, live: bool, max_calls: int, model: str,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, required=True)
+    sources = parser.add_mutually_exclusive_group(required=True)
+    sources.add_argument("--input", type=Path)
+    sources.add_argument("--from-db", choices=("aurora", "netomi", "tesla", "centerwell", "constructor"))
+    parser.add_argument("--database", type=Path, help="Override DuckDB path for --from-db")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", default="gemini-3.5-flash-lite")
     parser.add_argument("--live", action="store_true", help="Explicitly authorize paid API calls")
     parser.add_argument("--max-calls", type=int, default=0)
     args = parser.parse_args()
-    source = outside_repo(args.input)
     destination = outside_repo(args.output)
-    if source == destination:
-        parser.error("Input and output paths must differ")
+    if args.input is not None:
+        source = outside_repo(args.input)
+        if source == destination:
+            parser.error("Input and output paths must differ")
     if destination.exists():
         parser.error("Refusing to overwrite existing results")
-    cases = read_cases(source)
+    if args.from_db:
+        from evaluation.v9_frozen_inputs import load_cases
+        cases = load_cases([args.from_db], **({"database": args.database} if args.database else {}))
+    else:
+        if args.database is not None:
+            parser.error("--database requires --from-db")
+        cases = read_cases(args.input)
     if args.live:
         # Match the application’s local .env configuration only on explicit live runs.
         from dotenv import load_dotenv
