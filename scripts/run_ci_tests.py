@@ -22,6 +22,7 @@ CI_TESTS = [
     "src/test_scoring_diagnostics.py",
     "src/test_eval_metrics.py",
     "src/test_evidence_checks.py",
+    "src/test_v9_evidence.py",
     "src/test_resolution_graph_equivalence.py",
     "src/test_status_performance.py",
     "src/test_actionability.py",
