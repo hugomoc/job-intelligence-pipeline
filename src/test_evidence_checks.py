@@ -1,5 +1,10 @@
 """Pure synthetic fixture tests; no private JDs or API/database access."""
 import unittest
+import tempfile
+import json
+from pathlib import Path
+
+from evaluation.run_evidence_audit import run_audit
 
 from evaluation.evidence_checks import assess_case, evaluate_cases, validate_case
 
@@ -66,6 +71,18 @@ class EvidenceChecksTests(unittest.TestCase):
         self.assertEqual(results["n"], 3)
         with self.assertRaises(ValueError):
             evaluate_cases([rows[0], rows[0]])
+
+    def test_local_aggregate_runner_does_not_emit_private_case_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'private.json'
+            private = case('private-id', label='inflated')
+            private['requirements'][0]['requirement'] = 'PRIVATE REQUIREMENT TEXT'
+            path.write_text(json.dumps([private]))
+            result = run_audit(path)
+            self.assertEqual(result['known_inflated_detected'], 1)
+            self.assertNotIn('cases', result)
+            self.assertNotIn('private-id', json.dumps(result))
+            self.assertNotIn('PRIVATE REQUIREMENT TEXT', json.dumps(result))
 
     def test_no_input_mutation(self):
         original = case()
