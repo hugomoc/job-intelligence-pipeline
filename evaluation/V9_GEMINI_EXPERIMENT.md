@@ -1,3 +1,22 @@
+## Troubleshoot a Gemini HTTP 400 without spending API calls
+
+Use a **fresh private output filename**:
+
+```sh
+python -m evaluation.run_v9_gemini \
+  --from-db aurora \
+  --check-schema \
+  --output ~/job-eval/v9/aurora_schema_check.json
+```
+
+This checks local Google GenAI SDK configuration serialization only;
+`local_schema_serialized` does **not** guarantee server acceptance.
+For future explicitly authorized live runs, HTTP 400 responses now include
+only an allowlisted hint such as `unsupported_schema`, `invalid_model`,
+`unsupported_generation_config`, or `other_invalid_request`.
+These classifications are heuristic; no raw provider messages are saved.
+Do not repeat the live test until the local check is reviewed.
+
 # Controlled v9 Gemini experiment (not production scoring)
 
 This command is an **isolated** comparison tool. It does not import the production
