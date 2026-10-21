@@ -92,37 +92,61 @@ def call_gemini(prompt: str, model: str) -> object:
     return json.loads(response.text)
 
 
-def safe_provider_error(error: Exception) -> dict:
-    """Return allowlisted diagnostics, never provider text or request content."""
+def classify_bad_request(error: Exception) -> str:
+    """Read provider details in memory, return an allowlisted category only."""
     import re
 
-    info = {"error_type":type(error).__name__}
+    raw = str(error).casefold()
+    if re.search(r"(response.?schema|json.?schema|schema|additionalproperties|\\$defs|oneof|anyof|enum)", raw):
+        return "unsupported_schema"
+    if re.search(r"(model.*(not found|unsupported|invalid|does not exist)|invalid model|unknown model)", raw):
+        return "invalid_model"
+    if re.search(r"(temperature|generationconfig|response.?mime.?type|response.?format)", raw):
+        return "unsupported_generation_config"
+    if re.search(r"(token|context length|input too long|request too large)", raw):
+        return "request_too_large"
+    return "other_invalid_request"
+
+
+def local_schema_probe() -> dict:
+    """Check local SDK config serialization, without a model or network call."""
+    try:
+        from google.genai import types
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=Ledger,
+            temperature=0.1,
+        )
+        config.model_dump(exclude_none=True)
+        return {"status": "local_schema_serialized"}
+    except Exception as error:
+        return {"status": "local_schema_error", "error_type": type(error).__name__}
+
+
+def safe_provider_error(error: Exception) -> dict:
+    """Return allowlisted diagnostics, never provider text or request content."""
+    info = {"error_type": type(error).__name__}
     raw_status = getattr(error, "status_code", None)
     if raw_status is None:
         raw_status = getattr(error, "code", None)
-    if isinstance(raw_status, int) and 400 <= raw_status <= 599:
-        info["http_status"] = raw_status
-    else:
-        # Google GenAI ClientError often exposes a numeric code attribute.
+    if not isinstance(raw_status, int) or not 400 <= raw_status <= 599:
         return dict(info, error_category="unknown")
 
-    status = info["http_status"]
-    if status == 400:
-        category = "invalid_request_or_schema"
-    elif status == 401:
-        category = "authentication"
-    elif status == 403:
-        category = "permission_or_api_access"
-    elif status == 404:
-        category = "model_not_found"
-    elif status == 429:
-        category = "rate_limit_or_quota"
-    elif status in (408, 504):
-        category = "timeout"
-    elif status >= 500:
+    info["http_status"] = raw_status
+    categories = {
+        401: "authentication",
+        403: "permission_or_api_access",
+        404: "model_not_found",
+        429: "rate_limit_or_quota",
+        408: "timeout",
+        504: "timeout",
+    }
+    if raw_status == 400:
+        category = classify_bad_request(error)
+    elif raw_status >= 500:
         category = "provider_server_error"
     else:
-        category = "other_http_error"
+        category = categories.get(raw_status, "other_http_error")
     return dict(info, error_category=category)
 
 
@@ -164,6 +188,7 @@ def main() -> None:
     parser.add_argument("--database", type=Path, help="Override DuckDB path for --from-db")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", default="gemini-3.5-flash-lite")
+    parser.add_argument("--check-schema", action="store_true", help="Run local schema serialization only, without API calls")
     parser.add_argument("--live", action="store_true", help="Explicitly authorize paid API calls")
     parser.add_argument("--max-calls", type=int, default=0)
     args = parser.parse_args()
@@ -187,7 +212,12 @@ def main() -> None:
         load_dotenv(ROOT / ".env")
         if not os.environ.get("GEMINI_API_KEY"):
             parser.error("GEMINI_API_KEY is required for live calls")
-    results = evaluate(cases, live=args.live, max_calls=args.max_calls, model=args.model)
+    if args.check_schema:
+        if args.live:
+            parser.error("--check-schema cannot be combined with --live")
+        results = [{"case_id": case["case_id"], **local_schema_probe()} for case in cases]
+    else:
+        results = evaluate(cases, live=args.live, max_calls=args.max_calls, model=args.model)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("x", encoding="utf-8") as file:
         json.dump(results, file, indent=2)
