@@ -24,6 +24,7 @@ CI_TESTS = [
     "src/test_evidence_checks.py",
     "src/test_v9_evidence.py",
     "src/test_v9_gemini_harness.py",
+    "src/test_v9_frozen_inputs.py",
     "src/test_resolution_graph_equivalence.py",
     "src/test_status_performance.py",
     "src/test_actionability.py",
