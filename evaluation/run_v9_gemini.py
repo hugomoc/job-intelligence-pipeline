@@ -137,8 +137,12 @@ def main() -> None:
     if destination.exists():
         parser.error("Refusing to overwrite existing results")
     cases = read_cases(source)
-    if args.live and not os.environ.get("GEMINI_API_KEY"):
-        parser.error("GEMINI_API_KEY is required for live calls")
+    if args.live:
+        # Match the application’s local .env configuration only on explicit live runs.
+        from dotenv import load_dotenv
+        load_dotenv(ROOT / ".env")
+        if not os.environ.get("GEMINI_API_KEY"):
+            parser.error("GEMINI_API_KEY is required for live calls")
     results = evaluate(cases, live=args.live, max_calls=args.max_calls, model=args.model)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("x", encoding="utf-8") as file:
