@@ -71,8 +71,29 @@ class V9GeminiHarnessTests(unittest.TestCase):
         error = FakeClientError("SECRET API KEY AND RESUME")
         detail = safe_provider_error(error)
         self.assertEqual(detail["http_status"], 400)
-        self.assertEqual(detail["error_category"], "invalid_request_or_schema")
+        self.assertEqual(detail["error_category"], "other_invalid_request")
         self.assertNotIn("SECRET", json.dumps(detail))
+
+    def test_safe_400_categories_without_raw_details(self):
+        from evaluation.run_v9_gemini import safe_provider_error
+        for message, expected in [
+            ("response_schema includes unsupported oneOf PRIVATE", "unsupported_schema"),
+            ("model does not exist PRIVATE", "invalid_model"),
+            ("generationConfig temperature invalid PRIVATE", "unsupported_generation_config"),
+            ("input too long PRIVATE", "request_too_large"),
+        ]:
+            class APIError(Exception):
+                status_code = 400
+            detail = safe_provider_error(APIError(message))
+            self.assertEqual(detail["error_category"], expected)
+            self.assertNotIn("PRIVATE", json.dumps(detail))
+
+    def test_local_schema_probe_never_calls_network(self):
+        from evaluation.run_v9_gemini import local_schema_probe
+        from unittest.mock import patch
+        with patch("google.genai.Client", side_effect=AssertionError("network")):
+            result = local_schema_probe()
+        self.assertIn(result["status"], ("local_schema_serialized", "local_schema_error"))
 
     def test_unknown_errors_do_not_expose_messages(self):
         from evaluation.run_v9_gemini import safe_provider_error
