@@ -64,6 +64,32 @@ class V9GeminiHarnessTests(unittest.TestCase):
         self.assertEqual(result[0]["status"], "error")
         self.assertNotIn("SECRET", json.dumps(result))
 
+    def test_safe_provider_error_diagnostics(self):
+        from evaluation.run_v9_gemini import safe_provider_error
+        class FakeClientError(Exception):
+            status_code = 400
+        error = FakeClientError("SECRET API KEY AND RESUME")
+        detail = safe_provider_error(error)
+        self.assertEqual(detail["http_status"], 400)
+        self.assertEqual(detail["error_category"], "invalid_request_or_schema")
+        self.assertNotIn("SECRET", json.dumps(detail))
+
+    def test_unknown_errors_do_not_expose_messages(self):
+        from evaluation.run_v9_gemini import safe_provider_error
+        detail = safe_provider_error(RuntimeError("PRIVATE PROMPT"))
+        self.assertEqual(detail["error_category"], "unknown")
+        self.assertNotIn("PRIVATE", json.dumps(detail))
+
+    def test_quota_and_model_missing_categories(self):
+        from evaluation.run_v9_gemini import safe_provider_error
+        for code, category in [(404, "model_not_found"), (429, "rate_limit_or_quota"),
+                               (403, "permission_or_api_access")]:
+            class APIError(Exception):
+                pass
+            error = APIError("sensitive")
+            error.code = code
+            self.assertEqual(safe_provider_error(error)["error_category"], category)
+
     def test_private_path_and_duplicate_validation(self):
         from evaluation.run_v9_gemini import ROOT
         with self.assertRaises(ValueError):
