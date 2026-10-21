@@ -53,7 +53,7 @@ details or assign automatically generated requirements from these labels.
 
 1. Transcribe or load the 11 audit cases from a private location; check
    citation fidelity against stored full JD and the scored resume.
-2. Run `evaluate_cases` locally, review per-case flags and aggregate counts.
+2. Run `python -m evaluation.run_evidence_audit --input /path/to/private_evidence_benchmark_11.json` locally to print **aggregate-only** results, or use `evaluate_cases` for private case-level flags. Do not commit the private input or full findings.
 3. Review false positives, especially CenterWell and Constructor, and inspect
    unsupported mandatory items for Aurora Solar and Netomi.
 4. Expand beyond this small, intentionally high-score-heavy cohort.
