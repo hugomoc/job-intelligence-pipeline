@@ -92,6 +92,40 @@ def call_gemini(prompt: str, model: str) -> object:
     return json.loads(response.text)
 
 
+def safe_provider_error(error: Exception) -> dict:
+    """Return allowlisted diagnostics, never provider text or request content."""
+    import re
+
+    info = {"error_type":type(error).__name__}
+    raw_status = getattr(error, "status_code", None)
+    if raw_status is None:
+        raw_status = getattr(error, "code", None)
+    if isinstance(raw_status, int) and 400 <= raw_status <= 599:
+        info["http_status"] = raw_status
+    else:
+        # Google GenAI ClientError often exposes a numeric code attribute.
+        return dict(info, error_category="unknown")
+
+    status = info["http_status"]
+    if status == 400:
+        category = "invalid_request_or_schema"
+    elif status == 401:
+        category = "authentication"
+    elif status == 403:
+        category = "permission_or_api_access"
+    elif status == 404:
+        category = "model_not_found"
+    elif status == 429:
+        category = "rate_limit_or_quota"
+    elif status in (408, 504):
+        category = "timeout"
+    elif status >= 500:
+        category = "provider_server_error"
+    else:
+        category = "other_http_error"
+    return dict(info, error_category=category)
+
+
 def evaluate(cases: list[dict], *, live: bool, max_calls: int, model: str,
              caller=call_gemini) -> list[dict]:
     if max_calls < 0:
@@ -116,8 +150,8 @@ def evaluate(cases: list[dict], *, live: bool, max_calls: int, model: str,
                 entry.update(status="validated" if result["valid"] else "invalid",
                              validation=result, ledger=payload)
             except Exception as error:
-                entry.update(status="error", error_type=type(error).__name__)
-                # Do not leak resume/JD or provider error contents.
+                entry.update(status="error", **safe_provider_error(error))
+                # Never persist provider message, prompt, resume, or API key.
         results.append(entry)
     return results
 
