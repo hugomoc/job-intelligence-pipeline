@@ -1,4 +1,6 @@
 # Job Intelligence Pipeline
+<img width="1884" height="882" alt="Screenshot 2026-10-26 at 8 47 21 PM" src="https://github.com/user-attachments/assets/d20af4b0-3fb4-47ff-b129-de5aba18e9ff" />
+<img width="1807" height="876" alt="Screenshot 2026-10-26 at 8 47 37 PM" src="https://github.com/user-attachments/assets/de181dd6-a338-419e-bd26-0a6a03136a9b" />
 
 [![CI](https://github.com/hugomoc/job-intelligence-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/hugomoc/job-intelligence-pipeline/actions/workflows/ci.yml)
 
