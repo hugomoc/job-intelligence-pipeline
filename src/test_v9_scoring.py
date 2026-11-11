@@ -338,6 +338,58 @@ class V9CompareTests(unittest.TestCase):
         self.assertEqual(report["providers"]["openai:o"]["too_pessimistic"], 1)
         self.assertIn("Most accurate", render(report))
 
+    def test_invalid_results_are_excluded_and_never_win(self):
+        case = {"case_id": "aurora", "jd": SQL_JD, "resume": SQL_RESUME}
+        # Valid JSON, but the resume citation is fabricated: contract failure.
+        fabricated = {"fit_score": 95, "requirements": [
+            row("sql", SQL_JD, "SQL", resume="SQL at a company never mentioned")]}
+        honest = {"fit_score": 86, "requirements": [SQL_ROW]}
+        results = (
+            evaluate([case], live=True, max_calls=1, model="o", provider="openai",
+                     caller=lambda p, m: fabricated)
+            + evaluate([case], live=True, max_calls=1, model="g", provider="gemini",
+                       caller=lambda p, m: honest))
+        invalid_entry = results[0]
+        self.assertEqual(invalid_entry["status"], "invalid")
+        for trusted_key in ("recommendation", "final_score", "model_score"):
+            self.assertNotIn(trusted_key, invalid_entry)
+        self.assertEqual(invalid_entry["unvalidated_model_score"], 95)
+        self.assertTrue(invalid_entry["validation_failures"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ref.json"
+            path.write_text(json.dumps([{"case_id": "aurora", "recommendation": "APPLY",
+                                         "score": 85}]))
+            report = compare(load_reference(path), results)
+        openai = report["providers"]["openai:o"]
+        self.assertEqual(openai["validated"], 0)
+        self.assertEqual(openai["invalid"], 1)
+        self.assertEqual(openai["recommendation_correct"], 0)
+        self.assertEqual(openai["validation_pass_rate"], 0.0)
+        self.assertEqual(report["providers"]["gemini:g"]["validation_pass_rate"], 1.0)
+        # The provider with the only validated, correct assessment wins.
+        self.assertEqual(report["ranking"][0], "gemini:g")
+        self.assertIn("excluded from accuracy", render(report))
+
+    def test_api_errors_reported_separately_from_invalid_ledgers(self):
+        case = {"case_id": "aurora", "jd": SQL_JD, "resume": SQL_RESUME}
+
+        def boom(prompt, model):
+            raise RuntimeError("provider down")
+
+        results = evaluate([case], live=True, max_calls=1, model="g",
+                           provider="gemini", caller=boom)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ref.json"
+            path.write_text(json.dumps([{"case_id": "aurora", "recommendation": "APPLY"}]))
+            report = compare(load_reference(path), results)
+        stats = report["providers"]["gemini:g"]
+        self.assertEqual(stats["errors"], 1)
+        self.assertEqual(stats["invalid"], 0)
+        self.assertEqual(stats["validated"], 0)
+        self.assertIsNone(stats["validation_pass_rate"])
+        self.assertIn("No provider produced a validated assessment", render(report))
+
     def test_reference_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ref.json"

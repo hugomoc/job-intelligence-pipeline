@@ -70,6 +70,12 @@ def _component_status(entry: dict, component: str) -> str | None:
 
 
 def compare(reference: dict[str, dict], results: list[dict]) -> dict:
+    """Score accuracy counts VALIDATED assessments only.
+
+    An ``invalid`` entry failed the evidence contract: it is a validation
+    failure, never a scoring result, and its diagnostic score stays labelled
+    unvalidated. Provider/API errors and dry runs are reported separately.
+    """
     providers: dict[str, dict] = {}
     for entry in results:
         label = f"{entry.get('provider', '?')}:{entry.get('model', '?')}"
@@ -77,14 +83,17 @@ def compare(reference: dict[str, dict], results: list[dict]) -> dict:
         ref = reference.get(entry["case_id"])
         if ref is None:
             continue
-        case = {"case_id": entry["case_id"], "status": entry.get("status"),
+        status = entry.get("status")
+        case = {"case_id": entry["case_id"], "status": status,
                 "expected_recommendation": ref["recommendation"], "expected_score": ref.get("score")}
-        if "recommendation" in entry:
+        if status == "validated":
             tol = ref.get("score_tolerance", DEFAULT_TOLERANCE)
             final, raw = entry["final_score"], entry["model_score"]
             decision = entry.get("decision", {})
             case.update(
                 recommendation=entry["recommendation"],
+                technical_recommendation=entry.get("technical_recommendation",
+                                                   entry["recommendation"]),
                 model_score=raw,
                 final_score=final,
                 recommendation_correct=entry["recommendation"] == ref["recommendation"],
@@ -104,18 +113,39 @@ def compare(reference: dict[str, dict], results: list[dict]) -> dict:
                 components[component] = {"expected": expected, "provider": got,
                                          "agree": got == expected}
             case["central_mandatory"] = components
+        elif status == "invalid":
+            # Older result files carried plain score keys on invalid entries;
+            # either way the numbers are diagnostic only.
+            case.update(
+                validation_failures=len(entry.get("validation_failures")
+                                        or entry.get("decision", {}).get("validation", {}).get("failures", [])),
+                unvalidated_model_score=entry.get("unvalidated_model_score",
+                                                  entry.get("model_score")),
+                unvalidated_final_score=entry.get("unvalidated_final_score",
+                                                  entry.get("final_score")),
+                unvalidated_recommendation=entry.get("unvalidated_recommendation",
+                                                     entry.get("recommendation")),
+            )
+        elif status == "error":
+            case["error_category"] = entry.get("error_category", "unknown")
         stats["cases"].append(case)
 
     summary = {}
     for label, stats in providers.items():
         cases = stats["cases"]
-        scored = [c for c in cases if "recommendation" in c]
+        scored = [c for c in cases if c["status"] == "validated"]
+        invalid = [c for c in cases if c["status"] == "invalid"]
+        errors = [c for c in cases if c["status"] == "error"]
         with_score = [c for c in scored if "final_error" in c]
         components = [v for c in scored for v in c["central_mandatory"].values()]
+        responded = len(scored) + len(invalid)
         summary[label] = {
             "cases": len(cases),
-            "scored": len(scored),
-            "errors_or_dry_run": len(cases) - len(scored),
+            "validated": len(scored),
+            "invalid": len(invalid),
+            "errors": len(errors),
+            "dry_run_or_other": len(cases) - responded - len(errors),
+            "validation_pass_rate": round(len(scored) / responded, 2) if responded else None,
             "recommendation_correct": sum(c["recommendation_correct"] for c in scored),
             "too_optimistic": sum(c["tier_error"] > 0 for c in scored),
             "too_pessimistic": sum(c["tier_error"] < 0 for c in scored),
@@ -132,10 +162,13 @@ def compare(reference: dict[str, dict], results: list[dict]) -> dict:
         }
     missing = {label: sorted(set(reference) - {c["case_id"] for c in s["cases"]})
                for label, s in providers.items()}
+    # Only validated assessments can improve a ranking: correct
+    # recommendations first, then validated count, then score accuracy.
     ranking = sorted(
         summary,
         key=lambda k: (
             -summary[k]["recommendation_correct"],
+            -summary[k]["validated"],
             -summary[k]["within_tolerance"],
             summary[k]["final_score_mae"] if summary[k]["final_score_mae"] is not None else 999,
             summary[k]["unsupported_resume_citations"] + summary[k]["unsupported_jd_citations"],
@@ -154,32 +187,52 @@ def render(report: dict) -> str:
         s = report["providers"][label]
         lines.append(f"== {label} ==")
         lines.append(
-            f"recommendation correct {s['recommendation_correct']}/{s['scored']} "
+            f"validated {s['validated']}/{s['cases']} (invalid ledgers {s['invalid']}, "
+            f"API errors {s['errors']}, other {s['dry_run_or_other']}); "
+            f"validation pass rate {s['validation_pass_rate']}")
+        lines.append(
+            f"recommendation correct {s['recommendation_correct']}/{s['validated']} "
             f"(too optimistic {s['too_optimistic']}, too pessimistic {s['too_pessimistic']}); "
             f"score within tolerance {s['within_tolerance']}/{s['scores_compared']}; "
-            f"MAE final {s['final_score_mae']} vs raw model {s['model_score_mae']}")
+            f"MAE final {s['final_score_mae']} vs raw model {s['model_score_mae']} "
+            f"(validated assessments only)")
         lines.append(
             f"requirement statuses agree {s['requirement_status_agreement']}/"
             f"{s['requirement_status_total']} (not extracted {s['requirement_not_extracted']}); "
             f"unsupported citations resume {s['unsupported_resume_citations']}, "
-            f"JD {s['unsupported_jd_citations']}; errors/dry-run {s['errors_or_dry_run']}")
+            f"JD {s['unsupported_jd_citations']}")
         for c in s["cases_detail"]:
-            if "recommendation" not in c:
-                lines.append(f"  {c['case_id']:<12} {c['status']}")
+            if c["status"] == "invalid":
+                lines.append(
+                    f"  !! {c['case_id']:<12} INVALID ledger "
+                    f"({c['validation_failures']} contract failure(s)); unvalidated "
+                    f"score {c['unvalidated_model_score']}->{c['unvalidated_final_score']} "
+                    f"{c['unvalidated_recommendation']} — excluded from accuracy")
+                continue
+            if c["status"] != "validated":
+                detail = c.get("error_category", c["status"])
+                lines.append(f"  -- {c['case_id']:<12} {c['status']} ({detail})")
                 continue
             flag = "ok " if c["recommendation_correct"] else "XX "
+            overlay = ("" if c["recommendation"] == c["technical_recommendation"]
+                       else f" [technical {c['technical_recommendation']}, eligibility override]")
             disagreements = [f"{k}: {v['provider']} (expected {v['expected']})"
                              for k, v in c["central_mandatory"].items() if not v["agree"]]
             lines.append(
-                f"  {flag}{c['case_id']:<12} {c['recommendation']:<12} "
+                f"  {flag}{c['case_id']:<12} {c['recommendation']:<12}{overlay} "
                 f"(expected {c['expected_recommendation']}) "
                 f"score {c['model_score']}->{c['final_score']} (expected {c['expected_score']})"
                 + (f"; requirement disagreements: {'; '.join(disagreements)}" if disagreements else ""))
         if report["missing_cases"].get(label):
             lines.append(f"  missing reference cases: {', '.join(report['missing_cases'][label])}")
     if report["ranking"]:
-        lines.append(f"Most accurate on this sample: {report['ranking'][0]} "
-                     "(5 cases is a smoke test, not a statistically reliable ranking)")
+        top = report["ranking"][0]
+        if report["providers"][top]["validated"] == 0:
+            lines.append("No provider produced a validated assessment; "
+                         "no accuracy winner can be declared.")
+        else:
+            lines.append(f"Most accurate on this sample: {top} "
+                         "(5 cases is a smoke test, not a statistically reliable ranking)")
     return "\n".join(lines)
 
 

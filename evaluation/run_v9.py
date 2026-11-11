@@ -404,15 +404,30 @@ def evaluate(cases: list[dict], *, live: bool, max_calls: int, model: str,
             try:
                 payload = caller(prompt, model)
                 decision = check_payload(payload, case["jd"], case["resume"], case)
-                entry.update(
-                    status="validated" if decision["validation"]["valid"] else "invalid",
-                    model_score=decision["model_score"],
-                    final_score=decision["final_score"],
-                    recommendation=decision["recommendation"],
-                    technical_recommendation=decision["technical_recommendation"],
-                    decision=decision,
-                    ledger=payload,
-                )
+                if decision["validation"]["valid"]:
+                    entry.update(
+                        status="validated",
+                        model_score=decision["model_score"],
+                        final_score=decision["final_score"],
+                        recommendation=decision["recommendation"],
+                        technical_recommendation=decision["technical_recommendation"],
+                        decision=decision,
+                        ledger=payload,
+                    )
+                else:
+                    # A ledger that fails the evidence contract yields no
+                    # trustworthy score or recommendation. Keep the numbers
+                    # for diagnosis, explicitly labelled unvalidated.
+                    entry.update(
+                        status="invalid",
+                        validation_failures=decision["validation"]["failures"],
+                        unvalidated_model_score=decision["model_score"],
+                        unvalidated_final_score=decision["final_score"],
+                        unvalidated_recommendation=decision["recommendation"],
+                        unvalidated_technical_recommendation=decision["technical_recommendation"],
+                        decision=decision,
+                        ledger=payload,
+                    )
             except Exception as error:
                 entry.update(status="error", **safe_provider_error(error))
                 # Never persist provider message, prompt, resume, or API key.
@@ -476,11 +491,17 @@ def main(default_provider: str | None = None) -> None:
     print(f"{len(results)} case(s); provider={args.provider}; model={model}; "
           f"live={args.live}; output={destination}")
     for entry in results:
-        if "recommendation" in entry:
+        if entry["status"] == "validated":
             overlay = ("" if entry["recommendation"] == entry["technical_recommendation"]
                        else f" (technical {entry['technical_recommendation']}, eligibility override)")
             print(f"  {entry['case_id']}: model {entry['model_score']} -> final "
-                  f"{entry['final_score']} {entry['recommendation']}{overlay} ({entry['status']})")
+                  f"{entry['final_score']} {entry['recommendation']}{overlay} (validated)")
+        elif entry["status"] == "invalid":
+            print(f"  {entry['case_id']}: INVALID ledger "
+                  f"({len(entry['validation_failures'])} contract failure(s)); "
+                  f"unvalidated score {entry['unvalidated_model_score']} is not a result")
+        elif entry["status"] == "error":
+            print(f"  {entry['case_id']}: error {entry.get('error_category', 'unknown')}")
 
 
 if __name__ == "__main__":
