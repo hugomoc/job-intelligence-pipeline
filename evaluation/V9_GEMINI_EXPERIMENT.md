@@ -88,13 +88,18 @@ independently reviewed conclusions:
 
 ```json
 [
-  {"case_id": "aurora", "recommendation": "LOW PRIORITY", "score": 55,
-   "score_tolerance": 10,
+  {"case_id": "aurora", "recommendation": "HUMAN REVIEW",
+   "score_min": 70, "score_max": 82,
    "central_mandatory": {"dbt": "not_demonstrated", "Looker": "met"}}
 ]
 ```
 
-(The values above are illustrative, not your review.) Then:
+(The values above are illustrative, not your review.) A score inside
+`score_min`-`score_max` is within tolerance; outside it is reported as an
+overscore/underscore with the distance from the violated bound — no midpoint
+is ever derived, and `recommendation` is always compared independently of
+the range. The older exact form (`"score": 55, "score_tolerance": 10`)
+still works. Then:
 
 ```sh
 python -m evaluation.compare_v9 --reference ~/job-eval/v9/reference.json \

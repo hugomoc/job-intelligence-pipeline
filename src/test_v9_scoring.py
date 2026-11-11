@@ -397,6 +397,60 @@ class V9CompareTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_reference(path)
 
+    def test_score_range_reference(self):
+        case = {"case_id": "aurora", "jd": SQL_JD, "resume": SQL_RESUME}
+
+        def run_with_score(score, model_name):
+            payload = {"fit_score": score, "requirements": [SQL_ROW]}
+            return evaluate([case], live=True, max_calls=1, model=model_name,
+                            provider="gemini", caller=lambda p, m: payload)
+
+        results = (run_with_score(70, "at-min") + run_with_score(82, "at-max")
+                   + run_with_score(92, "above") + run_with_score(60, "below"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ref.json"
+            path.write_text(json.dumps([{
+                "case_id": "aurora", "recommendation": "HUMAN REVIEW",
+                "score_min": 70, "score_max": 82}]))
+            report = compare(load_reference(path), results)
+
+        def case_for(model_name):
+            return report["providers"][f"gemini:{model_name}"]["cases_detail"][0]
+
+        # Both endpoints are inside the range: no artificial midpoint error.
+        for name in ("at-min", "at-max"):
+            cmp = case_for(name)["final_score_vs_reference"]
+            self.assertTrue(cmp["within"])
+            self.assertEqual(cmp["deviation"], 0)
+        above = case_for("above")["final_score_vs_reference"]
+        self.assertEqual((above["within"], above["overscore"], above["underscore"]),
+                         (False, 10, 0))
+        below = case_for("below")["final_score_vs_reference"]
+        self.assertEqual((below["within"], below["overscore"], below["underscore"]),
+                         (False, 0, 10))
+        # Raw model score is compared separately from the final score.
+        self.assertIn("model_score_vs_reference", case_for("above"))
+        # Recommendation accuracy stays independent of the score range: the
+        # 92/APPLY run is outside the range AND recommendation-incorrect, while
+        # the at-min run is within range with the expected recommendation.
+        self.assertFalse(case_for("above")["recommendation_correct"])
+        self.assertTrue(case_for("at-min")["recommendation_correct"])
+        self.assertIn("OVERSCORE +10", render(report))
+        self.assertIn("UNDERSCORE -10", render(report))
+
+    def test_reference_range_validation(self):
+        def expect_error(item):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "ref.json"
+                path.write_text(json.dumps([dict(case_id="x", recommendation="APPLY", **item)]))
+                with self.assertRaises(ValueError):
+                    load_reference(path)
+
+        expect_error({"score_min": 80, "score_max": 70})
+        expect_error({"score_min": 70})
+        expect_error({"score_min": 70, "score_max": 80, "score": 75})
+        expect_error({"score_min": -1, "score_max": 80})
+
 
 if __name__ == "__main__":
     unittest.main()
