@@ -71,7 +71,11 @@ TENURE_EVIDENCE = re.compile(
 
 
 def _norm(value: str) -> str:
-    return " ".join(value.casefold().split())
+    # Hyphens compare as whitespace: extracted documents carry artifacts such
+    # as "data -driven" that models legitimately quote as "data-driven", and
+    # "end to end" must match "end-to-end". Both comparison sides receive the
+    # same normalization, so no direction gains leniency the other lacks.
+    return re.sub(r"[-\s]+", " ", value.casefold()).strip()
 
 
 def _combine(logic: GroupLogic, statuses: list[str]) -> str:
@@ -131,7 +135,7 @@ def validate_ledger(ledger: Ledger | dict, jd: str, resume: str) -> dict:
         if kind == "preferred" and REQUIRED_MARKERS.search(r.jd_quote) and not PREFERRED_MARKERS.search(r.jd_quote):
             warnings.append(f"row {i}: required-sounding clause labeled preferred")
         if status == "met" and r.logic in {GroupLogic.SINGLE, GroupLogic.ANY_OF, GroupLogic.ALL_OF}:
-            if r.component.casefold() not in (r.resume_quote or "").casefold():
+            if _norm(r.component) not in _norm(r.resume_quote or ""):
                 # A literal term is intentionally required for exact named tech;
                 # generic equivalence belongs under OPEN_EQUIVALENT.
                 failures.append(f"row {i}: claimed component absent from resume quote")
