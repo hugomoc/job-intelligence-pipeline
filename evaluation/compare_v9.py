@@ -96,19 +96,48 @@ def _expected_score_display(ref: dict):
     return ref.get("score")
 
 
-def _component_status(entry: dict, component: str) -> str | None:
-    """Best effective status the provider gave a reviewed component."""
-    rows = entry.get("decision", {}).get("validation", {}).get("rows", [])
+def _component_matches(entry: dict, component: str) -> list[dict]:
+    """Every mandatory group holding a row that matches a reviewed component.
+
+    Distinct requirement groups stay distinct — multiple matches are all
+    reported, never collapsed into the most favorable status — and each match
+    carries its group's AND/OR logic and the group status evaluated under
+    that logic. Deterministic: matches are ordered by group id.
+    """
+    validation = entry.get("decision", {}).get("validation", {})
     wanted = component.casefold()
-    order = ["met", "partial", "unclear", "not_demonstrated"]
-    found = [r["effective_status"] for r in rows
-             if r["kind"] == "mandatory"
-             and (wanted == r["component"].casefold()
-                  or wanted in r["component"].casefold()
-                  or r["component"].casefold() in wanted)]
-    if not found:
-        return None
-    return min(found, key=order.index)
+    by_group: dict[str, list[str]] = {}
+    for r in validation.get("rows", []):
+        have = r["component"].casefold()
+        if r["kind"] == "mandatory" and (wanted == have or wanted in have or have in wanted):
+            by_group.setdefault(r["group_id"], []).append(r["effective_status"])
+    summaries = {g["group_id"]: g for g in validation.get("groups", [])}
+    return [
+        {"group_id": group_id,
+         "logic": summaries.get(group_id, {}).get("logic"),
+         "row_statuses": statuses,
+         "group_status": summaries.get(group_id, {}).get("status")}
+        for group_id, statuses in sorted(by_group.items())
+    ]
+
+
+def _component_verdict(entry: dict, component: str, expected: str) -> dict:
+    """Compare one reviewed component; extraction failure stays visible.
+
+    ``agree`` requires that the component was extracted at all AND that every
+    matching row carries the expected status — a second group disagreeing is
+    a disagreement, not something the best match can hide.
+    """
+    matches = _component_matches(entry, component)
+    statuses = sorted({s for m in matches for s in m["row_statuses"]})
+    return {
+        "expected": expected,
+        "extracted": bool(matches),
+        "provider": "/".join(statuses) if statuses else None,
+        "matches": matches,
+        "conflicting_groups": len(statuses) > 1,
+        "agree": statuses == [expected],
+    }
 
 
 def compare(reference: dict[str, dict], results: list[dict]) -> dict:
@@ -152,12 +181,9 @@ def compare(reference: dict[str, dict], results: list[dict]) -> dict:
                     model_score_vs_reference=_score_vs_reference(ref, raw),
                     within_tolerance=final_cmp["within"],
                 )
-            components = {}
-            for component, expected in ref.get("central_mandatory", {}).items():
-                got = _component_status(entry, component)
-                components[component] = {"expected": expected, "provider": got,
-                                         "agree": got == expected}
-            case["central_mandatory"] = components
+            case["central_mandatory"] = {
+                component: _component_verdict(entry, component, expected)
+                for component, expected in ref.get("central_mandatory", {}).items()}
         elif status == "invalid":
             # Older result files carried plain score keys on invalid entries;
             # either way the numbers are diagnostic only.
@@ -218,7 +244,8 @@ def compare(reference: dict[str, dict], results: list[dict]) -> dict:
             "scores_compared": len(with_score),
             "requirement_status_agreement": sum(v["agree"] for v in components),
             "requirement_status_total": len(components),
-            "requirement_not_extracted": sum(v["provider"] is None for v in components),
+            "requirement_not_extracted": sum(not v["extracted"] for v in components),
+            "requirement_conflicting_groups": sum(v["conflicting_groups"] for v in components),
             "unsupported_resume_citations": sum(c["unsupported_resume_citations"] for c in scored),
             "unsupported_jd_citations": sum(c["unsupported_jd_citations"] for c in scored),
             "cases_detail": cases,
@@ -262,7 +289,8 @@ def render(report: dict) -> str:
             f"(validated assessments only)")
         lines.append(
             f"requirement statuses agree {s['requirement_status_agreement']}/"
-            f"{s['requirement_status_total']} (not extracted {s['requirement_not_extracted']}); "
+            f"{s['requirement_status_total']} (not extracted {s['requirement_not_extracted']}, "
+            f"conflicting groups {s['requirement_conflicting_groups']}); "
             f"unsupported citations resume {s['unsupported_resume_citations']}, "
             f"JD {s['unsupported_jd_citations']}")
         for c in s["cases_detail"]:
@@ -280,8 +308,13 @@ def render(report: dict) -> str:
             flag = "ok " if c["recommendation_correct"] else "XX "
             overlay = ("" if c["recommendation"] == c["technical_recommendation"]
                        else f" [technical {c['technical_recommendation']}, eligibility override]")
-            disagreements = [f"{k}: {v['provider']} (expected {v['expected']})"
-                             for k, v in c["central_mandatory"].items() if not v["agree"]]
+            disagreements = [
+                (f"{k}: NOT EXTRACTED (expected {v['expected']})" if not v["extracted"]
+                 else f"{k}: {v['provider']}"
+                      + (f" across groups {', '.join(m['group_id'] for m in v['matches'])}"
+                         if v["conflicting_groups"] else "")
+                      + f" (expected {v['expected']})")
+                for k, v in c["central_mandatory"].items() if not v["agree"]]
             cmp = c.get("final_score_vs_reference")
             verdict = ""
             if cmp is not None and not cmp["within"]:

@@ -438,6 +438,65 @@ class V9CompareTests(unittest.TestCase):
         self.assertIn("OVERSCORE +10", render(report))
         self.assertIn("UNDERSCORE -10", render(report))
 
+    def test_component_matching_keeps_groups_distinct(self):
+        jd = "Advanced SQL required. SQL reporting required."
+        case = {"case_id": "aurora", "jd": jd, "resume": SQL_RESUME}
+        payload = {"fit_score": 80, "requirements": [
+            row("sql", "SQL reporting required", "SQL", resume="wrote SQL models daily"),
+            row("adv", "Advanced SQL required", "Advanced SQL", status="unclear"),
+        ]}
+        results = evaluate([case], live=True, max_calls=1, model="g",
+                           provider="gemini", caller=lambda p, m: payload)
+        self.assertEqual(results[0]["status"], "validated")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ref.json"
+            path.write_text(json.dumps([{
+                "case_id": "aurora", "recommendation": "HUMAN REVIEW",
+                "central_mandatory": {"SQL": "met", "Kubernetes": "not_demonstrated"}}]))
+            report = compare(load_reference(path), results)
+        components = report["providers"]["gemini:g"]["cases_detail"][0]["central_mandatory"]
+        sql = components["SQL"]
+        # Two distinct groups match; they are both reported, never collapsed
+        # into the most favorable status.
+        self.assertTrue(sql["conflicting_groups"])
+        self.assertFalse(sql["agree"])
+        self.assertEqual(sql["provider"], "met/unclear")
+        self.assertEqual([m["group_id"] for m in sql["matches"]], ["adv", "sql"])
+        # A requirement the provider never extracted is reported explicitly,
+        # not treated as matching successfully.
+        kubernetes = components["Kubernetes"]
+        self.assertFalse(kubernetes["extracted"])
+        self.assertFalse(kubernetes["agree"])
+        self.assertIn("NOT EXTRACTED", render(report))
+        stats = report["providers"]["gemini:g"]
+        self.assertEqual(stats["requirement_not_extracted"], 1)
+        self.assertEqual(stats["requirement_conflicting_groups"], 1)
+
+    def test_component_matching_reports_group_logic(self):
+        jd = "Experience with Kafka or RabbitMQ required."
+        case = {"case_id": "netomi", "jd": jd, "resume": "Ran Kafka in production"}
+        payload = {"fit_score": 88, "requirements": [
+            row("msg", jd, "Kafka", "any_of", resume="Ran Kafka in production"),
+            row("msg", jd, "RabbitMQ", "any_of", status="not_demonstrated"),
+        ]}
+        results = evaluate([case], live=True, max_calls=1, model="g",
+                           provider="gemini", caller=lambda p, m: payload)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ref.json"
+            path.write_text(json.dumps([{
+                "case_id": "netomi", "recommendation": "APPLY",
+                "central_mandatory": {"RabbitMQ": "not_demonstrated"}}]))
+            report = compare(load_reference(path), results)
+        verdict = (report["providers"]["gemini:g"]["cases_detail"][0]
+                   ["central_mandatory"]["RabbitMQ"])
+        self.assertTrue(verdict["agree"])
+        match = verdict["matches"][0]
+        # The AND/OR grouping is evaluated as grouped: the row is a gap but
+        # the any_of group is met through Kafka.
+        self.assertEqual(match["logic"], "any_of")
+        self.assertEqual(match["row_statuses"], ["not_demonstrated"])
+        self.assertEqual(match["group_status"], "met")
+
     def test_reference_range_validation(self):
         def expect_error(item):
             with tempfile.TemporaryDirectory() as tmp:
