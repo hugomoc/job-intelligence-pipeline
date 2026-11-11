@@ -1,3 +1,107 @@
+# v9 provider comparison: Gemini vs OpenAI on the five frozen jobs
+
+Both providers get the **same prompt (v9.2) and schema**, and every response
+goes through the same checks and the same decision policy
+(`evaluation/v9_scoring.py`). Differences in the results therefore come from
+the model, not the harness. Nothing here touches v8, its fallback, production
+scoring or DuckDB writes.
+
+## How the final score and recommendation are decided
+
+The model proposes `fit_score` and a requirement ledger. The harness checks
+every citation against the JD and resume, then works out an *effective* status
+for each requirement:
+
+- An invented resume quote, or a named technology missing from its own quote
+  (e.g. Spark offered for "Kafka or RabbitMQ"), never counts as met.
+- Portfolio, project or skills-list evidence for a production or min-years
+  requirement is at most **partial**.
+- Tenure needs employment evidence that shows a duration.
+- A "preferred / nice to have / bonus" clause labelled mandatory is treated as
+  preferred, and the mislabel is flagged.
+- A requirement whose JD quote cannot be found is never counted as a gap.
+
+The model's score is then capped where its own verified evidence contradicts it:
+
+| Verified evidence | Score cap |
+|---|---|
+| 2+ central mandatory groups not demonstrated | 44 |
+| 1 central mandatory group not demonstrated | 64 |
+| Central mandatory only partially evidenced | 74 |
+| Unverifiable citations, mislabels, or inconsistent groups | 74 |
+| Central mandatory evidence unclear | 84 |
+| Peripheral mandatory group not demonstrated | 89 |
+
+Recommendation, in priority order:
+
+1. **SKIP**: a confirmed eligibility blocker (supplied by you), or 2+ central
+   mandatory gaps, or a final score below 45.
+2. **LOW PRIORITY**: one central mandatory gap, or a final score of 45-64.
+3. **HUMAN REVIEW**: unverifiable citations or mislabels; no central mandatory
+   requirement extracted; **every mandatory requirement met but the model
+   scored below 65** (too-low scores are flagged, not silently skipped);
+   partial or unclear central evidence; JD eligibility not confirmed; or
+   a final score of 65-74.
+4. **APPLY**: a final score of 75 or more with every central mandatory
+   requirement met and no other condition above triggered.
+
+The raw `model_score`, the `final_score`, and every reason for a cap or a
+review are saved in the results.
+
+Eligibility facts come from you, never from a model. Optional per-case fields
+in `--input` files: `"eligibility_blockers": ["..."]` (forces SKIP) and
+`"eligibility_confirmed": true` (resolves JD eligibility rows the resume
+cannot prove).
+
+## Run both providers on the five frozen jobs
+
+Dry run first (no API calls):
+
+```sh
+python -m evaluation.run_v9 --provider gemini --from-db all --output ~/job-eval/v9/gemini_dry.json
+python -m evaluation.run_v9 --provider openai --from-db all --output ~/job-eval/v9/openai_dry.json
+```
+
+Live (paid, explicit; five calls each):
+
+```sh
+python -m evaluation.run_v9 --provider gemini --from-db all --live --max-calls 5 \
+  --output ~/job-eval/v9/gemini_live.json
+python -m evaluation.run_v9 --provider openai --from-db all --live --max-calls 5 \
+  --output ~/job-eval/v9/openai_live.json
+```
+
+The default models are `gemini-3.5-flash` and `gpt-4.1`; `--model` overrides them.
+`python -m evaluation.run_v9_gemini` still works and means `--provider gemini`.
+
+## Compare against your reviewed assessments
+
+Write a private reference file, e.g. `~/job-eval/v9/reference.json`, with your
+independently reviewed conclusions:
+
+```json
+[
+  {"case_id": "aurora", "recommendation": "LOW PRIORITY", "score": 55,
+   "score_tolerance": 10,
+   "central_mandatory": {"dbt": "not_demonstrated", "Looker": "met"}}
+]
+```
+
+(The values above are illustrative, not your review.) Then:
+
+```sh
+python -m evaluation.compare_v9 --reference ~/job-eval/v9/reference.json \
+  --results ~/job-eval/v9/gemini_live.json ~/job-eval/v9/openai_live.json
+```
+
+It reports, per provider: correct recommendations (and how many were too
+optimistic or too pessimistic), score error before and after the evidence
+caps, agreement with your requirement statuses (including requirements the model
+never extracted), and unsupported resume and JD citations. Five cases is a smoke
+test: confirm on held-out jobs before choosing a provider for production.
+
+---
+
 ## Troubleshoot a Gemini HTTP 400 without spending API calls
 
 Use a **fresh private output filename**:

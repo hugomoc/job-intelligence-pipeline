@@ -55,7 +55,10 @@ class V9GeminiHarnessTests(unittest.TestCase):
         fake = lambda prompt, model: payload
         outcome = evaluate([fixture()], live=True, max_calls=1, model="fake", caller=fake)
         self.assertEqual(outcome[0]["status"], "validated")
-        self.assertTrue(check_payload(payload, fixture()["jd"], fixture()["resume"])["valid"])
+        decision = check_payload(payload, fixture()["jd"], fixture()["resume"])
+        self.assertTrue(decision["validation"]["valid"])
+        self.assertEqual(decision["recommendation"], "APPLY")
+        self.assertEqual(outcome[0]["recommendation"], "APPLY")
 
     def test_errors_dont_echo_sensitive_provider_contents(self):
         def bad(prompt, model):

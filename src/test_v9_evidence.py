@@ -39,7 +39,9 @@ class V9Tests(unittest.TestCase):
             row("combo", jd, "dbt", "all_of", resume="dbt portfolio project", context="project", years=2),
         ]
         result = run(jd, resume, rows)
-        self.assertEqual(result["groups"][0]["status"], "unclear")
+        # Portfolio dbt is related evidence, never production tenure.
+        self.assertEqual(result["groups"][0]["status"], "partial")
+        self.assertEqual(result["rows"][1]["effective_status"], "partial")
         self.assertTrue(result["warnings"])
 
     def test_netomi_or_does_not_accept_spark(self):
