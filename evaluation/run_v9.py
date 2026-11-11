@@ -138,6 +138,58 @@ def check_payload(payload: object, jd: str, resume: str, case: dict | None = Non
     )
 
 
+GEMINI_SCHEMA_KEYWORDS = ("type", "enum", "nullable", "required", "property_ordering")
+
+
+def gemini_response_schema() -> object:
+    """Prune the SDK's Ledger conversion to the subset Gemini accepts.
+
+    Passing the Pydantic model directly serializes ``additional_properties``
+    (from ``extra="forbid"``) and ``min_length``/``min_items`` constraints,
+    which the API rejects with HTTP 400 ``unsupported_schema``. Dropping them
+    loses no rigor: ``check_payload`` re-validates every response against the
+    full Pydantic contract locally.
+    """
+    from google.genai import types
+    from google.genai import _transformers
+
+    full = _transformers.t_schema(None, Ledger).model_dump(exclude_none=True, mode="json")
+
+    def prune(node: dict) -> dict:
+        kept = {key: node[key] for key in GEMINI_SCHEMA_KEYWORDS if key in node}
+        if "properties" in node:
+            kept["properties"] = {name: prune(sub) for name, sub in node["properties"].items()}
+        if "items" in node:
+            kept["items"] = prune(node["items"])
+        return kept
+
+    return types.Schema.model_validate(prune(full))
+
+
+def gemini_generation_config() -> object:
+    """The one config used by both the live request and the local probe."""
+    from google.genai import types
+
+    return types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=gemini_response_schema(),
+        temperature=0.1,
+    )
+
+
+def collect_keys(node: object) -> list[str]:
+    """All mapping keys anywhere in a JSON-like structure (never values)."""
+    keys: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            keys.append(key)
+            keys.extend(collect_keys(value))
+    elif isinstance(node, list):
+        for item in node:
+            keys.extend(collect_keys(item))
+    return keys
+
+
 def openai_strict_schema() -> dict:
     """Convert the pydantic ledger schema to OpenAI strict structured outputs.
 
@@ -167,17 +219,12 @@ def openai_strict_schema() -> dict:
 def call_gemini(prompt: str, model: str) -> object:
     # Imported only after the explicit live gate to keep dry runs offline.
     from google import genai
-    from google.genai import types
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     response = client.models.generate_content(
         model=model,
         contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=Ledger,
-            temperature=0.1,
-        ),
+        config=gemini_generation_config(),
     )
     if not response.text:
         raise ValueError("Gemini returned an empty response")
@@ -223,18 +270,29 @@ def classify_bad_request(error: Exception) -> str:
 
 
 def local_schema_probe(provider: str = "gemini") -> dict:
-    """Check local SDK config serialization, without a model or network call."""
+    """Serialize the exact live request schema, without a model or network call.
+
+    Exercises the same schema/config objects the live call sends, then checks
+    the serialized form for keywords the provider is known to reject, so a
+    schema regression is caught before any paid request.
+    """
+    rejected = {
+        "gemini": {"additional_properties", "min_length", "max_length",
+                   "min_items", "minimum", "maximum", "title", "any_of"},
+        "openai": {"minLength", "maxLength", "minItems",
+                   "minimum", "maximum", "title", "default"},
+    }[provider]
     try:
         if provider == "openai":
-            json.dumps(openai_strict_schema())
+            serialized = openai_strict_schema()
+            json.dumps(serialized)
         else:
-            from google.genai import types
-            config = types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=Ledger,
-                temperature=0.1,
-            )
-            config.model_dump(exclude_none=True)
+            config = gemini_generation_config()
+            serialized = config.model_dump(exclude_none=True, mode="json")
+        offending = sorted(set(collect_keys(serialized)) & rejected)
+        if offending:
+            return {"status": "local_schema_error",
+                    "local_schema_unsupported_keywords": offending}
         return {"status": "local_schema_serialized"}
     except Exception as error:
         return {"status": "local_schema_error", "error_type": type(error).__name__}
