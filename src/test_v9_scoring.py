@@ -177,6 +177,59 @@ class V9DecisionTests(unittest.TestCase):
         self.assertEqual(run("Databricks preferred", "", rows, 80)["recommendation"], "HUMAN REVIEW")
 
 
+class V9EligibilityOverlayTests(unittest.TestCase):
+    def test_blocker_changes_final_recommendation_only(self):
+        plain = run(SQL_JD, SQL_RESUME, [SQL_ROW], 92)
+        blocked = run(SQL_JD, SQL_RESUME, [SQL_ROW], 92,
+                      eligibility_blockers=["role is on-site in Gurugram"])
+        self.assertEqual(plain["recommendation"], "APPLY")
+        self.assertEqual(blocked["technical_recommendation"], "APPLY")
+        self.assertEqual(blocked["recommendation"], "SKIP")
+        self.assertTrue(blocked["eligibility_override"])
+        self.assertEqual(blocked["final_score"], plain["final_score"])
+        self.assertEqual(blocked["model_score"], plain["model_score"])
+        self.assertEqual(blocked["validation"], plain["validation"])
+
+    def test_both_providers_receive_identical_eligibility_treatment(self):
+        import hashlib
+        case = {"case_id": "netomi", "jd": SQL_JD, "resume": SQL_RESUME,
+                "eligibility_blockers": ["on-site Gurugram"],
+                "eligibility_confirmed": False}
+        payload = {"fit_score": 90, "requirements": [SQL_ROW]}
+        out = {p: evaluate([case], live=True, max_calls=1, model="m", provider=p,
+                           caller=lambda prompt, model: payload)[0]
+               for p in ("gemini", "openai")}
+        for entry in out.values():
+            self.assertEqual(entry["technical_recommendation"], "APPLY")
+            self.assertEqual(entry["recommendation"], "SKIP")
+            self.assertEqual(entry["final_score"], 90)
+        # The prompt is exactly jd+resume: eligibility facts never reach a model.
+        prompt = build_prompt(SQL_JD, SQL_RESUME)
+        self.assertNotIn("Gurugram", prompt)
+        expected_sha = hashlib.sha256(prompt.encode()).hexdigest()
+        self.assertEqual(out["gemini"]["prompt_sha256"], expected_sha)
+        self.assertEqual(out["openai"]["prompt_sha256"], expected_sha)
+
+    def test_private_eligibility_overlay_file(self):
+        from evaluation.run_v9 import apply_eligibility
+        cases = [{"case_id": "netomi", "jd": "j", "resume": "r"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            good = Path(tmp) / "eligibility.json"
+            good.write_text(json.dumps({"netomi": {
+                "eligibility_blockers": ["on-site"], "eligibility_confirmed": False}}))
+            apply_eligibility(good, cases)
+            self.assertEqual(cases[0]["eligibility_blockers"], ["on-site"])
+            self.assertIs(cases[0]["eligibility_confirmed"], False)
+            unknown = Path(tmp) / "unknown.json"
+            unknown.write_text(json.dumps({"someone-else": {}}))
+            with self.assertRaises(ValueError):
+                apply_eligibility(unknown, cases)
+            extra = Path(tmp) / "extra.json"
+            extra.write_text(json.dumps({"netomi": {"location": "x"}}))
+            with self.assertRaises(ValueError):
+                apply_eligibility(extra, cases)
+
+
 class V9BandBoundaryTests(unittest.TestCase):
     """Pin the established bands: 86+ APPLY, 75-85 HUMAN REVIEW, 65-74 LOW
     PRIORITY, <65 SKIP, plus the evidence overrides at each boundary."""

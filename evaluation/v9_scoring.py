@@ -156,10 +156,7 @@ def decide(
         and model_score < UNDER_SCORE_THRESHOLD
     )
 
-    if eligibility_blockers:
-        recommendation = SKIP
-        reasons.append("confirmed eligibility blocker: " + "; ".join(eligibility_blockers))
-    elif len(central_gaps) >= 2:
+    if len(central_gaps) >= 2:
         recommendation = SKIP
         reasons.append("two or more central mandatory requirements not demonstrated")
     elif central_gaps:
@@ -191,10 +188,20 @@ def decide(
     else:
         recommendation = HUMAN_REVIEW
 
+    # The eligibility blocker is a deterministic overlay on the technical
+    # result: it changes the final recommendation only, never the technical
+    # recommendation or any score, and applies identically to every provider.
+    technical_recommendation = recommendation
+    if eligibility_blockers:
+        recommendation = SKIP
+        reasons.append("confirmed eligibility blocker: " + "; ".join(eligibility_blockers))
+
     return {
         "model_score": model_score,
         "final_score": final_score,
         "recommendation": recommendation,
+        "technical_recommendation": technical_recommendation,
+        "eligibility_override": bool(eligibility_blockers),
         "reasons": reasons,
         "score_adjusted": final_score != model_score,
         "under_scored": under_scored,

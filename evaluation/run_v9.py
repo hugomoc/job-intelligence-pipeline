@@ -58,6 +58,40 @@ def read_cases(path: Path) -> list[dict]:
     return cases
 
 
+ELIGIBILITY_FIELDS = {"eligibility_blockers", "eligibility_confirmed"}
+
+
+def apply_eligibility(path: Path, cases: list[dict]) -> None:
+    """Merge human-confirmed eligibility facts from a private file into cases.
+
+    The file (outside the repository) maps case_id to
+    ``{"eligibility_blockers": [...], "eligibility_confirmed": bool}``, so
+    personal eligibility never lives in the repo or the frozen loader. The
+    overlay is provider-independent and is never part of the model prompt:
+    ``build_prompt`` receives only the JD and resume.
+    """
+    data = json.loads(outside_repo(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Eligibility file must map case_id to eligibility facts")
+    unknown = sorted(set(data) - {c["case_id"] for c in cases})
+    if unknown:
+        raise ValueError(f"Eligibility given for unknown case(s): {', '.join(unknown)}")
+    for case in cases:
+        facts = data.get(case["case_id"])
+        if facts is None:
+            continue
+        if not isinstance(facts, dict) or set(facts) - ELIGIBILITY_FIELDS:
+            raise ValueError(f"Eligibility entries allow only {sorted(ELIGIBILITY_FIELDS)}")
+        blockers = facts.get("eligibility_blockers", [])
+        if not isinstance(blockers, list) or not all(
+                isinstance(b, str) and b.strip() for b in blockers):
+            raise ValueError("eligibility_blockers must be a list of nonempty strings")
+        if not isinstance(facts.get("eligibility_confirmed", False), bool):
+            raise ValueError("eligibility_confirmed must be a boolean")
+        case["eligibility_blockers"] = blockers
+        case["eligibility_confirmed"] = facts.get("eligibility_confirmed", False)
+
+
 PROMPT_RULES = """\
 You are auditing how well ONE candidate's resume fits ONE job. Return a JSON
 object matching the supplied schema: fit_score (0-100) and requirements.
@@ -375,6 +409,7 @@ def evaluate(cases: list[dict], *, live: bool, max_calls: int, model: str,
                     model_score=decision["model_score"],
                     final_score=decision["final_score"],
                     recommendation=decision["recommendation"],
+                    technical_recommendation=decision["technical_recommendation"],
                     decision=decision,
                     ledger=payload,
                 )
@@ -394,6 +429,9 @@ def main(default_provider: str | None = None) -> None:
     parser.add_argument("--provider", choices=tuple(PROVIDERS), default=default_provider,
                         required=default_provider is None)
     parser.add_argument("--database", type=Path, help="Override DuckDB path for --from-db")
+    parser.add_argument("--eligibility", type=Path,
+                        help="Private JSON (outside Git) mapping case_id to "
+                             "human-confirmed eligibility facts")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", help="Defaults: gemini-3.5-flash / gpt-4.1")
     parser.add_argument("--check-schema", action="store_true", help="Run local schema serialization only, without API calls")
@@ -416,6 +454,8 @@ def main(default_provider: str | None = None) -> None:
         if args.database is not None:
             parser.error("--database requires --from-db")
         cases = read_cases(args.input)
+    if args.eligibility is not None:
+        apply_eligibility(args.eligibility, cases)
     if args.live:
         # Match the application’s local .env configuration only on explicit live runs.
         from dotenv import load_dotenv
@@ -437,8 +477,10 @@ def main(default_provider: str | None = None) -> None:
           f"live={args.live}; output={destination}")
     for entry in results:
         if "recommendation" in entry:
+            overlay = ("" if entry["recommendation"] == entry["technical_recommendation"]
+                       else f" (technical {entry['technical_recommendation']}, eligibility override)")
             print(f"  {entry['case_id']}: model {entry['model_score']} -> final "
-                  f"{entry['final_score']} {entry['recommendation']} ({entry['status']})")
+                  f"{entry['final_score']} {entry['recommendation']}{overlay} ({entry['status']})")
 
 
 if __name__ == "__main__":
