@@ -57,8 +57,20 @@ review are saved in the results. The full truth table lives in
 
 Eligibility facts come from you, never from a model, and are never sent to
 one. Optional per-case fields in `--input` files: `"eligibility_blockers":
-["..."]` (forces a final SKIP) and `"eligibility_confirmed": true` (resolves
-JD eligibility rows the resume cannot prove).
+["..."]` (forces a final SKIP overlay; the technical recommendation and the
+scores are reported unchanged) and `"eligibility_confirmed": true` (resolves
+JD eligibility rows the resume cannot prove). For `--from-db` frozen cases,
+pass the same facts through a private file outside Git:
+
+```sh
+python -m evaluation.run_v9 --provider gemini --from-db all \
+  --eligibility ~/job-eval/v9/eligibility.json --output ...
+```
+
+where the file maps case ids to facts, e.g.
+`{"netomi": {"eligibility_blockers": ["role is on-site outside my region"]}}`.
+Both providers always receive the identical overlay, and results report the
+technical and the final recommendation side by side.
 
 ## Run both providers on the five frozen jobs
 
