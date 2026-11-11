@@ -44,7 +44,7 @@ class V9DecisionTests(unittest.TestCase):
                 years=2, production=True),
         ]
         result = run(jd, resume, rows, 92)
-        self.assertLessEqual(result["final_score"], 74)
+        self.assertLessEqual(result["final_score"], 85)
         self.assertEqual(result["recommendation"], "HUMAN REVIEW")
         self.assertTrue(result["score_adjusted"])
 
@@ -56,7 +56,7 @@ class V9DecisionTests(unittest.TestCase):
             row("combo", jd, "dbt", "all_of", status="not_demonstrated", years=2),
         ]
         result = run(jd, resume, rows, 92)
-        self.assertEqual(result["final_score"], 64)
+        self.assertEqual(result["final_score"], 74)
         self.assertEqual(result["recommendation"], "LOW PRIORITY")
 
     def test_netomi_spark_is_not_kafka(self):
@@ -69,21 +69,21 @@ class V9DecisionTests(unittest.TestCase):
         ]
         result = run(jd + " " + SQL_JD, resume + " " + SQL_RESUME, rows, 90)
         self.assertNotEqual(result["recommendation"], "APPLY")
-        self.assertLessEqual(result["final_score"], 74)
+        self.assertLessEqual(result["final_score"], 85)
 
     def test_fabricated_resume_citation_never_counts(self):
         rows = [row("py", "Python required", "Python", resume="Python 7 years at Google")]
         result = run("Python required", "Excel reporting", rows, 95)
         self.assertEqual(result["unsupported_resume_citations"], 1)
         self.assertEqual(result["recommendation"], "HUMAN REVIEW")
-        self.assertLessEqual(result["final_score"], 74)
+        self.assertLessEqual(result["final_score"], 85)
 
     def test_score_contradicting_own_gap_is_capped(self):
         jd = "Python required. Kubernetes required."
         rows = [row("py", "Python required", "Python", resume="Python services"),
                 row("k8s", "Kubernetes required", "Kubernetes", status="not_demonstrated")]
         result = run(jd, "Shipped Python services", rows, 92)
-        self.assertEqual(result["final_score"], 64)
+        self.assertEqual(result["final_score"], 74)
         self.assertEqual(result["recommendation"], "LOW PRIORITY")
         self.assertFalse(result["validation"]["valid"])
 
@@ -94,7 +94,7 @@ class V9DecisionTests(unittest.TestCase):
                 row("go", "Go required", "Go", status="not_demonstrated")]
         result = run(jd, "Shipped Python services", rows, 80)
         self.assertEqual(result["recommendation"], "SKIP")
-        self.assertLessEqual(result["final_score"], 44)
+        self.assertLessEqual(result["final_score"], 64)
 
     def test_tesla_equivalent_met_but_forecasting_unclear(self):
         jd = ("Visualization tools such as Power BI, Tableau, Excel, or similar. "
@@ -105,7 +105,7 @@ class V9DecisionTests(unittest.TestCase):
                 row("forecast", "Demonstrated statistical methods particularly regarding budget forecasting",
                     "budget forecasting", status="unclear")]
         result = run(jd, resume, rows, 93)
-        self.assertEqual(result["final_score"], 84)
+        self.assertEqual(result["final_score"], 85)
         self.assertEqual(result["recommendation"], "HUMAN REVIEW")
 
     def test_centerwell_missing_preferred_still_apply(self):
@@ -137,7 +137,7 @@ class V9DecisionTests(unittest.TestCase):
         resume = "Software Engineer, Acme, 2018-2024: Python 6 years in production services"
         rows = [row("py", jd, "Python", resume="Python 6 years in production services",
                     years=3, production=True)]
-        result = run(jd, resume, rows, 85)
+        result = run(jd, resume, rows, 90)
         self.assertEqual(result["validation"]["groups"][0]["status"], "met")
         self.assertEqual(result["recommendation"], "APPLY")
 
@@ -175,6 +175,48 @@ class V9DecisionTests(unittest.TestCase):
         rows = [row("dbx", "Databricks preferred", "Databricks", status="not_demonstrated",
                     kind="preferred")]
         self.assertEqual(run("Databricks preferred", "", rows, 80)["recommendation"], "HUMAN REVIEW")
+
+
+class V9BandBoundaryTests(unittest.TestCase):
+    """Pin the established bands: 86+ APPLY, 75-85 HUMAN REVIEW, 65-74 LOW
+    PRIORITY, <65 SKIP, plus the evidence overrides at each boundary."""
+
+    def test_apply_band_boundaries_with_clean_evidence(self):
+        self.assertEqual(run(SQL_JD, SQL_RESUME, [SQL_ROW], 86)["recommendation"], "APPLY")
+        self.assertEqual(run(SQL_JD, SQL_RESUME, [SQL_ROW], 100)["recommendation"], "APPLY")
+        self.assertEqual(run(SQL_JD, SQL_RESUME, [SQL_ROW], 85)["recommendation"], "HUMAN REVIEW")
+        self.assertEqual(run(SQL_JD, SQL_RESUME, [SQL_ROW], 75)["recommendation"], "HUMAN REVIEW")
+
+    def test_lower_bands_with_unclear_central_evidence(self):
+        # All-mandatory-met ledgers below 75 are flagged as under-scored, so
+        # the LOW PRIORITY and SKIP bands apply to uncertain-evidence ledgers.
+        unclear = [row("sql", SQL_JD, "SQL", status="unclear")]
+        self.assertEqual(run(SQL_JD, SQL_RESUME, unclear, 74)["recommendation"], "LOW PRIORITY")
+        self.assertEqual(run(SQL_JD, SQL_RESUME, unclear, 65)["recommendation"], "LOW PRIORITY")
+        self.assertEqual(run(SQL_JD, SQL_RESUME, unclear, 64)["recommendation"], "SKIP")
+        self.assertEqual(run(SQL_JD, SQL_RESUME, unclear, 0)["recommendation"], "SKIP")
+
+    def test_partial_or_unclear_central_evidence_never_apply(self):
+        for status, context in (("partial", "project"), ("unclear", None)):
+            rows = [row("sql", SQL_JD, "SQL", status=status,
+                        resume="wrote SQL models daily" if context else None,
+                        context=context or "none")]
+            result = run(SQL_JD, SQL_RESUME, rows, 95)
+            self.assertLessEqual(result["final_score"], 85)
+            self.assertEqual(result["recommendation"], "HUMAN REVIEW")
+
+    def test_one_central_gap_never_reaches_review_band(self):
+        rows = [SQL_ROW, row("k8s", "Kubernetes required", "Kubernetes",
+                             status="not_demonstrated")]
+        result = run(SQL_JD + " Kubernetes required.", SQL_RESUME, rows, 95)
+        self.assertEqual(result["final_score"], 74)
+        self.assertEqual(result["recommendation"], "LOW PRIORITY")
+
+    def test_under_score_boundary_is_review_min(self):
+        self.assertTrue(run(SQL_JD, SQL_RESUME, [SQL_ROW], 74)["under_scored"])
+        self.assertEqual(run(SQL_JD, SQL_RESUME, [SQL_ROW], 74)["recommendation"],
+                         "HUMAN REVIEW")
+        self.assertFalse(run(SQL_JD, SQL_RESUME, [SQL_ROW], 75)["under_scored"])
 
 
 class V9ProviderParityTests(unittest.TestCase):

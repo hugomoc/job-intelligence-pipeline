@@ -13,6 +13,45 @@ The recommendation is one of APPLY, HUMAN REVIEW, LOW PRIORITY, SKIP and
 is fully determined by the rules below, so both providers are judged by the
 same policy. Every adjustment is reported in ``reasons``; nothing is hidden.
 
+Decision truth table (single source of truth; the constants below, this
+table, V9_GEMINI_EXPERIMENT.md and test_v9_scoring.py must stay in sync).
+
+Score bands (established policy, applied to the capped final score):
+
+    86-100  APPLY
+    75-85   HUMAN REVIEW
+    65-74   LOW PRIORITY
+    <65     SKIP
+
+Evidence caps on the model's score (strongest applicable cap wins):
+
+    2+ central mandatory groups not demonstrated  -> cap 64 (SKIP band)
+    1 central mandatory group not demonstrated    -> cap 74 (never HUMAN
+                                                     REVIEW/APPLY band)
+    central mandatory partial or unclear          -> cap 85 (never APPLY band)
+    unverifiable citations / mislabels /
+    inconsistent groups (integrity failures)      -> cap 85 (never APPLY band)
+    peripheral mandatory group not demonstrated   -> cap 89
+
+Recommendation overrides, in priority order (first match wins); the final
+score itself is never changed by an override:
+
+    1. human-confirmed eligibility blocker        -> final SKIP (overlay on
+                                                     the technical result)
+    2. 2+ central mandatory gaps                  -> SKIP
+    3. 1 central mandatory gap                    -> LOW PRIORITY
+                                                     (SKIP if final < 65)
+    4. integrity failures                         -> HUMAN REVIEW
+    5. no verified central mandatory extracted    -> HUMAN REVIEW
+    6. all verified mandatory met but model
+       score < 75 (under-scoring)                 -> HUMAN REVIEW, never a
+                                                     silent LOW PRIORITY/SKIP
+    7. otherwise: the score band, except that partial/unclear central
+       evidence and unconfirmed JD eligibility turn a would-be APPLY or
+       HUMAN REVIEW band into HUMAN REVIEW (they can never produce APPLY).
+
+Missing preferred qualifications never trigger a cap or an override.
+
 Isolated: no imports from production scoring, DuckDB, or provider SDKs.
 """
 from __future__ import annotations
@@ -25,21 +64,24 @@ LOW_PRIORITY = "LOW PRIORITY"
 SKIP = "SKIP"
 RECOMMENDATIONS = (APPLY, HUMAN_REVIEW, LOW_PRIORITY, SKIP)
 
-# Score ceilings implied by verified evidence about *central mandatory*
-# requirement groups (and peripheral mandatory gaps).
-CAP_ONE_CENTRAL_GAP = 64       # cannot reach HUMAN REVIEW/APPLY bands on score alone
-CAP_TWO_CENTRAL_GAPS = 44      # SKIP band
-CAP_CENTRAL_PARTIAL = 74       # related but insufficient evidence: never APPLY
-CAP_CENTRAL_UNCLEAR = 84       # cannot be "exceptional" without evidence
-CAP_PERIPHERAL_GAP = 89
-CAP_INTEGRITY_FAILURE = 74     # invented citations/requirements: never APPLY
+# Established recommendation bands: 86+ APPLY, 75-85 HUMAN REVIEW,
+# 65-74 LOW PRIORITY, below 65 SKIP (see the module truth table).
+APPLY_MIN = 86
+REVIEW_MIN = 75
+LOW_PRIORITY_MIN = 65
 
-APPLY_MIN = 75
-REVIEW_MIN = 65
-LOW_PRIORITY_MIN = 45
+# Score ceilings implied by verified evidence about *central mandatory*
+# requirement groups (and peripheral mandatory gaps), aligned to the bands.
+CAP_ONE_CENTRAL_GAP = REVIEW_MIN - 1       # 74: never HUMAN REVIEW/APPLY band
+CAP_TWO_CENTRAL_GAPS = LOW_PRIORITY_MIN - 1  # 64: SKIP band
+CAP_CENTRAL_PARTIAL = APPLY_MIN - 1        # 85: related/insufficient: never APPLY band
+CAP_CENTRAL_UNCLEAR = APPLY_MIN - 1        # 85: uncertain evidence: never APPLY band
+CAP_PERIPHERAL_GAP = 89
+CAP_INTEGRITY_FAILURE = APPLY_MIN - 1      # 85: invented citations: never APPLY band
+
 # Below this, a model score contradicts a ledger where every verified
 # mandatory group is met: flag as too low rather than skipping silently.
-UNDER_SCORE_THRESHOLD = 65
+UNDER_SCORE_THRESHOLD = REVIEW_MIN
 
 
 def decide(

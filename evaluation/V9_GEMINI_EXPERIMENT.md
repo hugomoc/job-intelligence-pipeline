@@ -23,35 +23,42 @@ for each requirement:
 
 The model's score is then capped where its own verified evidence contradicts it:
 
+Score bands (established policy): **86-100 APPLY, 75-85 HUMAN REVIEW,
+65-74 LOW PRIORITY, below 65 SKIP.**
+
 | Verified evidence | Score cap |
 |---|---|
-| 2+ central mandatory groups not demonstrated | 44 |
-| 1 central mandatory group not demonstrated | 64 |
-| Central mandatory only partially evidenced | 74 |
-| Unverifiable citations, mislabels, or inconsistent groups | 74 |
-| Central mandatory evidence unclear | 84 |
+| 2+ central mandatory groups not demonstrated | 64 (SKIP band) |
+| 1 central mandatory group not demonstrated | 74 (never HUMAN REVIEW/APPLY band) |
+| Central mandatory only partially evidenced | 85 (never APPLY band) |
+| Central mandatory evidence unclear | 85 (never APPLY band) |
+| Unverifiable citations, mislabels, or inconsistent groups | 85 (never APPLY band) |
 | Peripheral mandatory group not demonstrated | 89 |
 
 Recommendation, in priority order:
 
-1. **SKIP**: a confirmed eligibility blocker (supplied by you), or 2+ central
-   mandatory gaps, or a final score below 45.
-2. **LOW PRIORITY**: one central mandatory gap, or a final score of 45-64.
-3. **HUMAN REVIEW**: unverifiable citations or mislabels; no central mandatory
+1. **SKIP** (final): a human-confirmed eligibility blocker — applied as an
+   overlay after the technical recommendation, never changing the score.
+2. **SKIP**: 2+ central mandatory gaps, or a final score below 65.
+3. **LOW PRIORITY**: one central mandatory gap (SKIP if the final score is
+   below 65), or a final score of 65-74.
+4. **HUMAN REVIEW**: unverifiable citations or mislabels; no central mandatory
    requirement extracted; **every mandatory requirement met but the model
-   scored below 65** (too-low scores are flagged, not silently skipped);
+   scored below 75** (too-low scores are flagged, not silently skipped);
    partial or unclear central evidence; JD eligibility not confirmed; or
-   a final score of 65-74.
-4. **APPLY**: a final score of 75 or more with every central mandatory
+   a final score of 75-85.
+5. **APPLY**: a final score of 86 or more with every central mandatory
    requirement met and no other condition above triggered.
 
+Missing *preferred* qualifications alone never cap the score or block APPLY.
 The raw `model_score`, the `final_score`, and every reason for a cap or a
-review are saved in the results.
+review are saved in the results. The full truth table lives in
+`evaluation/v9_scoring.py` and is pinned by `src/test_v9_scoring.py`.
 
-Eligibility facts come from you, never from a model. Optional per-case fields
-in `--input` files: `"eligibility_blockers": ["..."]` (forces SKIP) and
-`"eligibility_confirmed": true` (resolves JD eligibility rows the resume
-cannot prove).
+Eligibility facts come from you, never from a model, and are never sent to
+one. Optional per-case fields in `--input` files: `"eligibility_blockers":
+["..."]` (forces a final SKIP) and `"eligibility_confirmed": true` (resolves
+JD eligibility rows the resume cannot prove).
 
 ## Run both providers on the five frozen jobs
 
