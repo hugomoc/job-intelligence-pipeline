@@ -194,25 +194,43 @@ def openai_strict_schema() -> dict:
     """Convert the pydantic ledger schema to OpenAI strict structured outputs.
 
     Strict mode needs every property required, additionalProperties false,
-    and no unsupported keywords. Optional fields stay nullable, so the
-    contract is the same one Gemini receives.
+    and no unsupported keywords (minLength, minimum, maximum, ...), so only an
+    allowlist of structural keywords is kept; as with Gemini, every dropped
+    constraint is still enforced locally against the full Pydantic contract.
+
+    Because strict mode marks every field required, models otherwise pair a
+    cited quote with ``evidence_context: none``; the Requirement is therefore
+    emitted as two anyOf variants that make that combination unrepresentable:
+    a cited row (real context, string quote) and an uncited row (none, null).
     """
-    schema = copy.deepcopy(Ledger.model_json_schema())
+    allowed = {"type", "enum", "anyOf", "$ref"}
 
-    def walk(node):
-        if isinstance(node, dict):
-            for key in ("default", "title", "minLength", "description"):
-                node.pop(key, None)
-            if node.get("type") == "object" and "properties" in node:
-                node["additionalProperties"] = False
-                node["required"] = list(node["properties"])
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for value in node:
-                walk(value)
+    def prune(node: object) -> object:
+        if isinstance(node, list):
+            return [prune(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        out = {}
+        for key, value in node.items():
+            if key in ("properties", "$defs"):
+                out[key] = {name: prune(sub) for name, sub in value.items()}
+            elif key == "items" or key in allowed:
+                out[key] = prune(value)
+        if out.get("type") == "object":
+            out["additionalProperties"] = False
+            out["required"] = list(out.get("properties", {}))
+        return out
 
-    walk(schema)
+    schema = prune(Ledger.model_json_schema())
+    requirement = schema["$defs"]["Requirement"]
+    cited = copy.deepcopy(requirement)
+    cited["properties"]["evidence_context"] = {
+        "type": "string", "enum": ["employment", "project", "skills_list"]}
+    cited["properties"]["resume_quote"] = {"type": "string"}
+    uncited = copy.deepcopy(requirement)
+    uncited["properties"]["evidence_context"] = {"type": "string", "enum": ["none"]}
+    uncited["properties"]["resume_quote"] = {"type": "null"}
+    schema["$defs"]["Requirement"] = {"anyOf": [cited, uncited]}
     return schema
 
 

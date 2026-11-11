@@ -181,7 +181,8 @@ class V9ProviderParityTests(unittest.TestCase):
     def test_openai_strict_schema(self):
         schema = openai_strict_schema()
         text = json.dumps(schema)
-        for banned in ('"default"', '"minLength"', '"title"'):
+        for banned in ('"default"', '"minLength"', '"title"', '"minimum"', '"maximum"',
+                       '"minItems"', '"description"'):
             self.assertNotIn(banned, text)
 
         def check(node):
@@ -195,7 +196,13 @@ class V9ProviderParityTests(unittest.TestCase):
                 for value in node:
                     check(value)
         check(schema)
-        self.assertIn("production_required", schema["$defs"]["Requirement"]["properties"])
+        cited, uncited = schema["$defs"]["Requirement"]["anyOf"]
+        for variant in (cited, uncited):
+            self.assertIn("production_required", variant["properties"])
+        self.assertNotIn("none", cited["properties"]["evidence_context"]["enum"])
+        self.assertEqual(cited["properties"]["resume_quote"], {"type": "string"})
+        self.assertEqual(uncited["properties"]["evidence_context"]["enum"], ["none"])
+        self.assertEqual(uncited["properties"]["resume_quote"], {"type": "null"})
 
     def test_both_providers_get_identical_prompt_and_policy(self):
         case = {"case_id": "c", "jd": SQL_JD, "resume": SQL_RESUME, "original_score": 97}
