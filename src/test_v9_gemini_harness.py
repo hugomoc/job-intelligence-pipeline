@@ -55,7 +55,10 @@ class V9GeminiHarnessTests(unittest.TestCase):
         fake = lambda prompt, model: payload
         outcome = evaluate([fixture()], live=True, max_calls=1, model="fake", caller=fake)
         self.assertEqual(outcome[0]["status"], "validated")
-        self.assertTrue(check_payload(payload, fixture()["jd"], fixture()["resume"])["valid"])
+        decision = check_payload(payload, fixture()["jd"], fixture()["resume"])
+        self.assertTrue(decision["validation"]["valid"])
+        self.assertEqual(decision["recommendation"], "APPLY")
+        self.assertEqual(outcome[0]["recommendation"], "APPLY")
 
     def test_errors_dont_echo_sensitive_provider_contents(self):
         def bad(prompt, model):
@@ -94,6 +97,44 @@ class V9GeminiHarnessTests(unittest.TestCase):
         with patch("google.genai.Client", side_effect=AssertionError("network")):
             result = local_schema_probe()
         self.assertIn(result["status"], ("local_schema_serialized", "local_schema_error"))
+
+    def test_gemini_schema_carries_no_rejected_keywords(self):
+        from evaluation.run_v9 import collect_keys, gemini_response_schema
+        serialized = gemini_response_schema().model_dump(exclude_none=True, mode="json")
+        keys = set(collect_keys(serialized))
+        # Enum VALUES such as "any_of" are legal; only mapping KEYS matter.
+        self.assertFalse(keys & {"additional_properties", "min_length", "max_length",
+                                 "min_items", "minimum", "maximum", "title", "any_of"})
+        # Structure survives the pruning: enums, required fields, nullability.
+        self.assertLessEqual({"nullable", "enum", "required"}, keys)
+        requirement = serialized["properties"]["requirements"]["items"]
+        self.assertIn("jd_quote", requirement["properties"])
+        self.assertIn("production_required", requirement["properties"])
+        self.assertIn("jd_quote", requirement["required"])
+
+    def test_live_request_and_probe_share_one_schema(self):
+        from evaluation.run_v9 import gemini_generation_config, local_schema_probe
+        with patch("google.genai.Client", side_effect=AssertionError("network")):
+            probe = local_schema_probe("gemini")
+            config = gemini_generation_config()
+        self.assertEqual(probe, {"status": "local_schema_serialized"})
+        serialized = config.model_dump(exclude_none=True, mode="json")
+        self.assertEqual(serialized["response_mime_type"], "application/json")
+        self.assertIn("requirements", serialized["response_schema"]["properties"])
+
+    def test_pruned_schema_does_not_weaken_local_contract(self):
+        # The pruning drops min_length etc. from the REQUEST schema only; the
+        # full Pydantic contract still rejects a response violating them.
+        bad = {"fit_score": 101, "requirements": []}
+        with self.assertRaises(Exception):
+            check_payload(bad, "jd", "resume")
+        bad_row = {"fit_score": 90, "requirements": [{
+            "group_id": "", "jd_quote": "x", "kind": "mandatory", "logic": "single",
+            "component": "x", "min_years": None, "production_required": False,
+            "resume_quote": None, "evidence_context": "none",
+            "status": "not_demonstrated", "materiality": "central", "reason": "r"}]}
+        with self.assertRaises(Exception):
+            check_payload(bad_row, "x", "resume")
 
     def test_unknown_errors_do_not_expose_messages(self):
         from evaluation.run_v9_gemini import safe_provider_error

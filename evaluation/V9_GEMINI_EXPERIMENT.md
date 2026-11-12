@@ -1,3 +1,131 @@
+# v9 provider comparison: Gemini vs OpenAI on the five frozen jobs
+
+Both providers get the **same prompt (v9.2) and schema**, and every response
+goes through the same checks and the same decision policy
+(`evaluation/v9_scoring.py`). Differences in the results therefore come from
+the model, not the harness. Nothing here touches v8, its fallback, production
+scoring or DuckDB writes.
+
+## How the final score and recommendation are decided
+
+The model proposes `fit_score` and a requirement ledger. The harness checks
+every citation against the JD and resume, then works out an *effective* status
+for each requirement:
+
+- An invented resume quote, or a named technology missing from its own quote
+  (e.g. Spark offered for "Kafka or RabbitMQ"), never counts as met.
+- Portfolio, project or skills-list evidence for a production or min-years
+  requirement is at most **partial**.
+- Tenure needs employment evidence that shows a duration.
+- A "preferred / nice to have / bonus" clause labelled mandatory is treated as
+  preferred, and the mislabel is flagged.
+- A requirement whose JD quote cannot be found is never counted as a gap.
+
+The model's score is then capped where its own verified evidence contradicts it:
+
+Score bands (established policy): **86-100 APPLY, 75-85 HUMAN REVIEW,
+65-74 LOW PRIORITY, below 65 SKIP.**
+
+| Verified evidence | Score cap |
+|---|---|
+| 2+ central mandatory groups not demonstrated | 64 (SKIP band) |
+| 1 central mandatory group not demonstrated | 74 (never HUMAN REVIEW/APPLY band) |
+| Central mandatory only partially evidenced | 85 (never APPLY band) |
+| Central mandatory evidence unclear | 85 (never APPLY band) |
+| Unverifiable citations, mislabels, or inconsistent groups | 85 (never APPLY band) |
+| Peripheral mandatory group not demonstrated | 89 |
+
+Recommendation, in priority order:
+
+1. **SKIP** (final): a human-confirmed eligibility blocker — applied as an
+   overlay after the technical recommendation, never changing the score.
+2. **SKIP**: 2+ central mandatory gaps, or a final score below 65.
+3. **LOW PRIORITY**: one central mandatory gap (SKIP if the final score is
+   below 65), or a final score of 65-74.
+4. **HUMAN REVIEW**: unverifiable citations or mislabels; no central mandatory
+   requirement extracted; **every mandatory requirement met but the model
+   scored below 75** (too-low scores are flagged, not silently skipped);
+   partial or unclear central evidence; JD eligibility not confirmed; or
+   a final score of 75-85.
+5. **APPLY**: a final score of 86 or more with every central mandatory
+   requirement met and no other condition above triggered.
+
+Missing *preferred* qualifications alone never cap the score or block APPLY.
+The raw `model_score`, the `final_score`, and every reason for a cap or a
+review are saved in the results. The full truth table lives in
+`evaluation/v9_scoring.py` and is pinned by `src/test_v9_scoring.py`.
+
+Eligibility facts come from you, never from a model, and are never sent to
+one. Optional per-case fields in `--input` files: `"eligibility_blockers":
+["..."]` (forces a final SKIP overlay; the technical recommendation and the
+scores are reported unchanged) and `"eligibility_confirmed": true` (resolves
+JD eligibility rows the resume cannot prove). For `--from-db` frozen cases,
+pass the same facts through a private file outside Git:
+
+```sh
+python -m evaluation.run_v9 --provider gemini --from-db all \
+  --eligibility ~/job-eval/v9/eligibility.json --output ...
+```
+
+where the file maps case ids to facts, e.g.
+`{"netomi": {"eligibility_blockers": ["role is on-site outside my region"]}}`.
+Both providers always receive the identical overlay, and results report the
+technical and the final recommendation side by side.
+
+## Run both providers on the five frozen jobs
+
+Dry run first (no API calls):
+
+```sh
+python -m evaluation.run_v9 --provider gemini --from-db all --output ~/job-eval/v9/gemini_dry.json
+python -m evaluation.run_v9 --provider openai --from-db all --output ~/job-eval/v9/openai_dry.json
+```
+
+Live (paid, explicit; five calls each):
+
+```sh
+python -m evaluation.run_v9 --provider gemini --from-db all --live --max-calls 5 \
+  --output ~/job-eval/v9/gemini_live.json
+python -m evaluation.run_v9 --provider openai --from-db all --live --max-calls 5 \
+  --output ~/job-eval/v9/openai_live.json
+```
+
+The default models are `gemini-3.5-flash` and `gpt-4.1`; `--model` overrides them.
+`python -m evaluation.run_v9_gemini` still works and means `--provider gemini`.
+
+## Compare against your reviewed assessments
+
+Write a private reference file, e.g. `~/job-eval/v9/reference.json`, with your
+independently reviewed conclusions:
+
+```json
+[
+  {"case_id": "aurora", "recommendation": "HUMAN REVIEW",
+   "score_min": 70, "score_max": 82,
+   "central_mandatory": {"dbt": "not_demonstrated", "Looker": "met"}}
+]
+```
+
+(The values above are illustrative, not your review.) A score inside
+`score_min`-`score_max` is within tolerance; outside it is reported as an
+overscore/underscore with the distance from the violated bound — no midpoint
+is ever derived, and `recommendation` is always compared independently of
+the range. The older exact form (`"score": 55, "score_tolerance": 10`)
+still works. Then:
+
+```sh
+python -m evaluation.compare_v9 --reference ~/job-eval/v9/reference.json \
+  --results ~/job-eval/v9/gemini_live.json ~/job-eval/v9/openai_live.json
+```
+
+It reports, per provider: correct recommendations (and how many were too
+optimistic or too pessimistic), score error before and after the evidence
+caps, agreement with your requirement statuses (including requirements the model
+never extracted), and unsupported resume and JD citations. Five cases is a smoke
+test: confirm on held-out jobs before choosing a provider for production.
+
+---
+
 ## Troubleshoot a Gemini HTTP 400 without spending API calls
 
 Use a **fresh private output filename**:

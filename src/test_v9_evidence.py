@@ -39,7 +39,9 @@ class V9Tests(unittest.TestCase):
             row("combo", jd, "dbt", "all_of", resume="dbt portfolio project", context="project", years=2),
         ]
         result = run(jd, resume, rows)
-        self.assertEqual(result["groups"][0]["status"], "unclear")
+        # Portfolio dbt is related evidence, never production tenure.
+        self.assertEqual(result["groups"][0]["status"], "partial")
+        self.assertEqual(result["rows"][1]["effective_status"], "partial")
         self.assertTrue(result["warnings"])
 
     def test_netomi_or_does_not_accept_spark(self):
@@ -108,6 +110,46 @@ class V9Tests(unittest.TestCase):
     def test_strict_schema_and_no_recommendation(self):
         with self.assertRaises(ValidationError):
             Ledger.model_validate({"fit_score": 95, "recommendation": "apply", "requirements": []})
+
+    def test_hyphen_spacing_artifacts_do_not_fail_quotes(self):
+        # Extraction artifact in the resume; the model quotes the clean form.
+        jd = "Data-driven decision making required"
+        resume = "Led data -driven initiatives across teams"
+        rows = [row("dd", "Data-driven decision making required", "data-driven",
+                    resume="Led data-driven initiatives")]
+        result = run(jd, resume, rows, score=70)
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["rows"][0]["effective_status"], "met")
+
+    def test_hyphen_and_space_forms_are_interchangeable(self):
+        jd = "End to end pipeline ownership required"
+        resume = "Owned end-to-end pipelines"
+        rows = [row("e2e", "End to end pipeline ownership required", "end-to-end",
+                    resume="Owned end-to-end pipelines")]
+        self.assertTrue(run(jd, resume, rows, score=70)["valid"])
+
+    def test_case_and_whitespace_normalization(self):
+        jd = "Advanced   SQL\n required"
+        resume = "ADVANCED SQL used daily"
+        rows = [row("sql", "advanced sql required", "SQL", resume="advanced sql used daily")]
+        self.assertTrue(run(jd, resume, rows, score=70)["valid"])
+
+    def test_different_words_still_fail_validation(self):
+        jd = "Kafka required"
+        resume = "Used Kinesis streams"
+        rows = [row("k", "Kafka required", "Kafka", resume="Used Kafka streams")]
+        result = run(jd, resume, rows, score=70)
+        self.assertFalse(result["valid"])
+        self.assertIn("row 0: resume quote not found", result["failures"])
+
+    def test_component_containment_tolerates_hyphen_spacing(self):
+        jd = "Experience with scikit-learn required"
+        resume = "Trained models with scikit -learn in production"
+        rows = [row("skl", "Experience with scikit-learn required", "scikit-learn",
+                    resume="Trained models with scikit -learn in production")]
+        result = run(jd, resume, rows, score=70)
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["rows"][0]["effective_status"], "met")
 
     def test_peripheral_gap_not_auto_failure(self):
         jd = "Familiarity with rare internal tool"

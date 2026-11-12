@@ -1,0 +1,515 @@
+"""Synthetic regressions for the shared v9 score/recommendation policy.
+
+Each case mirrors a failure mode seen on the frozen Aurora/Netomi/Tesla/
+CenterWell/Constructor reviews, using invented text only.
+"""
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from evaluation.compare_v9 import compare, load_reference, render
+from evaluation.run_v9 import build_prompt, evaluate, openai_strict_schema
+from evaluation.v9_scoring import decide
+
+
+def row(group, quote, component, logic="single", status="met", resume=None,
+        context="employment", kind="mandatory", years=None, materiality="central",
+        production=False):
+    return dict(group_id=group, jd_quote=quote, component=component,
+                logic=logic, kind=kind, status=status, resume_quote=resume,
+                evidence_context=context if resume else "none",
+                min_years=years, production_required=production,
+                materiality=materiality if kind == "mandatory" else None,
+                reason="Synthetic requirement")
+
+
+def run(jd, resume, rows, score, **kwargs):
+    return decide(dict(fit_score=score, requirements=rows), jd, resume, **kwargs)
+
+
+SQL_JD = "Advanced SQL required."
+SQL_RESUME = "Data Analyst, Acme (2017-2024): wrote SQL models daily."
+SQL_ROW = row("sql", SQL_JD, "SQL", resume="wrote SQL models daily")
+
+
+class V9DecisionTests(unittest.TestCase):
+    def test_aurora_portfolio_dbt_cannot_reach_apply(self):
+        jd = "2+ years with dbt and Looker in a production environment"
+        resume = "Analyst (2018-2024): Looker 5 years professional. Portfolio: dbt project"
+        rows = [
+            row("combo", jd, "Looker", "all_of", resume="Looker 5 years professional",
+                years=2, production=True),
+            row("combo", jd, "dbt", "all_of", resume="dbt project", context="project",
+                years=2, production=True),
+        ]
+        result = run(jd, resume, rows, 92)
+        self.assertLessEqual(result["final_score"], 85)
+        self.assertEqual(result["recommendation"], "HUMAN REVIEW")
+        self.assertTrue(result["score_adjusted"])
+
+    def test_aurora_honest_gap_is_low_priority(self):
+        jd = "2+ years with dbt and Looker in a production environment"
+        resume = "Analyst (2018-2024): Looker 5 years professional."
+        rows = [
+            row("combo", jd, "Looker", "all_of", resume="Looker 5 years professional", years=2),
+            row("combo", jd, "dbt", "all_of", status="not_demonstrated", years=2),
+        ]
+        result = run(jd, resume, rows, 92)
+        self.assertEqual(result["final_score"], 74)
+        self.assertEqual(result["recommendation"], "LOW PRIORITY")
+
+    def test_netomi_spark_is_not_kafka(self):
+        jd = "Experience with Apache Kafka or RabbitMQ for asynchronous systems"
+        resume = "Built Apache Spark production workflows"
+        rows = [
+            row("messaging", jd, "Kafka", "any_of", resume="Apache Spark production workflows"),
+            row("messaging", jd, "RabbitMQ", "any_of", status="not_demonstrated"),
+            SQL_ROW,
+        ]
+        result = run(jd + " " + SQL_JD, resume + " " + SQL_RESUME, rows, 90)
+        self.assertNotEqual(result["recommendation"], "APPLY")
+        self.assertLessEqual(result["final_score"], 85)
+
+    def test_fabricated_resume_citation_never_counts(self):
+        rows = [row("py", "Python required", "Python", resume="Python 7 years at Google")]
+        result = run("Python required", "Excel reporting", rows, 95)
+        self.assertEqual(result["unsupported_resume_citations"], 1)
+        self.assertEqual(result["recommendation"], "HUMAN REVIEW")
+        self.assertLessEqual(result["final_score"], 85)
+
+    def test_score_contradicting_own_gap_is_capped(self):
+        jd = "Python required. Kubernetes required."
+        rows = [row("py", "Python required", "Python", resume="Python services"),
+                row("k8s", "Kubernetes required", "Kubernetes", status="not_demonstrated")]
+        result = run(jd, "Shipped Python services", rows, 92)
+        self.assertEqual(result["final_score"], 74)
+        self.assertEqual(result["recommendation"], "LOW PRIORITY")
+        self.assertFalse(result["validation"]["valid"])
+
+    def test_two_central_gaps_skip(self):
+        jd = "Python required. Kubernetes required. Go required."
+        rows = [row("py", "Python required", "Python", resume="Python services"),
+                row("k8s", "Kubernetes required", "Kubernetes", status="not_demonstrated"),
+                row("go", "Go required", "Go", status="not_demonstrated")]
+        result = run(jd, "Shipped Python services", rows, 80)
+        self.assertEqual(result["recommendation"], "SKIP")
+        self.assertLessEqual(result["final_score"], 64)
+
+    def test_tesla_equivalent_met_but_forecasting_unclear(self):
+        jd = ("Visualization tools such as Power BI, Tableau, Excel, or similar. "
+              "Demonstrated statistical methods particularly regarding budget forecasting.")
+        resume = "Built Looker dashboards for business reporting"
+        rows = [row("viz", "Visualization tools such as Power BI, Tableau, Excel, or similar",
+                    "Looker", "open_equivalent", resume="Built Looker dashboards"),
+                row("forecast", "Demonstrated statistical methods particularly regarding budget forecasting",
+                    "budget forecasting", status="unclear")]
+        result = run(jd, resume, rows, 93)
+        self.assertEqual(result["final_score"], 85)
+        self.assertEqual(result["recommendation"], "HUMAN REVIEW")
+
+    def test_centerwell_missing_preferred_still_apply(self):
+        jd = "Advanced SQL required. Databricks preferred."
+        rows = [SQL_ROW, row("dbx", "Databricks preferred", "Databricks",
+                             status="not_demonstrated", kind="preferred")]
+        result = run(jd, SQL_RESUME, rows, 88)
+        self.assertEqual(result["final_score"], 88)
+        self.assertEqual(result["recommendation"], "APPLY")
+        self.assertEqual(result["reasons"], [])
+
+    def test_preferred_mislabelled_mandatory_is_not_a_gap(self):
+        jd = "Advanced SQL required. Databricks preferred."
+        rows = [SQL_ROW, row("dbx", "Databricks preferred", "Databricks", status="not_demonstrated")]
+        result = run(jd, SQL_RESUME, rows, 88)
+        self.assertEqual(result["central_mandatory"]["not_demonstrated"], 0)
+        self.assertEqual(result["recommendation"], "HUMAN REVIEW")  # mislabel is an integrity issue
+
+    def test_constructor_open_equivalent_apply(self):
+        jd = "Modern analytics stacks such as dbt, Airflow, or similar"
+        resume = "Engineer (2019-2024): Built production Airflow pipelines"
+        rows = [row("modern", jd, "Airflow", "open_equivalent",
+                    resume="Built production Airflow pipelines", production=True)]
+        result = run(jd, resume, rows, 86)
+        self.assertEqual(result["recommendation"], "APPLY")
+
+    def test_tenure_with_employment_dates_is_met(self):
+        jd = "3+ years of Python in production"
+        resume = "Software Engineer, Acme, 2018-2024: Python 6 years in production services"
+        rows = [row("py", jd, "Python", resume="Python 6 years in production services",
+                    years=3, production=True)]
+        result = run(jd, resume, rows, 90)
+        self.assertEqual(result["validation"]["groups"][0]["status"], "met")
+        self.assertEqual(result["recommendation"], "APPLY")
+
+    def test_skills_list_cannot_prove_production(self):
+        jd = "Production experience with Snowflake required"
+        resume = "Skills: Snowflake, SQL"
+        rows = [row("sf", jd, "Snowflake", resume="Skills: Snowflake", context="skills_list",
+                    production=True)]
+        result = run(jd, resume, rows, 85)
+        self.assertEqual(result["validation"]["groups"][0]["status"], "partial")
+        self.assertNotEqual(result["recommendation"], "APPLY")
+
+    def test_under_scoring_is_flagged_not_skipped(self):
+        result = run(SQL_JD, SQL_RESUME, [SQL_ROW], 35)
+        self.assertTrue(result["under_scored"])
+        self.assertEqual(result["recommendation"], "HUMAN REVIEW")
+        self.assertEqual(result["final_score"], 35)  # never inflated, only surfaced
+
+    def test_invented_requirement_does_not_lower_score(self):
+        rows = [SQL_ROW, row("fake", "PhD in physics required", "PhD", status="not_demonstrated")]
+        result = run(SQL_JD, SQL_RESUME, rows, 85)
+        self.assertEqual(result["central_mandatory"]["not_demonstrated"], 0)
+        self.assertEqual(result["recommendation"], "HUMAN REVIEW")
+
+    def test_eligibility_blocker_and_unconfirmed_eligibility(self):
+        jd = SQL_JD + " Active TS/SCI clearance required."
+        rows = [SQL_ROW, row("clr", "Active TS/SCI clearance required.", "TS/SCI clearance",
+                             status="unclear", kind="eligibility")]
+        self.assertEqual(run(jd, SQL_RESUME, rows, 88)["recommendation"], "HUMAN REVIEW")
+        self.assertEqual(run(jd, SQL_RESUME, rows, 88, eligibility_confirmed=True)["recommendation"], "APPLY")
+        blocked = run(jd, SQL_RESUME, rows, 88, eligibility_blockers=["no clearance"])
+        self.assertEqual(blocked["recommendation"], "SKIP")
+
+    def test_no_mandatory_rows_needs_review(self):
+        rows = [row("dbx", "Databricks preferred", "Databricks", status="not_demonstrated",
+                    kind="preferred")]
+        self.assertEqual(run("Databricks preferred", "", rows, 80)["recommendation"], "HUMAN REVIEW")
+
+
+class V9EligibilityOverlayTests(unittest.TestCase):
+    def test_blocker_changes_final_recommendation_only(self):
+        plain = run(SQL_JD, SQL_RESUME, [SQL_ROW], 92)
+        blocked = run(SQL_JD, SQL_RESUME, [SQL_ROW], 92,
+                      eligibility_blockers=["role is on-site in Gurugram"])
+        self.assertEqual(plain["recommendation"], "APPLY")
+        self.assertEqual(blocked["technical_recommendation"], "APPLY")
+        self.assertEqual(blocked["recommendation"], "SKIP")
+        self.assertTrue(blocked["eligibility_override"])
+        self.assertEqual(blocked["final_score"], plain["final_score"])
+        self.assertEqual(blocked["model_score"], plain["model_score"])
+        self.assertEqual(blocked["validation"], plain["validation"])
+
+    def test_both_providers_receive_identical_eligibility_treatment(self):
+        import hashlib
+        case = {"case_id": "netomi", "jd": SQL_JD, "resume": SQL_RESUME,
+                "eligibility_blockers": ["on-site Gurugram"],
+                "eligibility_confirmed": False}
+        payload = {"fit_score": 90, "requirements": [SQL_ROW]}
+        out = {p: evaluate([case], live=True, max_calls=1, model="m", provider=p,
+                           caller=lambda prompt, model: payload)[0]
+               for p in ("gemini", "openai")}
+        for entry in out.values():
+            self.assertEqual(entry["technical_recommendation"], "APPLY")
+            self.assertEqual(entry["recommendation"], "SKIP")
+            self.assertEqual(entry["final_score"], 90)
+        # The prompt is exactly jd+resume: eligibility facts never reach a model.
+        prompt = build_prompt(SQL_JD, SQL_RESUME)
+        self.assertNotIn("Gurugram", prompt)
+        expected_sha = hashlib.sha256(prompt.encode()).hexdigest()
+        self.assertEqual(out["gemini"]["prompt_sha256"], expected_sha)
+        self.assertEqual(out["openai"]["prompt_sha256"], expected_sha)
+
+    def test_private_eligibility_overlay_file(self):
+        from evaluation.run_v9 import apply_eligibility
+        cases = [{"case_id": "netomi", "jd": "j", "resume": "r"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            good = Path(tmp) / "eligibility.json"
+            good.write_text(json.dumps({"netomi": {
+                "eligibility_blockers": ["on-site"], "eligibility_confirmed": False}}))
+            apply_eligibility(good, cases)
+            self.assertEqual(cases[0]["eligibility_blockers"], ["on-site"])
+            self.assertIs(cases[0]["eligibility_confirmed"], False)
+            unknown = Path(tmp) / "unknown.json"
+            unknown.write_text(json.dumps({"someone-else": {}}))
+            with self.assertRaises(ValueError):
+                apply_eligibility(unknown, cases)
+            extra = Path(tmp) / "extra.json"
+            extra.write_text(json.dumps({"netomi": {"location": "x"}}))
+            with self.assertRaises(ValueError):
+                apply_eligibility(extra, cases)
+
+
+class V9BandBoundaryTests(unittest.TestCase):
+    """Pin the established bands: 86+ APPLY, 75-85 HUMAN REVIEW, 65-74 LOW
+    PRIORITY, <65 SKIP, plus the evidence overrides at each boundary."""
+
+    def test_apply_band_boundaries_with_clean_evidence(self):
+        self.assertEqual(run(SQL_JD, SQL_RESUME, [SQL_ROW], 86)["recommendation"], "APPLY")
+        self.assertEqual(run(SQL_JD, SQL_RESUME, [SQL_ROW], 100)["recommendation"], "APPLY")
+        self.assertEqual(run(SQL_JD, SQL_RESUME, [SQL_ROW], 85)["recommendation"], "HUMAN REVIEW")
+        self.assertEqual(run(SQL_JD, SQL_RESUME, [SQL_ROW], 75)["recommendation"], "HUMAN REVIEW")
+
+    def test_lower_bands_with_unclear_central_evidence(self):
+        # All-mandatory-met ledgers below 75 are flagged as under-scored, so
+        # the LOW PRIORITY and SKIP bands apply to uncertain-evidence ledgers.
+        unclear = [row("sql", SQL_JD, "SQL", status="unclear")]
+        self.assertEqual(run(SQL_JD, SQL_RESUME, unclear, 74)["recommendation"], "LOW PRIORITY")
+        self.assertEqual(run(SQL_JD, SQL_RESUME, unclear, 65)["recommendation"], "LOW PRIORITY")
+        self.assertEqual(run(SQL_JD, SQL_RESUME, unclear, 64)["recommendation"], "SKIP")
+        self.assertEqual(run(SQL_JD, SQL_RESUME, unclear, 0)["recommendation"], "SKIP")
+
+    def test_partial_or_unclear_central_evidence_never_apply(self):
+        for status, context in (("partial", "project"), ("unclear", None)):
+            rows = [row("sql", SQL_JD, "SQL", status=status,
+                        resume="wrote SQL models daily" if context else None,
+                        context=context or "none")]
+            result = run(SQL_JD, SQL_RESUME, rows, 95)
+            self.assertLessEqual(result["final_score"], 85)
+            self.assertEqual(result["recommendation"], "HUMAN REVIEW")
+
+    def test_one_central_gap_never_reaches_review_band(self):
+        rows = [SQL_ROW, row("k8s", "Kubernetes required", "Kubernetes",
+                             status="not_demonstrated")]
+        result = run(SQL_JD + " Kubernetes required.", SQL_RESUME, rows, 95)
+        self.assertEqual(result["final_score"], 74)
+        self.assertEqual(result["recommendation"], "LOW PRIORITY")
+
+    def test_under_score_boundary_is_review_min(self):
+        self.assertTrue(run(SQL_JD, SQL_RESUME, [SQL_ROW], 74)["under_scored"])
+        self.assertEqual(run(SQL_JD, SQL_RESUME, [SQL_ROW], 74)["recommendation"],
+                         "HUMAN REVIEW")
+        self.assertFalse(run(SQL_JD, SQL_RESUME, [SQL_ROW], 75)["under_scored"])
+
+
+class V9ProviderParityTests(unittest.TestCase):
+    def test_openai_strict_schema(self):
+        schema = openai_strict_schema()
+        text = json.dumps(schema)
+        for banned in ('"default"', '"minLength"', '"title"', '"minimum"', '"maximum"',
+                       '"minItems"', '"description"'):
+            self.assertNotIn(banned, text)
+
+        def check(node):
+            if isinstance(node, dict):
+                if node.get("type") == "object" and "properties" in node:
+                    self.assertFalse(node["additionalProperties"])
+                    self.assertEqual(sorted(node["required"]), sorted(node["properties"]))
+                for value in node.values():
+                    check(value)
+            elif isinstance(node, list):
+                for value in node:
+                    check(value)
+        check(schema)
+        cited, uncited = schema["$defs"]["Requirement"]["anyOf"]
+        for variant in (cited, uncited):
+            self.assertIn("production_required", variant["properties"])
+        self.assertNotIn("none", cited["properties"]["evidence_context"]["enum"])
+        self.assertEqual(cited["properties"]["resume_quote"], {"type": "string"})
+        self.assertEqual(uncited["properties"]["evidence_context"]["enum"], ["none"])
+        self.assertEqual(uncited["properties"]["resume_quote"], {"type": "null"})
+
+    def test_both_providers_get_identical_prompt_and_policy(self):
+        case = {"case_id": "c", "jd": SQL_JD, "resume": SQL_RESUME, "original_score": 97}
+        payload = {"fit_score": 88, "requirements": [SQL_ROW]}
+        out = {p: evaluate([case], live=True, max_calls=1, model="m", provider=p,
+                           caller=lambda prompt, model: payload)[0]
+               for p in ("gemini", "openai")}
+        self.assertEqual(out["gemini"]["prompt_sha256"], out["openai"]["prompt_sha256"])
+        self.assertEqual(out["gemini"]["recommendation"], out["openai"]["recommendation"])
+        self.assertNotIn("97", build_prompt(case["jd"], case["resume"]))
+
+    def test_unknown_provider_rejected(self):
+        with self.assertRaises(ValueError):
+            evaluate([], live=False, max_calls=0, model="m", provider="other")
+
+
+class V9CompareTests(unittest.TestCase):
+    def test_compare_ranks_accurate_provider_first(self):
+        case = {"case_id": "aurora", "jd": SQL_JD, "resume": SQL_RESUME}
+        good = {"fit_score": 86, "requirements": [SQL_ROW]}
+        bad = {"fit_score": 30, "requirements": [SQL_ROW]}
+        results = (
+            evaluate([case], live=True, max_calls=1, model="g", provider="gemini",
+                     caller=lambda p, m: good)
+            + evaluate([case], live=True, max_calls=1, model="o", provider="openai",
+                       caller=lambda p, m: bad)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ref.json"
+            path.write_text(json.dumps([{"case_id": "aurora", "recommendation": "APPLY",
+                                         "score": 85, "central_mandatory": {"SQL": "met"}}]))
+            reference = load_reference(path)
+        report = compare(reference, results)
+        self.assertEqual(report["ranking"][0], "gemini:g")
+        gemini = report["providers"]["gemini:g"]
+        self.assertEqual(gemini["recommendation_correct"], 1)
+        self.assertEqual(gemini["requirement_status_agreement"], 1)
+        self.assertEqual(report["providers"]["openai:o"]["too_pessimistic"], 1)
+        self.assertIn("Most accurate", render(report))
+
+    def test_invalid_results_are_excluded_and_never_win(self):
+        case = {"case_id": "aurora", "jd": SQL_JD, "resume": SQL_RESUME}
+        # Valid JSON, but the resume citation is fabricated: contract failure.
+        fabricated = {"fit_score": 95, "requirements": [
+            row("sql", SQL_JD, "SQL", resume="SQL at a company never mentioned")]}
+        honest = {"fit_score": 86, "requirements": [SQL_ROW]}
+        results = (
+            evaluate([case], live=True, max_calls=1, model="o", provider="openai",
+                     caller=lambda p, m: fabricated)
+            + evaluate([case], live=True, max_calls=1, model="g", provider="gemini",
+                       caller=lambda p, m: honest))
+        invalid_entry = results[0]
+        self.assertEqual(invalid_entry["status"], "invalid")
+        for trusted_key in ("recommendation", "final_score", "model_score"):
+            self.assertNotIn(trusted_key, invalid_entry)
+        self.assertEqual(invalid_entry["unvalidated_model_score"], 95)
+        self.assertTrue(invalid_entry["validation_failures"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ref.json"
+            path.write_text(json.dumps([{"case_id": "aurora", "recommendation": "APPLY",
+                                         "score": 85}]))
+            report = compare(load_reference(path), results)
+        openai = report["providers"]["openai:o"]
+        self.assertEqual(openai["validated"], 0)
+        self.assertEqual(openai["invalid"], 1)
+        self.assertEqual(openai["recommendation_correct"], 0)
+        self.assertEqual(openai["validation_pass_rate"], 0.0)
+        self.assertEqual(report["providers"]["gemini:g"]["validation_pass_rate"], 1.0)
+        # The provider with the only validated, correct assessment wins.
+        self.assertEqual(report["ranking"][0], "gemini:g")
+        self.assertIn("excluded from accuracy", render(report))
+
+    def test_api_errors_reported_separately_from_invalid_ledgers(self):
+        case = {"case_id": "aurora", "jd": SQL_JD, "resume": SQL_RESUME}
+
+        def boom(prompt, model):
+            raise RuntimeError("provider down")
+
+        results = evaluate([case], live=True, max_calls=1, model="g",
+                           provider="gemini", caller=boom)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ref.json"
+            path.write_text(json.dumps([{"case_id": "aurora", "recommendation": "APPLY"}]))
+            report = compare(load_reference(path), results)
+        stats = report["providers"]["gemini:g"]
+        self.assertEqual(stats["errors"], 1)
+        self.assertEqual(stats["invalid"], 0)
+        self.assertEqual(stats["validated"], 0)
+        self.assertIsNone(stats["validation_pass_rate"])
+        self.assertIn("No provider produced a validated assessment", render(report))
+
+    def test_reference_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ref.json"
+            path.write_text(json.dumps([{"case_id": "x", "recommendation": "MAYBE"}]))
+            with self.assertRaises(ValueError):
+                load_reference(path)
+
+    def test_score_range_reference(self):
+        case = {"case_id": "aurora", "jd": SQL_JD, "resume": SQL_RESUME}
+
+        def run_with_score(score, model_name):
+            payload = {"fit_score": score, "requirements": [SQL_ROW]}
+            return evaluate([case], live=True, max_calls=1, model=model_name,
+                            provider="gemini", caller=lambda p, m: payload)
+
+        results = (run_with_score(70, "at-min") + run_with_score(82, "at-max")
+                   + run_with_score(92, "above") + run_with_score(60, "below"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ref.json"
+            path.write_text(json.dumps([{
+                "case_id": "aurora", "recommendation": "HUMAN REVIEW",
+                "score_min": 70, "score_max": 82}]))
+            report = compare(load_reference(path), results)
+
+        def case_for(model_name):
+            return report["providers"][f"gemini:{model_name}"]["cases_detail"][0]
+
+        # Both endpoints are inside the range: no artificial midpoint error.
+        for name in ("at-min", "at-max"):
+            cmp = case_for(name)["final_score_vs_reference"]
+            self.assertTrue(cmp["within"])
+            self.assertEqual(cmp["deviation"], 0)
+        above = case_for("above")["final_score_vs_reference"]
+        self.assertEqual((above["within"], above["overscore"], above["underscore"]),
+                         (False, 10, 0))
+        below = case_for("below")["final_score_vs_reference"]
+        self.assertEqual((below["within"], below["overscore"], below["underscore"]),
+                         (False, 0, 10))
+        # Raw model score is compared separately from the final score.
+        self.assertIn("model_score_vs_reference", case_for("above"))
+        # Recommendation accuracy stays independent of the score range: the
+        # 92/APPLY run is outside the range AND recommendation-incorrect, while
+        # the at-min run is within range with the expected recommendation.
+        self.assertFalse(case_for("above")["recommendation_correct"])
+        self.assertTrue(case_for("at-min")["recommendation_correct"])
+        self.assertIn("OVERSCORE +10", render(report))
+        self.assertIn("UNDERSCORE -10", render(report))
+
+    def test_component_matching_keeps_groups_distinct(self):
+        jd = "Advanced SQL required. SQL reporting required."
+        case = {"case_id": "aurora", "jd": jd, "resume": SQL_RESUME}
+        payload = {"fit_score": 80, "requirements": [
+            row("sql", "SQL reporting required", "SQL", resume="wrote SQL models daily"),
+            row("adv", "Advanced SQL required", "Advanced SQL", status="unclear"),
+        ]}
+        results = evaluate([case], live=True, max_calls=1, model="g",
+                           provider="gemini", caller=lambda p, m: payload)
+        self.assertEqual(results[0]["status"], "validated")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ref.json"
+            path.write_text(json.dumps([{
+                "case_id": "aurora", "recommendation": "HUMAN REVIEW",
+                "central_mandatory": {"SQL": "met", "Kubernetes": "not_demonstrated"}}]))
+            report = compare(load_reference(path), results)
+        components = report["providers"]["gemini:g"]["cases_detail"][0]["central_mandatory"]
+        sql = components["SQL"]
+        # Two distinct groups match; they are both reported, never collapsed
+        # into the most favorable status.
+        self.assertTrue(sql["conflicting_groups"])
+        self.assertFalse(sql["agree"])
+        self.assertEqual(sql["provider"], "met/unclear")
+        self.assertEqual([m["group_id"] for m in sql["matches"]], ["adv", "sql"])
+        # A requirement the provider never extracted is reported explicitly,
+        # not treated as matching successfully.
+        kubernetes = components["Kubernetes"]
+        self.assertFalse(kubernetes["extracted"])
+        self.assertFalse(kubernetes["agree"])
+        self.assertIn("NOT EXTRACTED", render(report))
+        stats = report["providers"]["gemini:g"]
+        self.assertEqual(stats["requirement_not_extracted"], 1)
+        self.assertEqual(stats["requirement_conflicting_groups"], 1)
+
+    def test_component_matching_reports_group_logic(self):
+        jd = "Experience with Kafka or RabbitMQ required."
+        case = {"case_id": "netomi", "jd": jd, "resume": "Ran Kafka in production"}
+        payload = {"fit_score": 88, "requirements": [
+            row("msg", jd, "Kafka", "any_of", resume="Ran Kafka in production"),
+            row("msg", jd, "RabbitMQ", "any_of", status="not_demonstrated"),
+        ]}
+        results = evaluate([case], live=True, max_calls=1, model="g",
+                           provider="gemini", caller=lambda p, m: payload)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ref.json"
+            path.write_text(json.dumps([{
+                "case_id": "netomi", "recommendation": "APPLY",
+                "central_mandatory": {"RabbitMQ": "not_demonstrated"}}]))
+            report = compare(load_reference(path), results)
+        verdict = (report["providers"]["gemini:g"]["cases_detail"][0]
+                   ["central_mandatory"]["RabbitMQ"])
+        self.assertTrue(verdict["agree"])
+        match = verdict["matches"][0]
+        # The AND/OR grouping is evaluated as grouped: the row is a gap but
+        # the any_of group is met through Kafka.
+        self.assertEqual(match["logic"], "any_of")
+        self.assertEqual(match["row_statuses"], ["not_demonstrated"])
+        self.assertEqual(match["group_status"], "met")
+
+    def test_reference_range_validation(self):
+        def expect_error(item):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "ref.json"
+                path.write_text(json.dumps([dict(case_id="x", recommendation="APPLY", **item)]))
+                with self.assertRaises(ValueError):
+                    load_reference(path)
+
+        expect_error({"score_min": 80, "score_max": 70})
+        expect_error({"score_min": 70})
+        expect_error({"score_min": 70, "score_max": 80, "score": 75})
+        expect_error({"score_min": -1, "score_max": 80})
+
+
+if __name__ == "__main__":
+    unittest.main()
