@@ -226,7 +226,7 @@ class ProbeTests(unittest.TestCase):
                     workday,'discover_candidates',return_value=[]) as adapter:
                 self.assertEqual(discover_ats_candidates(job(),client),[])
                 adapter.assert_not_called()
-                careers.CAREERS_CACHE['widget']=(0,dict(company='widget',platforms=['workday']))
+                careers.CAREERS_CACHE['widget']=(time.monotonic() - careers.CACHE_TTL_SECONDS - 1,dict(company='widget',platforms=['workday']))
                 discover_ats_candidates(job(),client)
                 adapter.assert_called_once()
 
