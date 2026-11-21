@@ -81,12 +81,14 @@ def screen_unscreened_jobs(
     resume_profile: ResumeProfile,
     limit: int,
     model_name: str,
+    record_keys: tuple[str, ...] | None = None,
 ) -> JobScreeningSummary:
     """Screen uncached canonical jobs and persist their eligibility decisions."""
     jobs = load_unscreened_job_eligibility_candidates(
         resume_hash=resume_hash,
         limit=limit,
         prompt_version=ELIGIBILITY_PROMPT_VERSION,
+        **({"record_keys": record_keys} if record_keys is not None else {}),
     )
 
     # JD resolution precedes every AI stage, including lightweight screening.

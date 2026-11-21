@@ -9,6 +9,8 @@ the existing job-identity validator confirms that it is the same posting.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -21,7 +23,7 @@ from bs4 import BeautifulSoup
 
 from src.enrichment.public_search import (
     PublicSearchError, selected_provider, available_providers, serper_search, tavily_search, metric,
-    cached_response,
+    cached_response, reserve_search_request, SearchBudgetExhausted,
 )
 from src.browser.playwright_client import PlaywrightClient
 from src.enrichment.ats import (
@@ -66,6 +68,7 @@ class PublicSearchCircuit:
         self.calls = 0
         self.errors = 0
         self.deferred = 0
+        self.budget_deferred = 0
 
     def state(self, provider=None):
         return self.states.setdefault(provider or selected_provider(),
@@ -92,6 +95,10 @@ class PublicSearchCircuit:
             state["calls"] += 1
             try:
                 candidates = search_candidates(job, client, provider=provider)
+            except SearchBudgetExhausted:
+                self.deferred += 1
+                self.budget_deferred += 1
+                raise SearchDeferredError("public search deferred: request budget exhausted") from None
             except Exception as error:
                 self.errors += 1
                 state["errors"] += 1
@@ -134,6 +141,7 @@ AGGREGATOR_DOMAINS = THIRD_PARTY_DOMAINS
 
 # Domains controlled by each ATS. Matches require a hostname label boundary.
 KNOWN_ATS_DOMAINS = {
+    "breezy.hr": "breezy",
     "ashbyhq.com": "ashby",
     "greenhouse.io": "greenhouse",
     "icims.com": "icims",
@@ -185,6 +193,8 @@ class OfficialJobResolutionResult:
     description_result: JobDescriptionResult | None = None
     identity_validation: JobIdentityValidation | None = None
     error_message: str | None = None
+    posting_identity_evidence: dict | None = None
+    employer_provenance: dict | None = None
 
 
 def now_utc() -> datetime:
@@ -237,6 +247,13 @@ def should_attempt_official_resolution(
     official_status = str(
         job.get("official_url_status") or ""
     ).strip()
+
+    # Explicit daily selection separates missing identity from JD completeness.
+    # False also prevents a fresh source fetch from bypassing an official cooldown.
+    if job.get("needs_official_resolution") is False:
+        return False
+    if job.get("needs_official_resolution") and job.get("requires_trusted_posting_key"):
+        return True
 
     if official_status == OFFICIAL_FOUND_VERIFIED:
         return False
@@ -318,6 +335,9 @@ def looks_like_individual_posting_url(url: str) -> bool:
         return False
 
     ats = ats_type_for_url(url)
+    if ats == 'breezy':
+        from src.verified_posting_identity import breezy_posting_scope
+        return breezy_posting_scope(url) is not None
     if ats in {"workday", "greenhouse", "icims"}:
         return any(part in {"job", "jobs", "job-detail", "details"}
                    and i + 1 < len(segments) for i, part in enumerate(segments))
@@ -335,25 +355,67 @@ def looks_like_individual_posting_url(url: str) -> bool:
             })
 
 
-def looks_like_official_or_ats_url(
-    url: str,
-    company_name: str | None,
-) -> bool:
-    if not is_valid_http_url(url) or is_aggregator_domain(url):
-        return False
-
-    # Dice is an external job board even when its name appears as employer.
+def discovery_url_decision(url: str, company_name: str | None) -> tuple[bool, str]:
+    """Explain the existing discovery gate; acceptance/verification is unchanged."""
+    if not is_valid_http_url(url):
+        return False, "invalid_http_url"
+    if is_aggregator_domain(url):
+        return False, "third_party_domain"
     host = hostname(url)
     if host == "dice.com" or host.endswith(".dice.com"):
-        return False
+        return False, "third_party_domain"
     if not looks_like_individual_posting_url(url):
-        return False
-
+        return False, "unsupported_posting_path"
     if ats_type_for_url(url):
-        return True
+        return True, "known_ats_discovery_only"
+    if any(token in host for token in company_domain_tokens(company_name)):
+        return True, "employer_hostname_token_discovery_only"
+    return False, "unrecognized_ats_or_employer_domain"
 
-    company_tokens = company_domain_tokens(company_name)
-    return any(token in host for token in company_tokens)
+
+def looks_like_official_or_ats_url(url: str, company_name: str | None) -> bool:
+    return discovery_url_decision(url, company_name)[0]
+
+
+def record_search_diagnostic(job, *, provider, query, urls=(), selected_urls=(),
+                             result_count=0, cache_hit=False, error_category=None):
+    """Safe structured discovery trace, never identity evidence or DB content.
+
+    Batch processing copies these events into its existing operational log;
+    direct callers can also capture the logger. No headers or response bodies.
+    """
+    from src.enrich_jobs import safe_enrichment_log_message, safe_posting_url_diagnostic
+    selected = set(selected_urls)
+    seen = set()
+    decisions = []
+    for url in urls:
+        accepted, reason = discovery_url_decision(url, job.get('company_name'))
+        if url in seen:
+            reason = 'duplicate_result'
+        elif accepted and url not in selected:
+            reason = 'candidate_limit'
+        elif (not accepted and ats_type_for_url(url) == 'workday'
+              and not looks_like_individual_posting_url(url)):
+            reason = 'workday_listing_lead_not_individual_posting'
+        # Decode reflected credentials before the existing URL/log redactors.
+        decoded = str(url or '')
+        for _ in range(3):
+            decoded = unquote(decoded)
+        decisions.append(dict(url=safe_posting_url_diagnostic(decoded),
+                              reason=reason, selected_for_verification=url in selected))
+        seen.add(url)
+    event = dict(provider=provider, query=safe_enrichment_log_message(query),
+                 search_results=result_count, cache_hit=cache_hit,
+                 error_category=error_category, returned_urls=decisions)
+    job.setdefault('public_search_diagnostics', []).append(event)
+    logging.getLogger(__name__).info('Employer search diagnostic: %s', json.dumps(event))
+    # CLI/server logs retain diagnostics even when a caller discards the job
+    # object or has not enabled INFO logging. No raw URL/header/body is printed.
+    print('Employer search diagnostic: ' + json.dumps({k: v for k, v in event.items() if k != 'returned_urls'}))
+    for decision in decisions:
+        print('Employer search URL decision: ' + json.dumps(decision))
+    return event
+
 
 def unwrap_search_url(url: str) -> str:
     parsed = urlparse(url)
@@ -421,13 +483,14 @@ def duckduckgo_candidates(
     query = quote_plus(f'"{title}" "{company}" careers jobs')
     search_url = f"https://duckduckgo.com/html/?q={query}"
 
+    reserve_search_request(client, "duckduckgo")
     metric(client, "duckduckgo", "search_requests")
-    response = client.get(search_url)
+    response = client.get(search_url, follow_redirects=False)
 
     if response.status_code in {401, 403, 429}:
         raise PermissionError(f"search blocked with HTTP {response.status_code}")
 
-    if response.status_code >= 400:
+    if response.status_code >= 300:
         raise RuntimeError(f"search failed with HTTP {response.status_code}")
 
     if any(marker in response.text.lower() for marker in (
@@ -440,10 +503,14 @@ def duckduckgo_candidates(
         metric(client, "duckduckgo", "no_result_searches")
     job["public_search_trace"] = {"provider": "duckduckgo", "healthy": bool(
         BeautifulSoup(response.text, "html.parser").select(".result__a, .no-results, .no-results__message"))}
-    return extract_search_result_candidates(
-        response.text,
-        company_name=company,
-    )
+    candidates = extract_search_result_candidates(response.text, company_name=company)
+    soup = BeautifulSoup(response.text, "html.parser")
+    anchors = soup.select(".result__a") or soup.find_all("a", href=True)
+    returned_urls = [unwrap_search_url(urljoin("https://duckduckgo.com", a.get("href", ""))) for a in anchors]
+    record_search_diagnostic(job, provider="duckduckgo",
+        query=f'"{title}" "{company}" careers jobs', urls=returned_urls,
+        selected_urls=[c.url for c in candidates], result_count=len(returned_urls))
+    return candidates
 
 
 def search_candidates(
@@ -459,6 +526,8 @@ def search_candidates(
         for name in available_providers():
             try:
                 return search_candidates(job, client, provider=name)
+            except SearchBudgetExhausted:
+                raise
             except PublicSearchError as error:
                 previous_error = error
         if previous_error:
@@ -493,6 +562,8 @@ def search_candidates(
             )
         except PublicSearchError as error:
             job["public_search_trace"]["error_category"] = error.category
+            record_search_diagnostic(job, provider=provider, query=query,
+                                     error_category=error.category)
             raise
         finally:
             timing = job.setdefault("enrichment_timing", {})
@@ -522,6 +593,9 @@ def search_candidates(
             healthy=True, search_results=response.result_count,
             organic_results=audit,
         )
+        record_search_diagnostic(job, provider=provider, query=query, urls=response.urls,
+            selected_urls=[c.url for c in candidates], result_count=response.result_count,
+            cache_hit=job['public_search_trace']['cache_hit'])
     else:
         raise ValueError("Unknown configured search provider")
     job["public_search_trace"]["candidates"] = len(candidates)
@@ -669,10 +743,17 @@ def candidate_specific_posting_key(
     Check the final URL, so redirects cannot borrow the candidate URL's ID.
     """
     from src.enrichment.verified_identity_recovery import supported_specific_posting_key
+    from src.verified_posting_identity import fetched_posting_scope_valid
+    if not fetched_posting_scope_valid(result.final_url or candidate.url, result, candidate.employer_provenance):
+        return ''
     from src.enrich_jobs import official_status_value, stored_verified_key_is_trusted
     allow_employer = candidate.source == "employer" or (
         official_status_value(job) == OFFICIAL_FOUND_VERIFIED and stored_verified_key_is_trusted(job)
     )
+    if candidate.employer_provenance:
+        from src.verified_posting_identity import posting_urls_equivalent
+        if not posting_urls_equivalent(candidate.url, result.final_url or candidate.url, result.resolved_job_id):
+            return ''
     return supported_specific_posting_key(
         result.final_url or candidate.url, allow_employer=allow_employer,
     )
@@ -684,6 +765,14 @@ def validate_candidate_result(
     result: JobDescriptionResult,
 ) -> VerifiedOfficialJob | None:
     if result.status != "enriched" or not candidate_specific_posting_key(job, candidate, result):
+        return None
+
+    from src.enrichment.job_identity import compare_posting_evidence
+    if compare_posting_evidence(job, result)['requisition_conflict']:
+        return None
+    from src.verified_posting_identity import posting_urls_equivalent
+    if result.canonical_url and not posting_urls_equivalent(
+            result.final_url or candidate.url, result.canonical_url, result.resolved_job_id):
         return None
 
     # Candidate fields are discovery/ranking hints, including expected-company
@@ -819,6 +908,13 @@ def resolve_from_candidates(
 
         fetch_started = time.monotonic()
         result = fetch_candidate_description(candidate, client)
+        from src.verified_posting_identity import breezy_posting_scope
+        if breezy_posting_scope(result.final_url or '') and result.status == 'enriched':
+            from dataclasses import replace
+            from src.enrichment.ats.breezy import employer_provenance
+            proof = employer_provenance(job, result, client)
+            if proof:
+                candidate = replace(candidate, source='employer', employer_provenance=proof)
         elapsed_ms = round(1000 * (time.monotonic() - fetch_started), 1)
         timing["candidate_fetch_ms"] = round(
             timing.get("candidate_fetch_ms", 0) + elapsed_ms, 1
@@ -847,6 +943,17 @@ def resolve_from_candidates(
             "http_status": result.http_status, "word_count": result.word_count,
             "resolved_title": result.resolved_title, "resolved_company": result.resolved_company})
         if verified is None:
+            from src.enrichment.job_identity import compare_posting_evidence
+            from src.verified_posting_identity import posting_urls_equivalent
+            if compare_posting_evidence(job, result)['requisition_conflict']:
+                last_rejection_reason = 'explicit employer requisition conflict'
+                job['candidate_validation_trace'][-1]['reason'] = last_rejection_reason
+                continue
+            if result.canonical_url and not posting_urls_equivalent(
+                    result.final_url or candidate.url, result.canonical_url, result.resolved_job_id):
+                last_rejection_reason = 'conflicting fetched canonical posting identity'
+                job['candidate_validation_trace'][-1]['reason'] = last_rejection_reason
+                continue
             if result.status == "enriched" and not candidate_specific_posting_key(job, candidate, result):
                 last_rejection_reason = "fetched URL lacks supported specific posting identity/provenance"
                 job["candidate_validation_trace"][-1]["reason"] = last_rejection_reason
@@ -893,6 +1000,20 @@ def resolve_from_candidates(
 
     if verified_jobs:
         chosen = choose_verified_candidate(verified_jobs)
+        if chosen.description_result:
+            from dataclasses import replace
+            from src.enrichment.job_identity import compare_posting_evidence
+            selected = next(v for v in verified_jobs if v.result is chosen.description_result)
+            identity_evidence = compare_posting_evidence(job, chosen.description_result)
+            chosen = replace(chosen,
+                posting_identity_evidence=identity_evidence,
+                employer_provenance=selected.candidate.employer_provenance,
+                # This existing persisted reason carries the distinction even
+                # where callers do not retain the additional diagnostic fields.
+                official_url_validation_reason=(
+                    chosen.official_url_validation_reason + '; current employer posting verified; historical match: '
+                    + identity_evidence['historical_match']
+                    if selected.candidate.employer_provenance else chosen.official_url_validation_reason))
         trace = job.get("public_search_trace", {})
         if trace.get("provider") and chosen.status == OFFICIAL_FOUND_VERIFIED:
             metric(client, trace["provider"], "verified_official_resolutions")
@@ -943,6 +1064,12 @@ def resolve_official_job(
     """Discover direct ATS postings first, under a cooperative per-job budget."""
     timing = job.setdefault("enrichment_timing", {})
     deadline = time.monotonic() + OFFICIAL_RESOLUTION_BUDGET_SECONDS
+    from src.enrichment.employer_careers import discover_employer_candidates
+    employer_candidates = discover_employer_candidates(job, client, deadline=deadline)
+    if employer_candidates:
+        employer_result = resolve_from_candidates(job, client, employer_candidates, 'employer', deadline=deadline)
+        if employer_result.status in {OFFICIAL_FOUND_VERIFIED, OFFICIAL_AMBIGUOUS, OFFICIAL_SEARCH_DEFERRED}:
+            return employer_result
     ats_started = time.monotonic()
     try:
         ats_candidates = discover_ats_candidates(
@@ -1025,6 +1152,17 @@ def resolve_official_job(
     # Untrusted search data never becomes accepted title/company evidence.
     seen_urls = {candidate.url for candidate in candidates}
     search_trace = job.get("public_search_trace") or {}
+    # Search may supply a corporate-site lead. It must pass fetched branding
+    # and careers-link verification just like a domain probe; the search label
+    # itself never grants employer provenance.
+    corporate_leads = [hit.get('url', '') for hit in search_trace.get('organic_results', [])
+                       if not looks_like_individual_posting_url(hit.get('url', ''))
+                       and not ats_type_for_url(hit.get('url', ''))][:2]
+    if corporate_leads and time.monotonic() < deadline:
+        for lead in discover_employer_candidates(job, client, deadline=deadline, corporate_leads=corporate_leads):
+            if lead.url not in seen_urls:
+                candidates.append(lead)
+                seen_urls.add(lead.url)
     workday_homepages = [
         hit["url"] for hit in search_trace.get("organic_results", [])
         if ats_type_for_url(hit.get("url", "")) == "workday"

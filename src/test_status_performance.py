@@ -172,11 +172,29 @@ def measure_streamlit_status_interaction(source):
             'application_status_source':'linkedin','application_status_record_key':record_key},))
     writer=Mock(side_effect=write)
     network=Mock(side_effect=AssertionError('Unexpected actionability network request'))
-    with patch.object(repo,'load_all_jobs',jobs_loader),patch.object(repo,'load_pipeline_operation_metrics',operations_loader),patch.object(repo,'update_application_status',writer),patch('src.ui.daily_workflow_service.load_scoring_backlog_status',score_loader),patch('src.actionability.refresh_daily',network):
+    # Queue diagnostics are a separate database-backed service, not part of
+    # this UI callback-budget test. Exercise the rendered diagnostics with
+    # deterministic data instead of entering default database initialization.
+    queue_stats = {name: 0 for name in (
+        'fresh_description', 'eligible_deferred_retries', 'employer_verification_pending',
+        'full_jd_employer_pending', 'fit_recommended_employer_pending', 'cooldown',
+        'excluded', 'retry_disabled', 'runnable', 'selected')}
+    queue_stats.update(pending_employer_by_source={}, pending_employer_all_new_by_source={})
+    daily_plan=Mock(return_value=([], queue_stats))
+    with patch.object(repo,'load_all_jobs',jobs_loader), \
+         patch.object(repo,'load_pipeline_operation_metrics',operations_loader), \
+         patch.object(repo,'update_application_status',writer), \
+         patch('src.ui.daily_workflow_service.load_scoring_backlog_status',score_loader), \
+         patch('src.ui.daily_workflow_service.load_daily_enrichment_plan',daily_plan), \
+         patch('src.actionability.refresh_daily',network), \
+         patch('src.ui.candidate_identity.candidates',return_value=[]), \
+         patch('src.ui.candidate_identity.cache_token',return_value=None), \
+         patch('src.scoring_run_repository.load_latest_scoring_run',return_value=None):
         instrumented=source.replace('st.set_page_config(', "st.session_state['_perf_render_runs'] = st.session_state.get('_perf_render_runs', 0) + 1\nst.set_page_config(",1)
         app=AppTest.from_string(instrumented,default_timeout=30)
         app.session_state['show_saved_jobs']=True;app.session_state['resume_hash']='resume-1'
         app.run();assert not app.exception,str(app.exception)
+        assert daily_plan.called, 'Expected queue diagnostics to use the mocked service'
         initial={'load_all_jobs':jobs_loader.call_count,'operations_sql':operations_loader.call_count,'sidebar_counts':score_loader.call_count}
         next(box for box in app.selectbox if box.label=='Status').set_value('New').run()
         assert not app.exception,str(app.exception)

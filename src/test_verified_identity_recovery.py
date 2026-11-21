@@ -101,7 +101,7 @@ class VerifiedIdentityRecoveryTests(unittest.TestCase):
                 self.assertEqual(result.classification, CLASS_UNSAFE)
                 self.assertIsNone(result.proposed_trust)
 
-    def test_well_formed_unsupported_workday_path_is_unsafe_not_malformed(self):
+    def test_short_workday_requires_fresh_fetched_requisition_for_legacy_recovery(self):
         url = "https://tenant.wd1.myworkdayjobs.com/en-US/careers/job/Engineer_REQ123"
         result = classify_missing_verified_identity(own_verified_row(official_job_url=url))
         self.assertEqual(result.classification, CLASS_UNSAFE)

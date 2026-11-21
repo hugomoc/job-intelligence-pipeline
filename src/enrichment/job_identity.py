@@ -66,6 +66,48 @@ class JobIdentityValidation:
     location_reason: str = "authoritative location unavailable"
 
 
+def description_similarity(original: str | None, resolved: str | None) -> float | None:
+    """Formatting-insensitive supporting evidence, excluding generic boilerplate.
+
+    This diagnostic never overrides employer, geography or requisition conflicts.
+    Use word shingles to retain order without relying on PDF line wrapping.
+    """
+    from src.verified_posting_identity import normalize_loose_text
+    def shingles(value):
+        from html import unescape
+        value = unescape(value or '')
+        value = re.sub(r'<[^>]+>', ' ', value or '')
+        sentences = re.split(r'[.!?;\n]+', value)
+        boilerplate = r'equal opportunity|reasonable accommodation|all rights reserved|privacy policy|regardless of race|protected veteran'
+        words = normalize_loose_text(' '.join(s for s in sentences if not re.search(boilerplate, s, re.I))).split()
+        return {tuple(words[i:i + 4]) for i in range(len(words) - 3)}
+    a, b = shingles(original), shingles(resolved)
+    if not a or not b:
+        return None
+    return round(len(a & b) / len(a | b), 4)
+
+
+def compare_posting_evidence(job, result):
+    """Keep current employer-posting verification distinct from historical proof.
+
+    Source listing IDs are never compared to requisition IDs: callers must
+    explicitly identify an employer requisition when they possess one.
+    """
+    old_id = str(job.get('original_requisition_id') or job.get('official_resolved_job_id') or '').strip()
+    new_id = str(result.resolved_job_id or '').strip()
+    conflict = bool(old_id and new_id and old_id.casefold() != new_id.casefold())
+    original = job.get('description') or job.get('raw_description')
+    sim = description_similarity(original, result.description)
+    matched_id = bool(old_id and new_id and not conflict)
+    return dict(original_requisition_id=old_id or None, current_requisition_id=new_id or None,
+                requisition_conflict=conflict, description_similarity=sim,
+                historical_match=('conflicting_requisition' if conflict else
+                                  'explicit_requisition_match' if matched_id else
+                                  'description_supported_not_exact_identity' if sim is not None else
+                                  'unproven_original_jd_and_requisition_unavailable'),
+                description_caution=('material_description_difference' if sim is not None and sim < .35 else None))
+
+
 def normalize_company_name(value: str | None) -> str:
     if not value:
         return ""
@@ -123,6 +165,7 @@ def primary_occupation(title: str | None) -> str | None:
 
 
 AUTHORITATIVE_LOCATION_SOURCES = {
+    "breezy_embedded_position",
     "jobposting_json_ld", "greenhouse_remix_jobPost", "workday_posting_api",
 }
 US_REGIONS = dict(pair.split(":") for pair in (

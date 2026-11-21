@@ -255,6 +255,76 @@ def _path_match(pattern: str, url: str) -> str:
     return match.group(1) if match else ""
 
 
+def workday_posting_scope(url: str) -> tuple[str, str, str] | None:
+    """Parse tenant/site/posting, without granting fetched identity trust."""
+    p = urlsplit(url)
+    host = (p.hostname or '').casefold()
+    if p.scheme != 'https' or p.username or p.password or p.port not in (None, 443):
+        return None
+    if not host.endswith(('.myworkdayjobs.com', '.myworkdaysite.com', '.workdayjobs.com')):
+        return None
+    parts = p.path.strip('/').split('/')
+    if parts and re.fullmatch(r'[a-z]{2}(?:-[a-z]{2})?', parts[0], re.I):
+        parts = parts[1:]
+    if len(parts) not in (3, 4) or parts[1] != 'job' or not all(parts):
+        return None
+    return host, parts[0], parts[-1]
+
+
+def is_short_workday_posting(url: str) -> bool:
+    scope = workday_posting_scope(url)
+    if not scope:
+        return False
+    parts = urlsplit(url).path.strip('/').split('/')
+    return len(parts[parts.index('job') + 1:]) == 1
+
+
+def breezy_posting_scope(url: str) -> tuple[str, str] | None:
+    p = urlsplit(url)
+    host = (p.hostname or '').casefold()
+    if (p.scheme != 'https' or p.username or p.password or p.port not in (None, 443)
+            or not re.fullmatch(r'[a-z0-9][a-z0-9-]*\.breezy\.hr', host)):
+        return None
+    match = re.fullmatch(r'/p/([a-f0-9]{12})(?:-[a-zA-Z0-9_-]+)?(?:/apply)?/?', p.path)
+    return (host, match.group(1)) if match else None
+
+
+def fetched_posting_scope_valid(url, result, employer_provenance=None):
+    """Additional fetched evidence required by the newly supported URL forms.
+
+    URL-derived identifiers and discovery hints cannot license new trust.
+    Existing long-form Workday keys retain their historical representation.
+    """
+    host = (urlsplit(url).hostname or '').casefold()
+    if (host == 'breezy.hr' or host.endswith('.breezy.hr')) and not breezy_posting_scope(url):
+        return False
+    if is_short_workday_posting(url) or breezy_posting_scope(url):
+        explicit_ids = {v.casefold() for k, v in parse_qsl(urlsplit(url).query)
+                        if k.casefold() in JOB_ID_QUERY_PARAMETERS and v}
+        if explicit_ids and explicit_ids != {str(result.resolved_job_id or '').casefold()}:
+            return False
+    if is_short_workday_posting(url):
+        scope = workday_posting_scope(url)
+        req = str(result.resolved_job_id or '')
+        return bool(req and result.resolved_job_id_source in {
+            'jobposting_json_ld', 'workday_posting_api',
+        } and re.search(r'_' + re.escape(req) + r'(?:-\d+)?$', scope[2], re.I))
+    scope = breezy_posting_scope(url)
+    if scope:
+        from src.enrichment.job_identity import normalize_company_name
+        proof = employer_provenance or {}
+        return bool(result.resolved_job_id == scope[1]
+                    and result.resolved_job_id_source == 'breezy_embedded_position'
+                    and proof.get('company') == normalize_company_name(result.resolved_company)
+                    and urlsplit(proof.get('careers_url', '')).hostname == scope[0]
+                    and proof.get('basis') in {
+                        'fetched_corporate_brand_and_published_careers_link',
+                        'fetched_reciprocal_employer_careers_link',
+                        'previously_verified_employer',
+                    })
+    return True
+
+
 def is_specific_job_posting_url(value: str | None) -> bool:
     """Return true only when a URL appears to identify one posting."""
     normalized_url = normalize_official_url(value)
@@ -265,6 +335,10 @@ def is_specific_job_posting_url(value: str | None) -> bool:
     parsed = urlsplit(normalized_url)
     hostname = (parsed.hostname or "").casefold()
     path = parsed.path or "/"
+    if hostname == 'breezy.hr' or hostname.endswith('.breezy.hr'):
+        return breezy_posting_scope(normalized_url) is not None
+    if is_short_workday_posting(normalized_url):
+        return bool(re.search(r'_(?:JR|REQ|R|J)[-_]?\d+(?:-\d+)?$', path, re.I))
     query = {
         key.casefold(): query_value
         for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
@@ -329,6 +403,15 @@ def verified_posting_key_from_url(value: str | None) -> str:
 
     parsed = urlsplit(normalized_url)
     hostname = (parsed.hostname or "").casefold()
+    breezy = breezy_posting_scope(normalized_url)
+    if breezy:
+        return f"breezy:{breezy[0]}:{breezy[1]}"
+    if hostname == 'breezy.hr' or hostname.endswith('.breezy.hr'):
+        return ''
+    if is_short_workday_posting(normalized_url):
+        scope = workday_posting_scope(normalized_url)
+        return (f"workday:{scope[0]}:{scope[1]}:{scope[2]}"
+                if is_specific_job_posting_url(normalized_url) else '')
     query = {
         key.casefold(): query_value
         for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
@@ -389,6 +472,9 @@ def is_known_official_or_ats_url(value: str | None) -> bool:
     normalized_url = normalize_official_url(value)
     if not normalized_url:
         return False
+    if is_short_workday_posting(normalized_url) or breezy_posting_scope(normalized_url):
+        # These forms require fresh fetched identity, not URL-only admission.
+        return False
 
     hostname = (urlsplit(normalized_url).hostname or "").casefold()
     return any(marker in hostname for marker in KNOWN_OFFICIAL_HOST_MARKERS)
@@ -402,3 +488,41 @@ def description_hash(value: str | None) -> str:
         return ""
 
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def posting_urls_equivalent(left: str, right: str, requisition: str | None = None) -> bool:
+    """Reconcile explicit URL identity/locale aliases without changing old keys.
+
+    An identical title or requisition number on an unrelated host is not proof.
+    Workday may omit its location segment, but tenant/site and JR suffix must
+    still agree. Different UUIDs on employer pages remain conflicting.
+    """
+    a, b = urlsplit(normalize_official_url(left)), urlsplit(normalize_official_url(right))
+    if not a.hostname or a.hostname != b.hostname:
+        return False
+    def parts(p):
+        values = p.path.strip('/').split('/')
+        if values and re.fullmatch(r'[a-z]{2}(?:-[a-z]{2})?', values[0], re.I):
+            values = values[1:]
+        return values
+    ap, bp = parts(a), parts(b)
+    if ap == bp and a.query == b.query:
+        return True
+    host = a.hostname
+    if host.endswith(('.myworkdayjobs.com', '.myworkdaysite.com', '.workdayjobs.com')):
+        return bool(requisition and len(ap) >= 3 and len(bp) >= 3
+                    and ap[:2] == bp[:2] and ap[1] == 'job'
+                    and ap[-1] == bp[-1]
+                    and re.search(r'_' + re.escape(requisition) + r'(?:-\d+)?$', ap[-1], re.I)
+                    and a.query == b.query)
+    ka, kb = verified_posting_key_from_url(left), verified_posting_key_from_url(right)
+    return bool(ka and ka == kb)
+
+
+def url_requisition_ids(url: str) -> set[str]:
+    """Only explicit requisition/job parameters and JR suffixes, not content IDs."""
+    p = urlsplit(url)
+    ids = {v.strip().casefold() for k, v in parse_qsl(p.query)
+           if k.casefold() in JOB_ID_QUERY_PARAMETERS and v.strip()}
+    ids.update(m.casefold() for m in re.findall(r'(?:_|/)(JR[-_]\d+)(?:/|$)', p.path, re.I))
+    return ids

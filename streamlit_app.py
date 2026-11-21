@@ -568,11 +568,24 @@ with st.sidebar:
         step=5,
     )
     enrichment_limit = st.number_input(
-        "Descriptions to enrich",
+        "Enrichment / employer lookup batch",
         min_value=1,
         max_value=100,
         value=DEFAULT_ENRICHMENT_LIMIT,
         step=5,
+    )
+    recent_hidden_recovery = st.checkbox(
+        "Recover hidden jobs discovered in the past five days", value=False,
+        help="Only postings first discovered in the last 120 hours and absent from the All view. Older backlog is excluded.",
+    )
+    retry_deferred_lookups = st.checkbox(
+        "Include eligible deferred employer lookups", value=True,
+        help="Shares the batch limit with fresh work. Seven-day cooldowns and identity checks remain enforced.",
+    )
+    enrichment_search_budget = st.number_input(
+        "Maximum search provider requests", min_value=0, max_value=100,
+        value=25, step=1,
+        help="Hard limit per workflow, including failed and fallback searches. ATS/page fetches are separate.",
     )
     backlog_status_placeholder = st.empty()
     backlog_status = render_scoring_backlog_status(
@@ -809,6 +822,8 @@ if uploaded_file and score_uploaded_clicked:
 
 ingestion_succeeded = True
 enrichment_succeeded = True
+enrichment_result = None
+recovery_activity_keys = () if recent_hidden_recovery else None
 
 if run_ingestion_clicked or run_daily_clicked:
     ingestion_succeeded = False
@@ -850,16 +865,26 @@ if enrich_descriptions_clicked or (run_daily_clicked and ingestion_succeeded):
                 limit=int(enrichment_limit),
                 minimum_words=80,
                 resume_hash=st.session_state.get("resume_hash"),
+                retry_failed=retry_deferred_lookups,
+                search_request_limit=int(enrichment_search_budget),
+                recent_hidden_days=5 if recent_hidden_recovery else None,
             )
+            recovery_activity_keys = enrichment_result.recovery_record_keys
+            actionability_requested = True
             if enrichment_result.jobs_processed:
                 invalidate_data(st.session_state, "enrichment changed metadata")
             st.write(f"Jobs selected: {enrichment_result.jobs_selected}")
             st.write(f"Jobs processed: {enrichment_result.jobs_processed}")
             st.write(
-                "Eligible for enrichment: "
+                "Runnable enrichment / employer lookups: "
                 f"{enrichment_result.eligible_for_enrichment}"
             )
-            st.write(f"Never attempted: {enrichment_result.never_attempted}")
+            st.write(f"Fresh descriptions: {enrichment_result.never_attempted}")
+            st.write(f"Eligible deferred retries: {enrichment_result.previously_attempted}")
+            st.write(f"Search requests: {enrichment_result.search_requests}/{enrichment_result.search_request_limit}")
+            st.write(f"Search circuit: {enrichment_result.search_circuit}")
+            if enrichment_result.queue_statistics:
+                st.write(enrichment_result.queue_statistics)
             st.write(
                 "Needs official lookup: "
                 f"{enrichment_result.needs_official_resolution}"
@@ -910,6 +935,11 @@ if resume_preparation_succeeded and (
                 resume_hash=st.session_state.get("resume_hash"),
                 limit=int(daily_score_limit),
                 minimum_rule_score=int(daily_minimum_rule_score),
+                recent_hidden_days=5 if recent_hidden_recovery else None,
+                enrichment_summary=enrichment_result,
+                enrichment_limit=int(enrichment_limit),
+                retry_failed=retry_deferred_lookups,
+                search_request_limit=int(enrichment_search_budget),
                 workflow=(
                     "ingest_enrich_score"
                     if run_daily_clicked
@@ -920,6 +950,7 @@ if resume_preparation_succeeded and (
                     or st.session_state.get("resume_hash") != backlog_result.resume_hash):
                 invalidate_data(st.session_state, "scoring/enrichment/resume changed")
             actionability_requested = True
+            recovery_activity_keys = backlog_result.recovery_record_keys
             st.session_state["resume_hash"] = backlog_result.resume_hash
             st.write(f"Already cached job scores: {backlog_result.already_scored}")
             st.write(f"Jobs selected for scoring: {backlog_result.candidates_selected}")
@@ -946,9 +977,30 @@ render_persisted_scoring_log(
     st.session_state.get("resume_hash")
 )
 
-jobs_tab, operations_tab = st.tabs(
+# A manual posting check first resolves missing trusted identities using the
+# SAME bounded queue, then reloads saved metadata before checking activity.
+if check_current_postings_clicked and enrichment_result is None:
+    try:
+        with st.spinner("Resolving eligible employer identities before activity checks…"):
+            enrichment_result = run_description_enrichment(
+                limit=int(enrichment_limit), resume_hash=st.session_state.get("resume_hash"),
+                retry_failed=retry_deferred_lookups,
+                search_request_limit=int(enrichment_search_budget), actionability_only=True,
+                recent_hidden_days=5 if recent_hidden_recovery else None,
+            )
+        recovery_activity_keys = enrichment_result.recovery_record_keys
+        if enrichment_result.jobs_processed:
+            invalidate_data(st.session_state, "employer lookup before activity checks")
+        st.caption(f"Employer lookups processed: {enrichment_result.jobs_processed}; "
+                   f"search requests: {enrichment_result.search_requests}/{enrichment_result.search_request_limit}")
+    except DailyWorkflowError:
+        invalidate_data(st.session_state, "employer lookup error; possible partial writes")
+        st.warning("Employer lookups could not complete. Unresolved postings remain unconfirmed.")
+
+jobs_tab, pending_verification_tab, operations_tab = st.tabs(
     [
         "Jobs",
+        "Pending Verification",
         "Operations",
     ]
 )
@@ -974,7 +1026,9 @@ with jobs_tab:
         if actionability_requested or check_current_postings_clicked:
             try:
                 with st.spinner("Checking current posting actionability…"):
-                    actionability_metrics = refresh_daily(all_jobs)
+                    activity_jobs = (all_jobs if recovery_activity_keys is None else
+                        [job for job in all_jobs if job["record_key"] in recovery_activity_keys])
+                    actionability_metrics = refresh_daily(activity_jobs)
                 if actionability_metrics["checks"]:
                     actionability_saved(st.session_state)
                     all_jobs = display_snapshot(st.session_state)
@@ -1400,6 +1454,29 @@ with jobs_tab:
     for job in page.items:
         render_job_listing(job)
 
+with pending_verification_tab:
+    st.subheader("Pending Verification")
+    if not st.session_state["show_saved_jobs"]:
+        st.info("Choose Show saved jobs to load pending discovery listings.")
+    else:
+        from datetime import datetime, timezone
+        from src.ui.pending_verification import pending_verification_rows, render_pending_verification
+        pending_days = st.number_input("Discovery window (days)", min_value=1, max_value=30, value=5,
+                                      help="Uses first discovery across proven posting aliases, not the last enrichment attempt.")
+        pending_now = datetime.now(timezone.utc)
+        pending_key = (st.session_state.get("jobs_snapshot_version", 0), int(pending_days),
+                       pending_now.replace(minute=0, second=0, microsecond=0))
+        pending_cached = st.session_state.get("pending_verification_snapshot")
+        if pending_cached is None or pending_cached["key"] != pending_key:
+            pending_cached = {"key": pending_key, "as_of": pending_now,
+                "rows": pending_verification_rows(st.session_state.get("jobs_snapshot", []),
+                                                  all_jobs, days=int(pending_days), now=pending_now)}
+            st.session_state["pending_verification_snapshot"] = pending_cached
+        st.caption("Rolling discovery window as of " + pending_cached["as_of"].isoformat() +
+                   ". Refresh saved jobs to reload persisted verification results.")
+        render_pending_verification(st, pending_cached["rows"])
+
+
 with operations_tab:
     if not st.session_state["show_saved_jobs"]:
         st.info("Choose Show saved jobs to load pipeline diagnostics.")
@@ -1438,6 +1515,41 @@ with operations_tab:
         attempt_cols[2].metric("Blocked", attempts.get("blocked", 0))
         attempt_cols[3].metric("No description", attempts.get("no_description", 0))
         attempt_cols[4].metric("Fetch errors", attempts.get("fetch_error", 0))
+
+        st.subheader("Runnable enrichment and employer verification")
+        from src.ui.daily_workflow_service import load_daily_enrichment_plan
+        queue_key = (st.session_state.get("resume_hash"),
+                     st.session_state.get("dataset_version", 0), int(enrichment_limit),
+                     retry_deferred_lookups, recent_hidden_recovery, date.today())
+        cached_queue = st.session_state.get("daily_enrichment_queue")
+        try:
+            if cached_queue is None or cached_queue["key"] != queue_key:
+                _, queue_stats = load_daily_enrichment_plan(
+                    limit=int(enrichment_limit), resume_hash=st.session_state.get("resume_hash"),
+                    retry_failed=retry_deferred_lookups,
+                    recent_hidden_days=5 if recent_hidden_recovery else None,
+                )
+                cached_queue = {"key": queue_key, "statistics": queue_stats}
+                st.session_state["daily_enrichment_queue"] = cached_queue
+            queue_stats = cached_queue["statistics"]
+            if recent_hidden_recovery:
+                st.caption(f"Discovery window: {queue_stats['recovery_cutoff']} through {queue_stats['recovery_as_of']}")
+                st.dataframe([{"Source": source, **counts} for source, counts in
+                              queue_stats['recovery_by_source'].items()], hide_index=True)
+            st.write({name: queue_stats[name] for name in (
+                "fresh_description", "eligible_deferred_retries", "employer_verification_pending",
+                "full_jd_employer_pending", "fit_recommended_employer_pending", "cooldown",
+                "excluded", "retry_disabled", "runnable", "selected")})
+            st.caption("Counts overlap; eligible retries include employer-only work. "
+                       "Selection shares one batch limit; pending verification is not a visible or active posting.")
+            st.dataframe([
+                {"Source": source,
+                 "Pending employer identity (all New)": queue_stats['pending_employer_all_new_by_source'][source],
+                 "Eligible-role pending verification": count}
+                for source, count in queue_stats["pending_employer_by_source"].items()
+            ], hide_index=True)
+        except Exception:
+            st.caption("Runnable queue diagnostics unavailable; ingest jobs and refresh the saved view.")
 
         st.caption(
             "Use the sidebar daily run controls to ingest email folders "

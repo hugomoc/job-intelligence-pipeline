@@ -14,10 +14,12 @@ from src.drain_scoring_backlog import drain_scores
 from src.retry_targeted_enrichment import probe_search, load_targeted_queue
 from src import retry_targeted_enrichment as retry_module
 from src.ai.resume_matcher import ResumeMatcherError
+from src.test_daily_workflow_service import disposable_enrichment_database
 
 
 def job(**kw):
     j=dict(record_key='new',exact_posting_key='linkedin|1',canonical_job_key='linkedin|1',
+           source='linkedin',current_word_count=0,description_state='NEEDS_ENRICHMENT',
            title='Data Engineer',company_name='Company',application_status='new',
            title_classification='STRONG_MATCH',raw_description_word_count=0,
            description=None,attempt_count=0,previous_status=None,critical_skill_gaps=[],
@@ -36,14 +38,15 @@ def test_first_attempt_and_priority():
 
 
 def test_daily_first_attempt_precedes_old_retries():
-    fresh = job(record_key='fresh',rule_score=0)
-    old = job(record_key='old',attempt_count=3,previous_status='blocked',rule_score=100)
+    fresh = job(record_key='fresh',exact_posting_key='linkedin|fresh',rule_score=0)
+    old = job(record_key='old',exact_posting_key='linkedin|old',attempt_count=3,previous_status='blocked',rule_score=100)
     observed=[]
     summary=SimpleNamespace(jobs_processed=1,descriptions_updated=0,
         totals=dict(enriched=0,blocked=1,no_description=0,fetch_error=0,invalid_url=0,not_improved=0),
         stopped_for_time_budget=False,elapsed_seconds=0,log_lines=())
     def process(**kw):observed.extend(kw['jobs']);return summary
     with patch.object(daily,'load_jobs_to_enrich',return_value=[old,fresh]), \
+         patch.object(daily,'load_verified_reuse_candidates',return_value=[]), \
          patch.object(daily,'create_http_client'), \
          patch.object(daily,'process_enrichment_batch',side_effect=process):
         daily.run_description_enrichment(limit=1,retry_failed=True,resume_hash="resume")
@@ -83,7 +86,7 @@ def test_review_filters():
     assert is_visible_for_review_filter(job(title='Senior Insights Analyst',admission_decision='include',has_current_complete_ai_assessment=False),'Needs review')
 
 
-def test_current_cache_and_stale_scoring():
+def _current_cache_and_stale_scoring():
     queue=[job(),job(record_key='verified-peer',canonical_job_key='linkedin|peer')];saved=[]
     def load():return queue[:]
     def save(**kw):saved.append(kw);queue.clear()
@@ -95,7 +98,12 @@ def test_current_cache_and_stale_scoring():
     assert report['scored']==0 and len(saved)==1
 
 
-def test_quota_and_probe_safety():
+def test_current_cache_and_stale_scoring():
+    with disposable_enrichment_database():
+        _current_cache_and_stale_scoring()
+
+
+def _quota_and_probe_safety():
     def quota(**kw):raise ResumeMatcherError('429 RESOURCE_EXHAUSTED quota exceeded')
     r=drain_scores('resume',loader=lambda:[job()],profile={'target_roles':['Data Engineer']},score=quota,
                    save=lambda **kw: (_ for _ in ()).throw(AssertionError()),delay=0,emit=lambda s:None)
@@ -104,6 +112,11 @@ def test_quota_and_probe_safety():
     def search(j,c):calls.append(j);raise TimeoutError('provider unavailable')
     healthy,probes=probe_search([job(),job(record_key='second')],None,search=search)
     assert not healthy and len(calls)==1 and len(probes)==1
+
+
+def test_quota_and_probe_safety():
+    with disposable_enrichment_database():
+        _quota_and_probe_safety()
 
 
 def test_public_search_page_health_and_challenge():

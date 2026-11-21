@@ -449,22 +449,22 @@ def needs_official_resolution(
 ) -> bool:
     status = official_status_value(job)
 
-    if status == OFFICIAL_FOUND_VERIFIED:
+    if status == OFFICIAL_FOUND_VERIFIED and not job.get("requires_trusted_posting_key"):
         return False
 
     if force:
         return True
 
-    if (
-        job.get("description_state") == "FULL_JD"
-        and not is_aggregator_job(job)
-    ):
-        return False
+    if (job.get("description_state") == "FULL_JD"
+            and not is_aggregator_job(job)
+            and not job.get("requires_trusted_posting_key")):
+        return False  # Legacy description-only callers; daily identity work is explicit.
 
     if not status:
         return True
 
-    if status not in OFFICIAL_RETRY_STATUSES:
+    if status not in OFFICIAL_RETRY_STATUSES and not (
+            status == OFFICIAL_FOUND_VERIFIED and job.get("requires_trusted_posting_key")):
         return True
 
     last_official_attempt = (
@@ -1100,6 +1100,9 @@ def prepare_verified_candidate_metadata_before_queue(
     """Run offline authoritative reuse and indexed fuzzy annotation."""
     started = time.monotonic()
     candidates = load_verified_reuse_candidates(minimum_words=minimum_words)
+    from src.enrichment.employer_careers import remember_verified_careers
+    for candidate in candidates:
+        remember_verified_careers(candidate)
     if timing is not None:
         timing["load_verified_candidates_ms"] = round(
             (time.monotonic() - started) * 1000, 1
@@ -1144,6 +1147,7 @@ def load_jobs_to_enrich(
     retry_official_search: bool = False,
     targeted_retry_only: bool = False,
     load_timing: dict[str, float] | None = None,
+    inventory_only: bool = False,
 ) -> list[dict[str, Any]]:
     # Use the exact existing Python selection/identity checks. This optional
     # SQL prefilter only removes records the targeted transient queue could
@@ -1384,11 +1388,12 @@ def load_jobs_to_enrich(
         )
     metadata_started = time.monotonic()
     candidate_phases = {} if load_timing is not None else None
-    prepare_verified_candidate_metadata_before_queue(
-        jobs=jobs,
-        minimum_words=minimum_words,
-        timing=candidate_phases,
-    )
+    if not inventory_only:
+        prepare_verified_candidate_metadata_before_queue(
+            jobs=jobs,
+            minimum_words=minimum_words,
+            timing=candidate_phases,
+        )
     if load_timing is not None:
         load_timing["verified_candidate_details"] = candidate_phases
         load_timing["prepare_candidate_metadata_ms"] = round(
@@ -1398,6 +1403,27 @@ def load_jobs_to_enrich(
 
     for job in jobs:
         job["description_state"] = description_state(job)
+
+    if inventory_only:
+        # Inventory/diagnostics must not perform authoritative-reuse writes or
+        # truncate before the daily selectors. Respect verified personal history
+        # and the active candidate's assessments, as the UI does.
+        from src.candidate_assessments import overlay_saved_scores
+        from src.repositories.recommendation_repository import (
+            automatic_statuses, has_current_complete_ai_score,
+        )
+        with get_connection() as connection:
+            if resume_hash:
+                overlay_saved_scores(connection, resume_hash, jobs)
+            statuses = automatic_statuses(connection)
+        for job in jobs:
+            job["application_status"] = statuses.get(job["record_key"], job["application_status"])
+            job["has_current_complete_ai_assessment"] = has_current_complete_ai_score(job)
+        if resume_hash:
+            # This attaches admission diagnostics to ALL records; the shared
+            # selector still excludes hard gaps and non-target titles.
+            apply_admission_gate(jobs, resume_hash, include_low_priority=True, keep_filtered_out=True)
+        return [job for job in jobs if not source or job["source"].casefold() == source.casefold()]
 
     if resume_hash:
         jobs = apply_admission_gate(
@@ -1703,6 +1729,14 @@ def process_enrichment_batch(
                 error=error,
             )
 
+        # Per-provider events survive failures, fallbacks and cache hits. Log one
+        # sanitized URL per line so the existing line limit cannot hide a result.
+        import json
+        for event in job.get("public_search_diagnostics", []):
+            metadata = {key: value for key, value in event.items() if key != "returned_urls"}
+            log("Search diagnostic: " + json.dumps(metadata))
+            for decision in event["returned_urls"]:
+                log("Search URL decision: " + json.dumps(decision))
         result = processed.result
         stored_status = processed.stored_status
         stored_error = processed.stored_error
@@ -1929,6 +1963,13 @@ def _validate_official_identity_for_save(
         raise ValueError("Verified official posting URL is malformed") from error
     if not key:
         raise ValueError("Verified official identity requires a specific official posting URL")
+    from src.verified_posting_identity import fetched_posting_scope_valid
+    from src.enrichment.employer_careers import remember_verified_careers
+    proof = resolution.employer_provenance or job.get('employer_careers_provenance')
+    if not proof and stored_verified_key_is_trusted(job):
+        proof = remember_verified_careers(job)
+    if result.status == 'enriched' and not fetched_posting_scope_valid(url, result, proof):
+        raise ValueError('Fetched posting requisition/tenant or employer provenance is missing or conflicting')
 
     validations = (identity_validation, resolution.identity_validation)
     if any(validation is not None and not validation.accepted for validation in validations):
@@ -2516,6 +2557,7 @@ def process_enrichment_job(
     """Fetch/validate a description, falling back to official pages if needed."""
     # Run-local only: diagnostics never become identity evidence or AI input.
     job["enrichment_timing"] = {}
+    job["public_search_diagnostics"] = []
     needs_description = bool(
         job.get(
             "needs_description_enrichment",

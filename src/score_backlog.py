@@ -110,6 +110,7 @@ def score_backlog(
     resume_hash: str | None,
     limit: int,
     minimum_rule_score: int,
+    record_keys: tuple[str, ...] | None = None,
 ) -> BacklogSummary:
     """Run eligibility screening and full scoring for a batch of jobs."""
     initialize_ai_tables()
@@ -182,6 +183,7 @@ def score_backlog(
         resume_profile=resume_profile,
         limit=limit,
         model_name=model_name,
+        **({"record_keys": record_keys} if record_keys is not None else {}),
     )
 
     if screening_summary.screened:
@@ -199,6 +201,7 @@ def score_backlog(
         minimum_rule_score=minimum_rule_score,
         prompt_version=MATCHER_PROMPT_VERSION,
         reuse_any_model=True,
+        **({"record_keys": record_keys} if record_keys is not None else {}),
     )
 
     scores_saved = 0

@@ -264,6 +264,7 @@ class SearchTests(unittest.TestCase):
             raise AssertionError(str(request.url))
         with patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-tavily'}), \
              patch.object(resolver, 'discover_ats_candidates', return_value=[]), \
+             patch('src.enrichment.employer_careers.discover_employer_candidates', return_value=[]), \
              httpx.Client(transport=httpx.MockTransport(handle)) as client:
             job = dict(lensa_job(), title='Medical Analytics Data Engineer',
                        company_name='Pfizer')

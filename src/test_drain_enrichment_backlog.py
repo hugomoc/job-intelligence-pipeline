@@ -27,6 +27,11 @@ def result(status='no_description', updated=False, official=None):
 
 class DrainTests(unittest.TestCase):
     def setUp(self):
+        # Circuit tests isolate search behavior; employer discovery has its own
+        # bounded, transport-mocked integration tests.
+        careers = patch('src.enrichment.employer_careers.discover_employer_candidates', return_value=[])
+        careers.start()
+        self.addCleanup(careers.stop)
         metadata = patch.object(drain, 'prepare_verified_candidate_metadata_before_queue',
                                 return_value={'offline_reused': 0})
         metadata.start()

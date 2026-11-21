@@ -1561,7 +1561,8 @@ def load_all_jobs(
             ),
 
             jobs AS (
-                SELECT *
+                SELECT *, min(discovered_at) OVER (PARTITION BY canonical_job_key)
+                    AS first_discovered_at
                 FROM raw_jobs_with_identity
                 QUALIFY ROW_NUMBER() OVER (
                     PARTITION BY canonical_job_key
@@ -1840,6 +1841,7 @@ def load_all_jobs(
                 jobs.posted_age_text,
                 jobs.email_date,
                 jobs.discovered_at,
+                jobs.first_discovered_at,
                 jobs.description_updated_at,
                 CASE
                     WHEN jobs.description IS NOT NULL
@@ -2662,6 +2664,7 @@ def load_candidate_jobs(
     minimum_rule_score: int,
     prompt_version: str = MATCHER_PROMPT_VERSION,
     reuse_any_model: bool = False,
+    record_keys: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     """Load jobs eligible for AI scoring for a resume."""
     initialize_job_eligibility_table()
@@ -2949,6 +2952,7 @@ def load_candidate_jobs(
                             AND legacy_eligibility.decision = 'exclude'
                       )
                   )
+                {recovery_scope}
             )
 
             SELECT
@@ -2978,6 +2982,7 @@ def load_candidate_jobs(
                 company_name,
                 record_key
             """.format(
+                recovery_scope=("AND jobs.record_key IN (SELECT unnest(?))" if record_keys is not None else ""),
                 excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
                 trusted_verified_key_sources=TRUSTED_VERIFIED_KEY_SOURCES_SQL,
                 trusted_verified_key_trust=VERIFIED_KEY_TRUST_TRUSTED,
@@ -2996,7 +3001,7 @@ def load_candidate_jobs(
                 minimum_rule_score,
                 EXCLUDED_TITLE_SQL_REGEX,
                 resume_hash,
-            ],
+            ] + ([list(record_keys)] if record_keys is not None else []),
         )
 
         columns = [description[0] for description in cursor.description]
@@ -3295,6 +3300,7 @@ def load_unscreened_job_eligibility_candidates(
     resume_hash: str,
     limit: int,
     prompt_version: str = ELIGIBILITY_PROMPT_VERSION,
+    record_keys: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     """Load one representative raw row per canonical job for AI screening."""
     initialize_job_eligibility_table()
@@ -3427,6 +3433,7 @@ def load_unscreened_job_eligibility_candidates(
                       latest_application_status.status,
                       'new'
                   ) = 'new'
+                {recovery_scope}
             )
 
             SELECT
@@ -3450,13 +3457,14 @@ def load_unscreened_job_eligibility_candidates(
                 company_name,
                 record_key
             """.format(
+                recovery_scope=("AND jobs.record_key IN (SELECT unnest(?))" if record_keys is not None else ""),
                 excluded_job_sources=EXCLUDED_JOB_SOURCES_SQL,
             ),
             [
                 resume_hash,
                 prompt_version,
                 EXCLUDED_TITLE_SQL_REGEX,
-            ],
+            ] + ([list(record_keys)] if record_keys is not None else []),
         )
 
         columns = [description[0] for description in cursor.description]

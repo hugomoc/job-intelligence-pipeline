@@ -220,6 +220,7 @@ def run_partial_daily_batch() -> EnrichmentSummary:
             current_word_count=2,
             application_status="new",
             attempt_count=1,
+            previous_attempted_at=datetime(2026, 10, 1 if key == "unsafe" else 2, tzinfo=timezone.utc),
             previous_status="blocked",
             official_url_status="SEARCH_DEFERRED",
             needs_description_enrichment=True,
@@ -341,7 +342,8 @@ def test_streamlit_renders_partial_enrichment_diagnostics() -> None:
         summary = run_partial_daily_batch()
     metrics = recommendation_repository.reviewable_job_metrics([])
     metrics.update(raw_jobs=0, exact_postings=0, enrichment_attempts={})
-    with patch.object(daily_workflow_service, "run_description_enrichment", return_value=summary), \
+    with disposable_enrichment_database(), \
+         patch.object(daily_workflow_service, "run_description_enrichment", return_value=summary), \
          patch.object(daily_workflow_service, "load_scoring_backlog_status",
                       return_value=ScoringBacklogStatus("test-resume", 0, 0, ())), \
          patch.object(recommendation_repository, "load_all_jobs", return_value=[]), \
@@ -361,6 +363,67 @@ def test_streamlit_renders_partial_enrichment_diagnostics() -> None:
         assert app.session_state["show_saved_jobs"] is True
 
 
+def test_daily_careers_cache_seed_reuses_one_trusted_candidate_load() -> None:
+    from copy import deepcopy
+    from src.enrichment.employer_careers import CAREERS_CACHE
+
+    job = dict(record_key='new', title='Data Engineer', company_name='Acme')
+    original = deepcopy(job)
+    url = 'https://careers.acme.com/jobs/123'
+    trusted = dict(company_name='Acme', official_resolved_company='Acme Inc',
+        official_url_status='FOUND_VERIFIED', official_job_url=url,
+        verified_posting_key='official-url:' + url,
+        verified_posting_key_source='official_found_verified',
+        verified_posting_key_trust='trusted')
+    untrusted = dict(trusted, company_name='Other', official_resolved_company='Other',
+                     verified_posting_key_trust=None)
+    candidates = [trusted, untrusted]
+    stats = dict(runnable=1, fresh_description=0, eligible_deferred_retries=0,
+                 employer_verification_pending=1)
+    batch = enrich_jobs.EnrichmentBatchSummary(1, 0, 0,
+        dict(enriched=0, blocked=0, no_description=0, fetch_error=0,
+             invalid_url=0, not_improved=0), False, 0, ())
+
+    def annotated(jobs, loaded):
+        assert loaded is candidates
+        assert list(CAREERS_CACHE) == ['acme']
+        assert CAREERS_CACHE['acme'][1]['basis'] == 'previously_verified_employer'
+        assert jobs == [original]  # Careers proof cannot become this job's identity.
+
+    def processed(**kwargs):
+        assert 'acme' in CAREERS_CACHE
+        assert job == original
+        return batch
+
+    with patch.dict(CAREERS_CACHE, {}, clear=True), \
+         patch.object(daily_workflow_service, 'load_daily_enrichment_plan', return_value=([job], stats)), \
+         patch.object(daily_workflow_service, 'load_verified_reuse_candidates', return_value=candidates) as load, \
+         patch.object(daily_workflow_service, 'annotate_known_official_candidates', side_effect=annotated) as annotate, \
+         patch.object(daily_workflow_service, 'process_enrichment_batch', side_effect=processed), \
+         patch.object(daily_workflow_service, 'create_http_client', return_value=httpx.Client(
+             transport=httpx.MockTransport(lambda request: (_ for _ in ()).throw(AssertionError('No network'))))):
+        result = daily_workflow_service.run_description_enrichment(1, resume_hash='fixture')
+        load.assert_called_once_with(minimum_words=80)
+        annotate.assert_called_once()
+        assert result.search_requests == 0
+        assert job == original
+
+
+def test_empty_daily_queue_does_not_load_careers_history() -> None:
+    stats = dict(runnable=0, fresh_description=0, eligible_deferred_retries=0,
+                 employer_verification_pending=0)
+    batch = enrich_jobs.EnrichmentBatchSummary(0, 0, 0,
+        dict(enriched=0, blocked=0, no_description=0, fetch_error=0,
+             invalid_url=0, not_improved=0), False, 0, ())
+    with patch.object(daily_workflow_service, 'load_daily_enrichment_plan', return_value=([], stats)), \
+         patch.object(daily_workflow_service, 'load_verified_reuse_candidates') as load, \
+         patch.object(daily_workflow_service, 'process_enrichment_batch', return_value=batch), \
+         patch.object(daily_workflow_service, 'create_http_client', return_value=httpx.Client(
+             transport=httpx.MockTransport(lambda request: (_ for _ in ()).throw(AssertionError('No network'))))):
+        daily_workflow_service.run_description_enrichment(1, resume_hash='fixture')
+        load.assert_not_called()
+
+
 def main() -> None:
     test_resume_profile_cache_survives_scoring_model_change()
     test_automatic_enrichment_limit_uses_shared_default()
@@ -370,6 +433,8 @@ def main() -> None:
     test_daily_workflow_completes_after_real_guard_rejection()
     test_orchestration_failure_still_has_generic_error()
     test_streamlit_renders_partial_enrichment_diagnostics()
+    test_daily_careers_cache_seed_reuses_one_trusted_candidate_load()
+    test_empty_daily_queue_does_not_load_careers_history()
     print("Daily workflow service tests passed.")
 
 
