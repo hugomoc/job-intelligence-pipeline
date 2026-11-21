@@ -121,6 +121,106 @@ class Tests(unittest.TestCase):
         for url in ('https://127.0.0.1/', 'http://example.com/', 'https://user:pass@example.com/', 'https://host.local/'):
             self.assertFalse(careers.public_https_url(url))
 
+    def test_invalid_employer_hostname_rejected_before_dispatch(self):
+        job = original() | {'company_name': 'Tech Ladies®'}
+        bad = 'https://techladies®.com/'
+        self.assertEqual(careers.corporate_roots(job['company_name']), [])
+        self.assertFalse(careers.public_https_url(bad))
+        with self.client({}) as client:
+            trace = []
+            pages = careers.PublicPages(client, trace)
+            self.assertIsNone(pages.get(bad))
+            self.assertEqual(pages.attempts, 0)
+            self.assertEqual(trace[-1]['reason'], 'unsafe_public_url')
+            self.assertEqual(careers.discover_employer_candidates(job, client), [])
+            self.assertEqual(self.requests, [])
+        self.assertEqual(job['company_name'], 'Tech Ladies®')
+
+    def test_invalid_lead_does_not_prevent_valid_employer_discovery(self):
+        with self.client(self.pages()) as client:
+            candidates = careers.discover_employer_candidates(original(), client,
+                corporate_leads=['https://techladies®.com/', CORP])
+            self.assertEqual([candidate.url for candidate in candidates], [POST])
+            self.assertEqual(self.requests[:3], [CORP, CAREERS, SEARCH])
+            self.assertEqual(candidates[0].employer_provenance['corporate_url'], CORP)
+
+    def test_invalid_guesses_preserve_search_fallback_and_request_budget(self):
+        import os
+        from src.enrichment.public_search import SearchRequestBudget, TAVILY_URL
+
+        for maximum, expected in [(1, 'OFFICIAL_NOT_FOUND'), (0, 'SEARCH_DEFERRED')]:
+            with self.subTest(maximum=maximum):
+                job = original() | {'company_name': 'Tech Ladies®'}
+                with self.client({TAVILY_URL: httpx.Response(200, json={'results': []})}) as client, \
+                     patch.dict(os.environ, {'TAVILY_API_KEY': 'mock-key', 'SERPER_API_KEY': '',
+                                             'PUBLIC_SEARCH_PROVIDER': 'tavily'}), \
+                     patch.object(resolver, 'discover_ats_candidates', return_value=[]) as ats:
+                    client.search_request_budget = SearchRequestBudget(maximum)
+                    result = resolver.resolve_official_job(job, client, resolver.PublicSearchCircuit())
+                    self.assertEqual(result.status, expected)
+                    self.assertIsNone(result.official_job_url)
+                    ats.assert_called_once_with(job=job, client=client)
+                    self.assertEqual(client.search_request_budget.attempted, maximum)
+                    self.assertEqual(self.requests, [TAVILY_URL] if maximum else [])
+
+    def test_valid_domains_and_supported_idna_remain_usable(self):
+        self.assertEqual(careers.corporate_roots('Example Widget'), [CORP])
+        for url in (CORP, CAREERS, 'https://examplewidget.com:443/',
+                    'https://bücher.example/', 'https://xn--bcher-kva.example/'):
+            with self.subTest(url=url):
+                self.assertTrue(careers.public_https_url(url))
+                with self.client({str(httpx.URL(url)): 'ok'}) as client:
+                    self.assertIsNotNone(careers.PublicPages(client, []).get(url))
+                    self.assertEqual(self.requests, [str(httpx.URL(url))])
+
+    def test_invalid_and_unsafe_urls_never_reach_transport(self):
+        urls = ('http://example.com/', 'ftp://example.com/', 'https://bad..example.com/',
+                'https://bad_name.example.com/', 'https://-bad.example.com/',
+                'https://bad-.example.com/', 'https://techladies®.com/',
+                'https://[broken/', 'https://127.0.0.1/', 'https://[::1]/',
+                'https://169.254.169.254/', 'https://10.0.0.1/',
+                'https://host.local/', 'https://host.internal/', 'https://localhost/',
+                'https://user:pass@example.com/', 'https://example.com:444/')
+        with self.client({}) as client:
+            for url in urls:
+                with self.subTest(url=url):
+                    self.assertFalse(careers.public_https_url(url))
+                    self.assertIsNone(careers.PublicPages(client, []).get(url))
+            self.assertEqual(self.requests, [])
+
+    def test_redirects_cannot_reach_invalid_or_unsafe_destinations(self):
+        for target_url in ('https://techladies®.com/', 'https://bad_name.example.com/',
+                           'https://127.0.0.1/', 'http://example.com/',
+                           'https://user:pass@example.com/', 'https://example.com:444/'):
+            with self.subTest(target_url=target_url):
+                with self.client({CORP: httpx.Response(302, headers={'location': target_url.encode('utf-8')})}) as client:
+                    self.assertIsNone(careers.PublicPages(client, []).get(CORP))
+                    self.assertEqual(self.requests, [CORP])
+
+    def test_client_invalid_url_is_contained_but_unrelated_errors_propagate(self):
+        with self.client({}) as client, patch.object(client, 'get', side_effect=httpx.InvalidURL('invalid URL')):
+            trace = []
+            self.assertIsNone(careers.PublicPages(client, trace).get(CORP))
+            self.assertEqual(trace[-1]['reason'], 'InvalidURL')
+        with self.client({}) as client, patch.object(client, 'get', side_effect=RuntimeError('unrelated bug')):
+            with self.assertRaisesRegex(RuntimeError, 'unrelated bug'):
+                careers.PublicPages(client, []).get(CORP)
+
+    def test_invalid_guess_fallback_does_not_verify_mismatch_or_careers_homepage(self):
+        for url, html in [(POST, posting(company='Unrelated Employer')),
+                          (CAREERS, '<title>Example Widget Careers</title>')]:
+            with self.subTest(url=url):
+                job = original() | {'company_name': 'Tech Ladies®'}
+                candidate = resolver.OfficialJobCandidate(url, 'Data Engineer', 'search')
+                with self.client({url: html}) as client, \
+                     patch.object(resolver, 'discover_ats_candidates', return_value=[]), \
+                     patch.object(resolver, 'search_candidates', return_value=[candidate]) as fallback, \
+                     patch.object(resolver, 'fetch_dynamic_job_description', return_value=None):
+                    result = resolver.resolve_official_job(job, client)
+                fallback.assert_called_once_with(job, client)
+                self.assertNotEqual(result.status, 'FOUND_VERIFIED')
+                self.assertIsNone(result.official_job_url)
+
     def test_application_bad_evidence_and_missing_provenance(self):
         for changes, html in [({}, target(req='999')), ({}, target(role='Sales Manager')),
                               ({}, target(backlink='https://other.com/')), ({}, target(controls=False)),

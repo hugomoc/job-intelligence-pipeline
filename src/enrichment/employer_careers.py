@@ -34,11 +34,16 @@ def public_https_url(url):
                 or p.password or p.port not in (None, 443)
                 or host.endswith(('.local', '.localhost', '.internal'))):
             return False
+        # Use the transport's IDNA parsing, then the existing ATS DNS-label rule.
+        host = httpx.URL(url).raw_host.decode('ascii').rstrip('.').lower()
+        if any(not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?', label)
+               for label in host.split('.')):
+            return False
         try:
             return ipaddress.ip_address(host).is_global
         except ValueError:
             return True
-    except ValueError:
+    except (ValueError, httpx.InvalidURL):
         return False
 
 
@@ -75,7 +80,7 @@ class PublicPages:
                 try:
                     response = self.client.get(url, timeout=8, follow_redirects=False)
                     event['http_status'] = response.status_code
-                except httpx.RequestError as error:
+                except (httpx.RequestError, httpx.InvalidURL) as error:
                     event['reason'] = type(error).__name__
                     if isinstance(error, httpx.ConnectError):
                         if len(self.failures) >= 64:
@@ -98,7 +103,8 @@ def corporate_roots(company):
     # A shortened two-word brand is a probe, subject to the same fetched proof.
     if len(tokens) > 2:
         slugs.append(''.join(tokens[:2]))
-    return ['https://' + s + '.com/' for s in dict.fromkeys(slugs)]
+    roots = ['https://' + s + '.com/' for s in dict.fromkeys(slugs)]
+    return [url for url in roots if public_https_url(url)]
 
 
 def corporate_brand_matches(html, company, url):
