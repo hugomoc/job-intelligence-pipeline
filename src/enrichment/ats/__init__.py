@@ -66,6 +66,19 @@ def discover_ats_candidates(
 
     discovered: list[OfficialJobCandidate] = []
 
+    # Employer-first discovery has already queried the published recruitment
+    # path. Once its platform is established, guessing unrelated ATS tenants is
+    # redundant; preserve public-search fallback for missing positions.
+    from src.enrichment.employer_careers import CAREERS_CACHE, CACHE_TTL_SECONDS
+    from src.enrichment.job_identity import normalize_company_name
+    import time
+    known = CAREERS_CACHE.get(normalize_company_name(job.get('company_name')))
+    if known and time.monotonic() - known[0] < CACHE_TTL_SECONDS and known[1].get('platforms'):
+        job.setdefault('employer_discovery_trace', []).append(dict(
+            reason='unrelated_ats_guesses_skipped_verified_platform',
+            platforms=list(known[1]['platforms'])))
+        return []
+
     for adapter in ADAPTERS:
         try:
             adapter_candidates = adapter.discover_candidates(
@@ -80,7 +93,10 @@ def discover_ats_candidates(
         if discovered:
             break
 
-    ATS_DISCOVERY_CACHE[company_key] = tuple(discovered[:MAX_ATS_RESULTS])
+    # An unsuccessful probe is not a durable statement about an employer's
+    # inventory. In particular, do not cache transient blocking as no jobs.
+    if discovered:
+        ATS_DISCOVERY_CACHE[company_key] = tuple(discovered[:MAX_ATS_RESULTS])
 
     return discovered[:MAX_ATS_RESULTS]
 

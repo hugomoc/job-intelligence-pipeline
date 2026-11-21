@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Protocol
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -33,6 +34,7 @@ class OfficialJobCandidate:
     company: str | None = None
     location: str | None = None
     job_id: str | None = None
+    employer_provenance: dict | None = None
 
 
 class ATSAdapter(Protocol):
@@ -112,11 +114,35 @@ def safe_get(
     client: httpx.Client,
     url: str,
 ) -> httpx.Response | None:
+    # A failed endpoint probe is not a failed job. Cache only this exact GET
+    # briefly, on this client; never retain quota/auth/rate-limit responses.
+    host = urlsplit(url).hostname or ''
+    if any(not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?', label)
+           for label in host.split('.')):
+        return None
+    cache = getattr(client, '_ats_probe_cache', None)
+    if cache is None:
+        cache = client._ats_probe_cache = {}
+    now = time.monotonic()
+    for key in list(cache):
+        if cache[key][0] <= now:
+            del cache[key]
+    if url in cache:
+        return cache[url][1]
     try:
         response = client.get(url)
-    except httpx.RequestError:
+    except httpx.RequestError as error:
+        if isinstance(error, httpx.ConnectError):
+            if len(cache) >= 128:
+                cache.pop(next(iter(cache)))
+            cache[url] = (now + 15, None)
         return None
 
+    if response.status_code == 404 or (response.status_code == 200 and len(response.content) <= 2_000_000):
+        if len(cache) >= 128:
+            cache.pop(next(iter(cache)))
+        cache[url] = (now + (30 if response.status_code == 404 else 60),
+                      response if response.status_code == 200 else None)
     if response.status_code >= 400:
         return None
 
@@ -305,7 +331,9 @@ def anchors_from_html(
         if not text or not href:
             continue
 
-        if not re.search(r"/job|jobs|posting|requisition", href, re.I):
+        from src.verified_posting_identity import breezy_posting_scope
+        if (not re.search(r"/job|jobs|posting|requisition", href, re.I)
+                and not breezy_posting_scope(urljoin(base_url, href))):
             continue
 
         parent_text = clean_text(

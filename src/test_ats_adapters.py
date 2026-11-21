@@ -261,7 +261,8 @@ def test_workday_parses_mock_search_results_and_limits_results() -> None:
     }
 
     with mock_client({url: httpx.Response(200, json=payload)}) as client:
-        candidates = workday.discover_candidates(acme_job(), client)
+        job = acme_job() | {'employer_careers_provenance': {'careers_url': url}}
+        candidates = workday.discover_candidates(job, client)
 
     assert len(candidates) == MAX_ATS_RESULTS
     assert candidates[0].source == "workday"

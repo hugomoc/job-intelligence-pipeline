@@ -77,9 +77,9 @@ class Tests(unittest.TestCase):
  def test_untrusted_unknown_does_not_starve_later_targets(self):
   db=duckdb.connect(':memory:');untrusted=job(verified_posting_key_trust=None)
   with client(page()) as c:
-   self.assertEqual(refresh([untrusted],db,c,Settings(),NOW)['checks'],1)
+   self.assertEqual(refresh([untrusted],db,c,Settings(),NOW)['checks'],0)
    m=refresh([untrusted,job(record_key='trusted')],db,c,Settings(batch_size=1),NOW)
-   self.assertEqual(m['cache_hits'],1);self.assertEqual(m['ACTIVE'],1)
+   self.assertEqual(m['missing_key'],1);self.assertEqual(m['ACTIVE'],1)
   db.close()
  def test_unknown_cache(self):
   db=duckdb.connect(':memory:')
@@ -93,7 +93,7 @@ class Tests(unittest.TestCase):
   other=job(record_key='other');attach_cached([other],db);self.assertNotIn('actionability_status',other);db.close()
  def test_batch_cap(self):
   db=duckdb.connect(':memory:')
-  with client(page()) as c:m=refresh([job(record_key=str(n)) for n in range(4)],db,c,Settings(batch_size=2),NOW)
+  with client(page()) as c:m=refresh([job(record_key=str(n),official_job_url=URL+str(n),verified_posting_key='greenhouse:123'+str(n)) for n in range(4)],db,c,Settings(batch_size=2),NOW)
   self.assertEqual(m['checks'],2);self.assertEqual(m['deferred'],2);db.close()
 class SafetyReview(unittest.TestCase):
  def test_builtin_shared_classification_and_no_key(self):
@@ -148,7 +148,7 @@ class SafetyReview(unittest.TestCase):
   for status in ('applied','removed'):
    self.assertTrue(is_user_reviewable_job(job(source='builtin',application_status=status,official_url_status=None)))
  def test_batches_converge_with_unknowns_and_priority(self):
-  db=duckdb.connect(':memory:');jobs=[job(record_key=str(i),ai_score=70+i) for i in range(55)]
+  db=duckdb.connect(':memory:');jobs=[job(record_key=str(i),ai_score=70+i,official_job_url=URL+str(i),verified_posting_key='greenhouse:123'+str(i)) for i in range(55)]
   with client(code=403) as c:
    first=refresh(jobs,db,c,Settings(batch_size=25),NOW)
    self.assertEqual(first['checks'],25)

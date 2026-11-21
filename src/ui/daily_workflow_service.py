@@ -11,7 +11,7 @@ import contextlib
 import io
 from dataclasses import dataclass
 
-from src.targeted_enrichment import first_attempt, select_targeted_retries
+from src.targeted_enrichment import plan_daily_enrichment, plan_recent_hidden_recovery
 from src.drain_enrichment_backlog import RateLimitGuard
 from src.enrichment.official_job_resolver import PublicSearchCircuit
 
@@ -22,11 +22,11 @@ from src.database import (
 )
 from src.enrich_jobs import (
     DEFAULT_ENRICHMENT_LIMIT,
-    ENRICHMENT_DIAGNOSTIC_QUEUE_LIMIT,
     create_http_client,
     load_jobs_to_enrich,
     process_enrichment_batch,
-    summarize_enrichment_queue,
+    annotate_known_official_candidates,
+    load_verified_reuse_candidates,
 )
 from src.ingest_all import ingest_source
 from src.matching.job_matcher import score_all_jobs
@@ -80,6 +80,11 @@ class EnrichmentSummary:
     stopped_for_time_budget: bool = False
     elapsed_seconds: float = 0.0
     persistence_error: int = 0
+    queue_statistics: dict | None = None
+    search_requests: int = 0
+    search_request_limit: int = 0
+    search_circuit: dict | None = None
+    recovery_record_keys: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,7 @@ class UiBacklogSummary:
     enrichment_jobs_processed: int = 0
     jobs_skipped: int = 0
     screening_failures: int = 0
+    recovery_record_keys: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -211,56 +217,85 @@ def refresh_rule_matches() -> int:
     return len(match_results)
 
 
+def load_daily_enrichment_plan(*, limit, minimum_words=80, source=None,
+                               retry_failed=True, resume_hash=None,
+                               actionability_only=False, recent_hidden_days=None):
+    """Full stored inventory, then the SAME pure selector for UI and execution.
+
+    No generic 10,000-row truncation, no authoritative-reuse writes. Production
+    initializers remain normal; read-only replay suppresses migrations explicitly.
+    """
+    inventory = load_jobs_to_enrich(
+        limit=limit, minimum_words=minimum_words, source=source,
+        retry_failed=retry_failed, force=False, resume_hash=resume_hash,
+        deduplicate=False, inventory_only=True,
+    )
+    if recent_hidden_days is not None:
+        from src.repositories.recommendation_repository import load_all_jobs, prepare_job_display
+        snapshot = load_all_jobs(resume_hash=resume_hash, for_session_snapshot=True)
+        visible = prepare_job_display(snapshot)
+        selected, stats = plan_recent_hidden_recovery(inventory, visible, limit,
+            days=recent_hidden_days, retry_failed=retry_failed, minimum_words=minimum_words)
+    else:
+        selected, stats = plan_daily_enrichment(inventory, limit, retry_failed=retry_failed,
+                                               minimum_words=minimum_words,
+                                               actionability_only=actionability_only)
+    for configured in load_sources():
+        stats['pending_employer_by_source'].setdefault(configured['source_id'], 0)
+        stats['pending_employer_all_new_by_source'].setdefault(configured['source_id'], 0)
+        if 'recovery_by_source' in stats:
+            stats['recovery_by_source'].setdefault(configured['source_id'], dict(hidden=0, relevant=0,
+                employer_verification=0, description_enrichment=0, activity_checks_due=0, cooldown=0, runnable=0, selected=0))
+    return selected, stats
+
+
 def run_description_enrichment(
     limit: int,
     minimum_words: int = 80,
     source: str | None = None,
-    retry_failed: bool = False,
+    retry_failed: bool = True,
     resume_hash: str | None = None,
     max_seconds: float | None = None,
+    search_request_limit: int = 25,
+    actionability_only: bool = False,
+    recent_hidden_days: int | None = None,
 ) -> EnrichmentSummary:
     """Fetch richer descriptions for stored jobs without changing source rows."""
     try:
         resume_hash = resume_hash or load_latest_resume_hash(get_model_name())
-        queue_jobs = load_jobs_to_enrich(
-            limit=max(
-                limit,
-                ENRICHMENT_DIAGNOSTIC_QUEUE_LIMIT,
-            ),
-            minimum_words=minimum_words,
-            source=source,
-            retry_failed=retry_failed,
-            force=False,
-            resume_hash=resume_hash,
-            deduplicate=False,
+        if limit < 1 or search_request_limit < 0:
+            raise ValueError("Positive batch size and nonnegative search budget required")
+        jobs, queue_summary = load_daily_enrichment_plan(
+            limit=limit, minimum_words=minimum_words, source=source,
+            retry_failed=retry_failed, resume_hash=resume_hash,
+            actionability_only=actionability_only, recent_hidden_days=recent_hidden_days,
         )
-        fresh_jobs = [job for job in queue_jobs if first_attempt(job)]
-        retries = select_targeted_retries(queue_jobs) if retry_failed else []
-        # First attempts are completed independently of the historical retry cap.
-        jobs = fresh_jobs + retries[:max(0, limit - len(fresh_jobs))]
-
-        queue_summary = summarize_enrichment_queue(queue_jobs)
         log_lines: list[str] = [
-            f"Jobs selected for description enrichment: {len(jobs)}",
-            (
-                "Queue diagnostics: "
-                f"eligible={queue_summary['eligible_for_enrichment']}; "
-                f"never attempted={queue_summary['never_attempted']}; "
-                f"previously attempted={queue_summary['previously_attempted']}; "
-                "needs official lookup="
-                f"{queue_summary['needs_official_resolution']}"
-            ),
+            f"Jobs selected for enrichment/employer verification: {len(jobs)}",
+            "Runnable queue: " + str(queue_summary),
         ]
-
+        # Hints are discovery inputs only. Inventory inspection never copies
+        # descriptions or writes attempts. The existing resolver verifies hints.
+        if jobs:
+            candidates = load_verified_reuse_candidates(minimum_words=minimum_words)
+            from src.enrichment.employer_careers import remember_verified_careers
+            for candidate in candidates:
+                remember_verified_careers(candidate)
+            annotate_known_official_candidates(
+                jobs, candidates)
+        from src.enrichment.public_search import SearchRequestBudget
+        budget = SearchRequestBudget(search_request_limit)
+        circuit = PublicSearchCircuit()
         guard = RateLimitGuard()
         with create_http_client() as client:
+            client.search_request_budget = budget
             client.event_hooks.setdefault("response", []).append(guard.observe)
             batch_summary = process_enrichment_batch(
                 jobs=jobs,
                 client=client,
                 delay_seconds=0.5,
                 max_seconds=max_seconds,
-                search_circuit=PublicSearchCircuit(),
+                search_circuit=circuit,
                 rate_limit_guard=guard,
             )
 
@@ -268,10 +303,16 @@ def run_description_enrichment(
         counts = provider_metrics(client)
         tavily_calls = int(counts.get("tavily", {}).get("search_requests", 0))
         serper_calls = int(counts.get("serper", {}).get("search_requests", 0))
+        circuit_statistics = circuit.summary()
+        # Historical circuit.calls counts logical invocations (including cache
+        # hits), while the dispatch budget counts actual provider requests.
+        circuit_statistics['provider_invocations'] = circuit_statistics.pop('calls_attempted')
+        circuit_statistics['budget_deferrals'] = circuit.budget_deferred
+        circuit_statistics['provider_unavailable_deferrals'] = circuit.deferred - circuit.budget_deferred
         log_lines.extend(batch_summary.log_lines)
         log_lines.append(
             f"Public search API calls: Tavily={tavily_calls}; "
-            f"Serper={serper_calls}; total={tavily_calls + serper_calls}; "
+            f"Serper={serper_calls}; total={budget.attempted}/{budget.maximum}; "
             f"enrichment jobs processed={batch_summary.jobs_processed}"
         )
 
@@ -284,7 +325,7 @@ def run_description_enrichment(
             jobs_selected=len(jobs),
             jobs_processed=batch_summary.jobs_processed,
             eligible_for_enrichment=(
-                queue_summary["eligible_for_enrichment"]
+                queue_summary["runnable"]
             ),
             descriptions_updated=batch_summary.descriptions_updated,
             enriched=batch_summary.totals["enriched"],
@@ -296,15 +337,20 @@ def run_description_enrichment(
             not_improved=batch_summary.totals["not_improved"],
             rule_matches_refreshed=rule_matches_refreshed,
             log_lines=tuple(log_lines),
-            never_attempted=queue_summary["never_attempted"],
-            previously_attempted=queue_summary["previously_attempted"],
+            never_attempted=queue_summary["fresh_description"],
+            previously_attempted=queue_summary["eligible_deferred_retries"],
             needs_official_resolution=(
-                queue_summary["needs_official_resolution"]
+                queue_summary["employer_verification_pending"]
             ),
             stopped_for_time_budget=(
                 batch_summary.stopped_for_time_budget
             ),
             elapsed_seconds=batch_summary.elapsed_seconds,
+            queue_statistics=queue_summary,
+            search_requests=budget.attempted,
+            search_request_limit=budget.maximum,
+            search_circuit=circuit_statistics,
+            recovery_record_keys=queue_summary.get("recovery_record_keys"),
         )
 
     except Exception as error:
@@ -332,6 +378,11 @@ def run_unscored_job_backlog(
     limit: int,
     minimum_rule_score: int,
     workflow: str = "score_unscored",
+    enrichment_summary: EnrichmentSummary | None = None,
+    enrichment_limit: int | None = None,
+    retry_failed: bool = True,
+    search_request_limit: int = 25,
+    recent_hidden_days: int | None = None,
 ) -> UiBacklogSummary:
     selected_resume_hash = (
         resume_hash
@@ -349,17 +400,22 @@ def run_unscored_job_backlog(
     )
 
     try:
-        enrichment_limit = automatic_enrichment_limit(limit)
-        enrichment_summary = run_description_enrichment(
-            limit=enrichment_limit,
-            minimum_words=80,
-            resume_hash=resume_hash,
-        )
+        if enrichment_summary is None:
+            enrichment_summary = run_description_enrichment(
+                limit=enrichment_limit or automatic_enrichment_limit(limit),
+                minimum_words=80, resume_hash=resume_hash,
+                retry_failed=retry_failed, search_request_limit=search_request_limit,
+                recent_hidden_days=recent_hidden_days,
+            )
+        if recent_hidden_days is not None and enrichment_summary.recovery_record_keys is None:
+            raise ValueError("Recent recovery requires an explicit record scope")
         summary, log_lines = capture_stdout_lines(
             score_backlog,
             resume_hash=resume_hash,
             limit=limit,
             minimum_rule_score=minimum_rule_score,
+            **({"record_keys": enrichment_summary.recovery_record_keys}
+               if enrichment_summary.recovery_record_keys is not None else {}),
         )
         combined_log_lines = (
             (
@@ -403,6 +459,7 @@ def run_unscored_job_backlog(
             enrichment_jobs_processed=enrichment_summary.jobs_processed,
             jobs_skipped=getattr(summary, "jobs_skipped", 0),
             screening_failures=getattr(summary, "screening_failures", 0),
+            recovery_record_keys=enrichment_summary.recovery_record_keys,
         )
 
         if run_id:

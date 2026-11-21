@@ -14,6 +14,37 @@ class PublicSearchError(RuntimeError):
         # Never include response bodies, request headers or underlying exceptions.
         super().__init__(f"{provider} public search: {category}")
 
+
+class SearchBudgetExhausted(PublicSearchError):
+    def __init__(self, provider):
+        super().__init__(provider, "request_budget_exhausted")
+
+
+@dataclass
+class SearchRequestBudget:
+    """Reserve immediately before dispatch, including failed/fallback calls.
+
+    Cached responses and ATS/source HTTP fetches are not search-provider calls.
+    The daily workflow owns one budget for the entire selected batch.
+    """
+    maximum: int
+    attempted: int = 0
+
+    def __post_init__(self):
+        if self.maximum < 0:
+            raise ValueError("Search request budget cannot be negative")
+
+    def reserve(self, provider):
+        if self.attempted >= self.maximum:
+            raise SearchBudgetExhausted(provider)
+        self.attempted += 1
+
+
+def reserve_search_request(client, provider):
+    budget = getattr(client, "search_request_budget", None)
+    if budget is not None:
+        budget.reserve(provider)
+
 @dataclass(frozen=True)
 class SearchResponse:
     urls: tuple[str, ...]
@@ -80,6 +111,7 @@ def serper_search(query, client):
     prior = cached_response(client, "serper", query)
     if prior is not None:
         return prior
+    reserve_search_request(client, "serper")
     metric(client, "serper", "search_requests")
     try:
         # Request-scoped header; never set it on the shared ATS/source client.
@@ -132,6 +164,7 @@ def tavily_search(query, client):
     prior = cached_response(client, "tavily", query)
     if prior is not None:
         return prior
+    reserve_search_request(client, "tavily")
     metric(client, "tavily", "search_requests")
     try:
         response = client.post(

@@ -192,6 +192,10 @@ def classify_missing_verified_identity(
     derived_key = supported_specific_posting_key(official_url, allow_employer=allow_employer)
     if not derived_key:
         return finding(CLASS_UNSAFE, "official URL is not a supported specific posting")
+    from src.verified_posting_identity import is_short_workday_posting, breezy_posting_scope
+    if is_short_workday_posting(official_url) or breezy_posting_scope(official_url):
+        return finding(CLASS_UNSAFE,
+                       "new URL form requires fresh fetched requisition/tenant and employer verification")
 
     stored_key = _text(row.get("verified_posting_key"))
     if stored_key:

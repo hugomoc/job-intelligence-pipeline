@@ -159,7 +159,19 @@ def discover_candidates(
     company_name = str(job.get("company_name") or "")
     candidates: list[OfficialJobCandidate] = []
 
-    for url in workday_listing_urls(company_name):
+    # Employer spelling does not identify a Workday tenant or shard. Use a
+    # published/previously verified careers URL; search can supply other leads.
+    from src.verified_posting_identity import workday_posting_scope
+    proof = job.get('employer_careers_provenance') or {}
+    root = str(proof.get('careers_url') or '')
+    if not root:
+        scope = workday_posting_scope(str(job.get('apply_url') or ''))
+        if scope:
+            root = f'https://{scope[0]}/{scope[1]}'
+    host = (urlparse(root).hostname or '').lower()
+    urls = [root] if root.startswith('https://') and host.endswith((
+        '.myworkdayjobs.com', '.myworkdaysite.com', '.workdayjobs.com')) else []
+    for url in urls:
         response = safe_get(client, url)
 
         if response is None:

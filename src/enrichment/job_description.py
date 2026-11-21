@@ -13,7 +13,7 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -103,6 +103,8 @@ class JobDescriptionResult:
     resolved_company_source: str | None = None
     resolved_location_source: str | None = None
     resolved_job_id_source: str | None = None
+    canonical_url: str | None = None
+    resolved_employer_website: str | None = None
 
 
 def create_http_client(
@@ -699,6 +701,15 @@ def extract_job_description_from_html(
         "html.parser",
     )
     metadata = extract_ats_metadata(soup, final_url or requested_url)
+    from src.enrichment.ats.breezy import posting_data
+    breezy = posting_data(soup, final_url or requested_url)
+    if breezy:
+        # Select only public posting fields; never retain form/session tokens.
+        metadata = {**metadata, **{k: breezy[k] for k in ('title', 'company', 'location', 'job_id')}}
+        metadata.update({k + '_source': 'breezy_embedded_position'
+                         for k in ('title', 'company', 'location', 'job_id')})
+    canonical = soup.find('link', rel='canonical', href=True)
+    canonical_url = urljoin(final_url or requested_url, canonical['href']) if canonical else None
 
     if appears_to_be_block_page(soup):
         return JobDescriptionResult(
@@ -721,6 +732,7 @@ def extract_job_description_from_html(
             resolved_company_source=metadata.get("company_source"),
             resolved_location_source=metadata.get("location_source"),
             resolved_job_id_source=metadata.get("job_id_source"),
+            canonical_url=canonical_url,
         )
 
     description = (
@@ -728,6 +740,10 @@ def extract_job_description_from_html(
     )
 
     extraction_method = "json_ld"
+    if breezy:
+        description = normalize_description_text(BeautifulSoup(
+            breezy['description'], 'html.parser').get_text('\n', strip=True))
+        extraction_method = 'breezy_embedded_position'
 
     if (
         count_words(description)
@@ -795,6 +811,7 @@ def extract_job_description_from_html(
             resolved_company_source=metadata.get("company_source"),
             resolved_location_source=metadata.get("location_source"),
             resolved_job_id_source=metadata.get("job_id_source"),
+            canonical_url=canonical_url,
         )
 
     return JobDescriptionResult(
@@ -816,6 +833,8 @@ def extract_job_description_from_html(
         resolved_company_source=metadata.get("company_source"),
         resolved_location_source=metadata.get("location_source"),
         resolved_job_id_source=metadata.get("job_id_source"),
+        canonical_url=canonical_url,
+        resolved_employer_website=breezy.get('employer_public_url'),
     )
 
 

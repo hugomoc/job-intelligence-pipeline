@@ -5,6 +5,7 @@ import io
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from src.test_daily_workflow_service import disposable_enrichment_database
 
 from pydantic import BaseModel, ValidationError
 
@@ -39,7 +40,7 @@ class ScoringDiagnosticsTests(unittest.TestCase):
             score_resume_against_job_openai=Mock(side_effect=openai),
             save_job_score=saved, run_dbt_build=dbt,
         )
-        with patch.multiple(backlog, **replacements), redirect_stdout(output):
+        with disposable_enrichment_database(), patch.multiple(backlog, **replacements), redirect_stdout(output):
             summary = backlog.score_backlog('resume-fixture', 2, 0)
         return summary, output.getvalue(), saved, dbt, replacements
 
