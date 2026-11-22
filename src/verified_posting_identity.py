@@ -289,6 +289,83 @@ def breezy_posting_scope(url: str) -> tuple[str, str] | None:
     return (host, match.group(1)) if match else None
 
 
+_UUID = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+# Pinpoint product hosts that are not employer tenants.
+_PINPOINT_RESERVED_SUBDOMAINS = frozenset({'www', 'app', 'api', 'help', 'support', 'status', 'blog', 'developers'})
+RIPPLING_ATS_HOST = 'ats.rippling.com'
+
+
+def _plain_https(url: str):
+    p = urlsplit(url)
+    if p.scheme != 'https' or p.username or p.password or p.port not in (None, 443):
+        return None
+    return p
+
+
+def pinpoint_posting_scope(url: str) -> tuple[str, str] | None:
+    """https://{tenant}.pinpointhq.com/postings/{uuid}; the tenant is the host."""
+    p = _plain_https(url)
+    if p is None:
+        return None
+    host = (p.hostname or '').casefold()
+    tenant = re.fullmatch(r'([a-z0-9][a-z0-9-]*)\.pinpointhq\.com', host)
+    if not tenant or tenant.group(1) in _PINPOINT_RESERVED_SUBDOMAINS:
+        return None
+    match = re.fullmatch(rf'/postings/({_UUID})/?', p.path, re.I)
+    return (host, match.group(1).lower()) if match else None
+
+
+def rippling_posting_scope(url: str) -> tuple[str, str] | None:
+    """https://ats.rippling.com/{tenant}/jobs/{uuid}; the tenant is the path slug."""
+    p = _plain_https(url)
+    if p is None or (p.hostname or '').casefold() != RIPPLING_ATS_HOST:
+        return None
+    match = re.fullmatch(rf'/([a-z0-9][a-z0-9-]*)/jobs/({_UUID})/?', p.path, re.I)
+    return (match.group(1).casefold(), match.group(2).lower()) if match else None
+
+
+def hosted_tenant_posting_scope(url: str) -> tuple[str, str, str] | None:
+    """(platform, tenant, posting id) for tenant-hosted Pinpoint/Rippling postings.
+
+    Like Breezy, these URLs only locate a posting. The ATS tenant name and the
+    posting's self-declared employer never establish employer ownership.
+    """
+    scope = pinpoint_posting_scope(url)
+    if scope:
+        return ('pinpoint', scope[0], scope[1])
+    scope = rippling_posting_scope(url)
+    if scope:
+        return ('rippling', scope[0], scope[1])
+    return None
+
+
+def is_hosted_tenant_board_host(host: str) -> bool:
+    host = (host or '').casefold()
+    return (host == 'pinpointhq.com' or host.endswith('.pinpointhq.com')
+            or host == RIPPLING_ATS_HOST or host.endswith('.' + RIPPLING_ATS_HOST))
+
+
+def hosted_tenant_url_matches(url: str | None, platform: str, tenant: str) -> bool:
+    """True when a careers/inventory URL belongs to exactly this ATS tenant."""
+    p = _plain_https(str(url or ''))
+    if p is None:
+        return False
+    host = (p.hostname or '').casefold()
+    if platform == 'pinpoint':
+        return host == tenant
+    if platform == 'rippling':
+        segments = [s for s in p.path.split('/') if s]
+        return host == RIPPLING_ATS_HOST and bool(segments) and segments[0].casefold() == tenant
+    return False
+
+
+HOSTED_TENANT_PROVENANCE_BASES = frozenset({
+    'fetched_corporate_brand_and_published_careers_link',
+    'fetched_reciprocal_employer_careers_link',
+    'previously_verified_employer',
+})
+
+
 def fetched_posting_scope_valid(url, result, employer_provenance=None):
     """Additional fetched evidence required by the newly supported URL forms.
 
@@ -322,6 +399,30 @@ def fetched_posting_scope_valid(url, result, employer_provenance=None):
                         'fetched_reciprocal_employer_careers_link',
                         'previously_verified_employer',
                     })
+    if is_hosted_tenant_board_host(host) and not hosted_tenant_posting_scope(url):
+        return False
+    hosted = hosted_tenant_posting_scope(url)
+    if hosted:
+        platform, tenant, posting_id = hosted
+        explicit_ids = {v.casefold() for k, v in parse_qsl(urlsplit(url).query)
+                        if k.casefold() in JOB_ID_QUERY_PARAMETERS and v}
+        if explicit_ids and explicit_ids != {posting_id}:
+            return False
+        from src.enrichment.job_identity import normalize_company_name
+        proof = employer_provenance or {}
+        # The fetched structured posting must be bound to this posting: its own
+        # identifier or its declared canonical URL. Neither may be borrowed from
+        # the discovery URL or a search result.
+        bound = (str(result.resolved_job_id or '').casefold() == posting_id
+                 or bool(result.canonical_url and posting_urls_equivalent(url, result.canonical_url)))
+        return bool(bound
+                    and result.resolved_title_source == 'jobposting_json_ld'
+                    and result.resolved_company_source == 'jobposting_json_ld'
+                    and proof.get('company')
+                    and proof.get('company') == normalize_company_name(result.resolved_company)
+                    and (hosted_tenant_url_matches(proof.get('careers_url'), platform, tenant)
+                         or hosted_tenant_url_matches(proof.get('inventory_url'), platform, tenant))
+                    and proof.get('basis') in HOSTED_TENANT_PROVENANCE_BASES)
     return True
 
 
@@ -337,6 +438,8 @@ def is_specific_job_posting_url(value: str | None) -> bool:
     path = parsed.path or "/"
     if hostname == 'breezy.hr' or hostname.endswith('.breezy.hr'):
         return breezy_posting_scope(normalized_url) is not None
+    if is_hosted_tenant_board_host(hostname):
+        return hosted_tenant_posting_scope(normalized_url) is not None
     if is_short_workday_posting(normalized_url):
         return bool(re.search(r'_(?:JR|REQ|R|J)[-_]?\d+(?:-\d+)?$', path, re.I))
     query = {
@@ -408,6 +511,11 @@ def verified_posting_key_from_url(value: str | None) -> str:
         return f"breezy:{breezy[0]}:{breezy[1]}"
     if hostname == 'breezy.hr' or hostname.endswith('.breezy.hr'):
         return ''
+    hosted = hosted_tenant_posting_scope(normalized_url)
+    if hosted:
+        return f"{hosted[0]}:{hosted[1]}:{hosted[2]}"
+    if is_hosted_tenant_board_host(hostname):
+        return ''
     if is_short_workday_posting(normalized_url):
         scope = workday_posting_scope(normalized_url)
         return (f"workday:{scope[0]}:{scope[1]}:{scope[2]}"
@@ -472,7 +580,8 @@ def is_known_official_or_ats_url(value: str | None) -> bool:
     normalized_url = normalize_official_url(value)
     if not normalized_url:
         return False
-    if is_short_workday_posting(normalized_url) or breezy_posting_scope(normalized_url):
+    if (is_short_workday_posting(normalized_url) or breezy_posting_scope(normalized_url)
+            or hosted_tenant_posting_scope(normalized_url)):
         # These forms require fresh fetched identity, not URL-only admission.
         return False
 

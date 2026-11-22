@@ -834,8 +834,18 @@ def extract_job_description_from_html(
         resolved_location_source=metadata.get("location_source"),
         resolved_job_id_source=metadata.get("job_id_source"),
         canonical_url=canonical_url,
-        resolved_employer_website=breezy.get('employer_public_url'),
+        resolved_employer_website=breezy.get('employer_public_url') or hosted_employer_website(
+            soup, final_url or requested_url),
     )
+
+
+def hosted_employer_website(soup, url):
+    """Pinpoint/Rippling only: the posting's declared employer site, a provenance lead."""
+    from src.verified_posting_identity import hosted_tenant_posting_scope
+    if not hosted_tenant_posting_scope(url):
+        return None
+    from src.enrichment.ats.hosted_tenants import employer_website
+    return employer_website(soup)
 
 
 def is_unsafe_linkedin_posting_redirect(
