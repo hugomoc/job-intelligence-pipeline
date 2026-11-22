@@ -142,6 +142,9 @@ AGGREGATOR_DOMAINS = THIRD_PARTY_DOMAINS
 # Domains controlled by each ATS. Matches require a hostname label boundary.
 KNOWN_ATS_DOMAINS = {
     "breezy.hr": "breezy",
+    "pinpointhq.com": "pinpoint",
+    # Only Rippling's hosted job-board host, not its corporate rippling.com site.
+    "ats.rippling.com": "rippling",
     "ashbyhq.com": "ashby",
     "greenhouse.io": "greenhouse",
     "icims.com": "icims",
@@ -338,6 +341,9 @@ def looks_like_individual_posting_url(url: str) -> bool:
     if ats == 'breezy':
         from src.verified_posting_identity import breezy_posting_scope
         return breezy_posting_scope(url) is not None
+    if ats in {'pinpoint', 'rippling'}:
+        from src.verified_posting_identity import hosted_tenant_posting_scope
+        return hosted_tenant_posting_scope(url) is not None
     if ats in {"workday", "greenhouse", "icims"}:
         return any(part in {"job", "jobs", "job-detail", "details"}
                    and i + 1 < len(segments) for i, part in enumerate(segments))
@@ -913,6 +919,16 @@ def resolve_from_candidates(
             from dataclasses import replace
             from src.enrichment.ats.breezy import employer_provenance
             proof = employer_provenance(job, result, client)
+            if proof:
+                candidate = replace(candidate, source='employer', employer_provenance=proof)
+        from src.verified_posting_identity import hosted_tenant_posting_scope
+        if (hosted_tenant_posting_scope(result.final_url or '') and result.status == 'enriched'
+                and not candidate.employer_provenance):
+            # Search-found Pinpoint/Rippling postings still need the employer's
+            # own site to publish this exact tenant; the posting cannot vouch.
+            from dataclasses import replace
+            from src.enrichment.ats.hosted_tenants import employer_provenance as hosted_provenance
+            proof = hosted_provenance(job, result, client)
             if proof:
                 candidate = replace(candidate, source='employer', employer_provenance=proof)
         elapsed_ms = round(1000 * (time.monotonic() - fetch_started), 1)

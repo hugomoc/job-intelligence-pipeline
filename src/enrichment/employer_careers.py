@@ -179,9 +179,9 @@ def remember_verified_careers(job):
         return None
     parts = urlsplit(url)
     path = re.split(r'/(?:jobs?|positions?|job-detail)/', parts.path, maxsplit=1)[0] or '/'
-    if ats_type_for_url(url) in ('lever', 'greenhouse', 'ashby', 'smartrecruiters'):
+    if ats_type_for_url(url) in ('lever', 'greenhouse', 'ashby', 'smartrecruiters', 'rippling'):
         path = '/' + parts.path.strip('/').split('/')[0]
-    elif ats_type_for_url(url) == 'breezy':
+    elif ats_type_for_url(url) in ('breezy', 'pinpoint'):
         path = '/'
     proof = dict(company=key, corporate_url=url,
                  careers_url=parts._replace(path=path, query='', fragment='').geturl(),
@@ -196,6 +196,7 @@ def discover_employer_candidates(job, client, *, deadline=None, corporate_leads=
         ats_type_for_url, is_aggregator_domain, looks_like_individual_posting_url,
     )
     from src.enrichment.ats import workday, greenhouse, lever, ashby, smartrecruiters
+    from src.verified_posting_identity import hosted_tenant_posting_scope, hosted_tenant_url_matches
     trace = job.setdefault('employer_discovery_trace', [])
     pages = PublicPages(client, trace, deadline=deadline)
     company = str(job.get('company_name') or '')
@@ -306,6 +307,11 @@ def discover_employer_candidates(job, client, *, deadline=None, corporate_leads=
                                     and ats_type_for_url(candidate.url) == provider and tenant_path == slug)
             if (not public_https_url(candidate.url) or is_aggregator_domain(candidate.url)
                     or not looks_like_individual_posting_url(candidate.url) or not (same_host or api_tenant_bound)):
+                continue
+            # Rippling tenants share one host: inherit provenance only within the
+            # discovered tenant's own inventory (Pinpoint: same host already).
+            hosted = hosted_tenant_posting_scope(candidate.url)
+            if hosted and not hosted_tenant_url_matches(final, hosted[0], hosted[1]):
                 continue
             evidence = dict(proof, inventory_url=final, posting_url=candidate.url)
             candidates.append(replace(candidate, source='employer', employer_provenance=evidence))

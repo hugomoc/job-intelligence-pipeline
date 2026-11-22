@@ -50,6 +50,7 @@ CI_TESTS = [
     "src/test_pending_verification.py",
     "src/test_employer_careers.py",
     "src/test_discovery_defects.py",
+    "src/test_pinpoint_rippling_ats.py",
     "src/test_drain_enrichment_backlog.py",
     "src/test_enrich_jobs_official_retry.py",
     "src/test_glassdoor_parser.py",
