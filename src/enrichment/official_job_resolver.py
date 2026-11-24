@@ -314,6 +314,22 @@ def company_domain_tokens(company_name: str | None) -> set[str]:
     }
 
 
+_LOCALE_SEGMENT = re.compile(r"[a-z]{2}(?:[-_][a-z]{2})?")
+
+
+def _is_locale_career_job_detail(segments: list[str]) -> bool:
+    """/<locale>/careers/JobDetail/[<slug>/]<numeric id>, e.g. en_US or en-US.
+
+    Narrow: the locale, careers root, JobDetail marker and numeric requisition
+    ID are all required, so locale-prefixed home/search pages stay rejected.
+    """
+    return (len(segments) in {4, 5}
+            and _LOCALE_SEGMENT.fullmatch(segments[0]) is not None
+            and segments[1] in {"career", "careers"}
+            and segments[2] == "jobdetail"
+            and re.fullmatch(r"[0-9]+", segments[-1]) is not None)
+
+
 def looks_like_individual_posting_url(url: str) -> bool:
     """Require an individual job URL, not an ATS root or generic career page.
 
@@ -353,6 +369,8 @@ def looks_like_individual_posting_url(url: str) -> bool:
         }
 
     if re.search(r"/(?:job|jobs|job-detail|requisition|posting|positions?)/[^/]+", path):
+        return True
+    if _is_locale_career_job_detail(segments):
         return True
     # Support employer /careers/specific-opening paths, not /about/careers.
     return (len(segments) >= 2 and segments[0] in {"career", "careers"}
