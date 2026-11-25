@@ -29,7 +29,13 @@ from src.ai.resume_profiler import (
     profile_resume,
 )
 from src.resume.extractor import ExtractedResume, ResumeExtractionError, extract_resume
-from src.job_screening import screen_unscreened_jobs, screening_failed_for_job
+from src.job_screening import (
+    ScreeningBudget,
+    ScreeningConfigurationError,
+    screen_unscreened_jobs,
+    screening_failed_for_job,
+    screening_status_line,
+)
 from src.repositories.recommendation_repository import (
     count_cached_canonical_scores,
     load_candidate_jobs,
@@ -81,6 +87,9 @@ class ScoringSummary:
     log_lines: tuple[str, ...] = ()
     jobs_skipped: int = 0
     screening_failures: int = 0
+    screening_limit: int = 0
+    screening_attempts: int = 0
+    screening_decisions_saved: int = 0
 
 
 class JobRecommendationServiceError(Exception):
@@ -232,7 +241,15 @@ def process_resume_upload(
     minimum_rule_score: int,
     candidate_id: str | None = None,
 ) -> ScoringSummary:
-    """Profile a resume, score a bounded set, and persist the scoring log."""
+    """Profile a resume, score a bounded set, and persist the scoring log.
+
+    Eligibility screening uses its own per-run budget (SCREENING_MAX_PER_RUN,
+    default 0), validated before any profiling or provider request.
+    """
+    try:
+        screening_budget = ScreeningBudget.from_config()
+    except ScreeningConfigurationError as error:
+        raise JobRecommendationServiceError(str(error)) from error
     prepared = prepare_resume_upload(
         uploaded_file, candidate_id=candidate_id
     )
@@ -287,7 +304,13 @@ def process_resume_upload(
                 resume_profile=resume_profile,
                 limit=limit,
                 model_name=model_name,
+                budget=screening_budget,
             )
+            screening_attempts = getattr(screening_summary, "attempts", 0)
+            screening_saved = getattr(screening_summary, "screened", 0)
+            screening_attempts = screening_attempts if isinstance(screening_attempts, int) else 0
+            screening_saved = screening_saved if isinstance(screening_saved, int) else 0
+            print(screening_status_line(screening_budget.limit, screening_attempts, screening_saved))
 
             candidate_jobs = load_candidate_jobs(
                 resume_hash=resume.resume_hash,
@@ -479,6 +502,9 @@ def process_resume_upload(
             screening_failures=screening_failures,
             dbt_was_run=dbt_was_run,
             log_lines=log_lines,
+            screening_limit=screening_budget.limit,
+            screening_attempts=screening_attempts,
+            screening_decisions_saved=screening_saved,
         )
 
         finish_scoring_run(

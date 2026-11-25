@@ -33,6 +33,12 @@ from src.ui.daily_workflow_service import (
     run_email_ingestion,
     run_unscored_job_backlog,
 )
+from src.job_screening import (
+    SCREENING_MAX_PER_RUN_ENV,
+    ScreeningConfigurationError,
+    screening_max_per_run,
+    screening_status_line,
+)
 from src.ui.job_recommendation_service import (
     JobRecommendationServiceError,
     prepare_resume_upload,
@@ -621,12 +627,25 @@ with st.sidebar:
     )
     # None = resolve "All unscored" after ingestion/enrichment (capped).
     daily_score_limit = requested_score_limit(score_limit_choice)
+    # An invalid screening setting blocks every scoring workflow up front, so
+    # no ingestion/enrichment work is spent before the scoring step fails.
+    screening_config_valid = True
+    try:
+        configured_screening_limit = screening_max_per_run()
+        st.caption(screening_status_line(configured_screening_limit, 0, 0)
+                   if configured_screening_limit == 0 else
+                   f"Eligibility screening: up to {configured_screening_limit} jobs per run "
+                   f"({SCREENING_MAX_PER_RUN_ENV}).")
+    except ScreeningConfigurationError as screening_config_error:
+        screening_config_valid = False
+        st.error(f"Scoring is blocked: {screening_config_error}")
 
 run_ingestion_clicked = st.sidebar.button(
     "Ingest emails",
 )
 score_backlog_clicked = st.sidebar.button(
     "Score unscored jobs",
+    disabled=not screening_config_valid,
 )
 enrich_descriptions_clicked = st.sidebar.button(
     "Enrich descriptions",
@@ -634,6 +653,7 @@ enrich_descriptions_clicked = st.sidebar.button(
 run_daily_clicked = st.sidebar.button(
     "Ingest, enrich and score",
     type="primary",
+    disabled=not screening_config_valid,
 )
 show_saved_jobs_clicked = st.sidebar.button(
     "Show saved jobs",
@@ -697,6 +717,7 @@ if uploaded_file:
     score_uploaded_clicked = st.button(
         "Score jobs",
         type="primary",
+        disabled=not screening_config_valid,
     )
 
     uploaded_resume_hash = create_resume_hash(
@@ -807,6 +828,14 @@ if uploaded_file and score_uploaded_clicked:
             st.write(f"Gemini scores saved: {result.gemini_score_count}")
             st.write(f"OpenAI scores saved: {result.openai_score_count}")
             st.write(f"Jobs that could not be scored: {result.failed_score_count}")
+            st.write(f"Jobs skipped: {result.jobs_skipped}")
+            st.write(f"Selected scoring batch option: {score_limit_choice}")
+            st.write(f"Jobs selected for scoring: {result.candidate_count}")
+            st.write(f"Configured screening limit: {result.screening_limit}")
+            st.write(screening_status_line(result.screening_limit, result.screening_attempts,
+                                           result.screening_decisions_saved))
+            st.write(f"Screening attempts: {result.screening_attempts}")
+            st.write(f"New eligibility decisions saved: {result.screening_decisions_saved}")
             st.write("dbt build: " + ("run" if result.dbt_was_run else "not needed"))
             status.update(label="Processing complete", state="complete")
 
@@ -970,7 +999,14 @@ if resume_preparation_succeeded and (
             recovery_activity_keys = backlog_result.recovery_record_keys
             st.session_state["resume_hash"] = backlog_result.resume_hash
             st.write(f"Already cached job scores: {backlog_result.already_scored}")
+            st.write(f"Selected scoring batch option: {backlog_result.selected_option}")
             st.write(f"Effective scoring limit: {backlog_result.effective_limit}")
+            st.write(f"Configured screening limit: {backlog_result.screening_limit}")
+            st.write(screening_status_line(backlog_result.screening_limit,
+                                           backlog_result.screening_attempts,
+                                           backlog_result.screening_decisions_saved))
+            st.write(f"Screening attempts: {backlog_result.screening_attempts}")
+            st.write(f"New eligibility decisions saved: {backlog_result.screening_decisions_saved}")
             st.write(f"Jobs selected for scoring: {backlog_result.candidates_selected}")
             st.write(f"Scoring attempts: {backlog_result.scoring_attempts}")
             remaining = backlog_result.remaining_eligible

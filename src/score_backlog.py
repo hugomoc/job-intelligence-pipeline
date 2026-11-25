@@ -25,7 +25,12 @@ from src.repositories.recommendation_repository import (
 )
 from src.scoring_diagnostics import log_scoring_failure, log_scoring_skip, exhausted_gemini_503, log_job_identity
 from src.database import get_connection
-from src.job_screening import screen_unscreened_jobs, screening_failed_for_job
+from src.job_screening import (
+    ScreeningBudget,
+    screen_unscreened_jobs,
+    screening_failed_for_job,
+    screening_status_line,
+)
 from src.score_jobs_ai import (
     initialize_ai_tables,
     load_cached_profile,
@@ -49,6 +54,9 @@ class BacklogSummary:
     dbt_was_run: bool
     jobs_skipped: int = 0
     screening_failures: int = 0
+    screening_limit: int = 0
+    screening_attempts: int = 0
+    screening_decisions_saved: int = 0
 
 
 def is_quota_exhausted(error: ResumeMatcherError) -> bool:
@@ -111,8 +119,15 @@ def score_backlog(
     limit: int,
     minimum_rule_score: int,
     record_keys: tuple[str, ...] | None = None,
+    screening_budget: ScreeningBudget | None = None,
 ) -> BacklogSummary:
-    """Run eligibility screening and full scoring for a batch of jobs."""
+    """Run (capped) eligibility screening and full scoring for a batch of jobs.
+
+    Screening is bounded by ``screening_budget`` or, by default, the validated
+    SCREENING_MAX_PER_RUN setting (default 0), independently of ``limit``.
+    """
+    # Validate before any provider or database work.
+    screening_budget = ScreeningBudget.from_config() if screening_budget is None else screening_budget
     initialize_ai_tables()
 
     model_name = get_model_name()
@@ -184,7 +199,13 @@ def score_backlog(
         limit=limit,
         model_name=model_name,
         **({"record_keys": record_keys} if record_keys is not None else {}),
+        budget=screening_budget,
     )
+    screening_attempts = getattr(screening_summary, "attempts", 0)
+    screening_saved = getattr(screening_summary, "screened", 0)
+    print(screening_status_line(screening_budget.limit,
+                                screening_attempts if isinstance(screening_attempts, int) else 0,
+                                screening_saved if isinstance(screening_saved, int) else 0))
 
     if screening_summary.screened:
         print(
@@ -371,6 +392,9 @@ def score_backlog(
         dbt_was_run=dbt_was_run,
         jobs_skipped=jobs_skipped,
         screening_failures=screening_failures,
+        screening_limit=screening_budget.limit,
+        screening_attempts=screening_attempts if isinstance(screening_attempts, int) else 0,
+        screening_decisions_saved=screening_saved if isinstance(screening_saved, int) else 0,
     )
 
 
@@ -433,6 +457,8 @@ def main() -> None:
     print(f"Jobs failed: {summary.jobs_failed}")
     print(f"Jobs skipped: {summary.jobs_skipped}")
     print(f"Eligibility screening failures: {summary.screening_failures}")
+    print(screening_status_line(summary.screening_limit, summary.screening_attempts,
+                                summary.screening_decisions_saved))
     print(f"Quota exhausted: {summary.quota_exhausted}")
     print(f"dbt build run: {summary.dbt_was_run}")
 

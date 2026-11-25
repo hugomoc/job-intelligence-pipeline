@@ -153,7 +153,9 @@ def test_daily_ai_screening_requires_full_jd():
     with patch.object(job_screening,'load_unscreened_job_eligibility_candidates',return_value=[missing,complete]), \
          patch.object(job_screening,'evaluate_job_eligibility',return_value=decision) as evaluate, \
          patch.object(job_screening,'save_job_eligibility_decision'):
-        summary=job_screening.screen_unscreened_jobs('resume',{'target_roles':['Data Engineer']},10,'model')
+        # Screening is off by default (SCREENING_MAX_PER_RUN=0); enable it explicitly here.
+        summary=job_screening.screen_unscreened_jobs('resume',{'target_roles':['Data Engineer']},10,'model',
+                                                     budget=job_screening.ScreeningBudget(10))
     assert summary.screened==1 and evaluate.call_args.kwargs['job']['record_key']=='full'
 
 

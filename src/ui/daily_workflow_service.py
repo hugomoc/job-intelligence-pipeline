@@ -37,6 +37,7 @@ from src.score_jobs import (
 )
 from src.score_backlog import BacklogSummary, score_backlog
 from src.score_backlog import load_latest_resume_hash
+from src.job_screening import ScreeningBudget, ScreeningConfigurationError, screening_status_line
 from src.scoring_run_repository import (
     finish_scoring_run,
     start_scoring_run,
@@ -137,6 +138,10 @@ class UiBacklogSummary:
     eligible_before_scoring: int | None = None
     scoring_attempts: int = 0
     remaining_eligible: int | None = None
+    selected_option: str | None = None
+    screening_limit: int = 0
+    screening_attempts: int = 0
+    screening_decisions_saved: int = 0
 
 
 @dataclass(frozen=True)
@@ -433,6 +438,14 @@ def run_unscored_job_backlog(
     zero queue makes no screening or scoring provider requests."""
     limit_mode = "all_unscored" if limit is None else "explicit"
     cap = (all_unscored_cap or all_unscored_max_attempts()) if limit is None else None
+    selected_option = all_unscored_choice_label(cap) if limit is None else str(limit)
+    # One screening budget for the whole workflow, independent of the scoring
+    # limit; an invalid setting stops before any enrichment or provider work.
+    try:
+        screening_budget = ScreeningBudget.from_config()
+    except ScreeningConfigurationError as error:
+        print(f"Scoring did not start: {error}")
+        raise DailyWorkflowError(str(error)) from error
     selected_resume_hash = (
         resume_hash
         or load_latest_resume_hash(
@@ -476,7 +489,8 @@ def run_unscored_job_backlog(
                 resume_hash=(status.resume_hash if limit is None else selected_resume_hash) or "",
                 model_name=get_model_name(), candidates_selected=0,
                 already_scored=0, scores_saved=0, jobs_failed=0, gemini_scores_saved=0,
-                openai_scores_saved=0, quota_exhausted=False, dbt_was_run=False)
+                openai_scores_saved=0, quota_exhausted=False, dbt_was_run=False,
+                screening_limit=screening_budget.limit)
             log_lines = ("No eligible unscored jobs; no screening or scoring provider requests were made.",)
         else:
             summary, log_lines = capture_stdout_lines(
@@ -485,6 +499,7 @@ def run_unscored_job_backlog(
                 limit=effective_limit,
                 minimum_rule_score=minimum_rule_score,
                 **({"record_keys": scope} if scope is not None else {}),
+                screening_budget=screening_budget,
             )
         scoring_attempts = summary.scores_saved + summary.jobs_failed
         try:
@@ -493,7 +508,11 @@ def run_unscored_job_backlog(
         except Exception as error:  # Reporting only; never fails a completed run.
             remaining = None
             print(f"Remaining backlog count unavailable: {type(error).__name__}")
+        screening_attempts = getattr(summary, "screening_attempts", 0)
+        screening_saved = getattr(summary, "screening_decisions_saved", 0)
         outcome_lines = (
+            screening_status_line(screening_budget.limit, screening_attempts, screening_saved),
+            f"Jobs selected for full scoring: {summary.candidates_selected}",
             f"Scoring attempts: {scoring_attempts} (saved {summary.scores_saved}, failed "
             f"{summary.jobs_failed}, skipped {getattr(summary, 'jobs_skipped', 0)}); "
             f"remaining eligible unscored: {'unknown' if remaining is None else remaining}",
@@ -550,6 +569,10 @@ def run_unscored_job_backlog(
             eligible_before_scoring=eligible_before,
             scoring_attempts=scoring_attempts,
             remaining_eligible=remaining,
+            selected_option=selected_option,
+            screening_limit=screening_budget.limit,
+            screening_attempts=screening_attempts,
+            screening_decisions_saved=screening_saved,
         )
 
         if run_id:
