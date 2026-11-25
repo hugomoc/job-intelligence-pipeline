@@ -1737,6 +1737,17 @@ def process_enrichment_batch(
             log("Search diagnostic: " + json.dumps(metadata))
             for decision in event["returned_urls"]:
                 log("Search URL decision: " + json.dumps(decision))
+        # Corporate-root requests, branding, careers links and inventory outcomes
+        # were previously retained in memory only. Emit bounded, URL-sanitized
+        # run-local evidence, including failed attempts, without raw HTML.
+        from src.enrichment.retrieval_diagnostics import sanitize_url
+        for event in job.get("employer_discovery_trace", []):
+            details = {"record_key": job.get("record_key"),
+                       "url": sanitize_url(event.get("url"))}
+            for field in ("reason", "method", "http_status", "candidates_found"):
+                if field in event:
+                    details[field] = event[field]
+            log("Employer chain diagnostic: " + json.dumps(details))
         result = processed.result
         stored_status = processed.stored_status
         stored_error = processed.stored_error
