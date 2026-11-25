@@ -6,7 +6,7 @@ from src.actionability import trusted_key
 from src.enrich_jobs import OFFICIAL_RETRY_COOLDOWN_DAYS, OFFICIAL_RETRY_STATUSES
 from src.repositories.recommendation_repository import normalize_datetime
 from src.targeted_enrichment import plan_recent_hidden_recovery
-from src.ui.job_visibility import is_user_reviewable_job
+from src.ui.job_visibility import passes_source_trust_gate
 
 
 def pending_verification_rows(snapshot, visible_jobs, *, days=5, now=None):
@@ -16,6 +16,9 @@ def pending_verification_rows(snapshot, visible_jobs, *, days=5, now=None):
     The projection intentionally contains no score, recommendation or ACTIVE flag.
     """
     now = now or datetime.now(timezone.utc)
+    # "Hidden" keeps its meaning: absent from the employer-verified/direct-source
+    # set. Every job is now visible in Jobs, so pass only trusted-source cards.
+    visible_jobs = [job for job in visible_jobs if passes_source_trust_gate(job)]
     adapted = []
     for item in snapshot:
         job = dict(item)
@@ -29,7 +32,7 @@ def pending_verification_rows(snapshot, visible_jobs, *, days=5, now=None):
     pending = set(stats['recovery_pending_record_keys'])
     result = []
     for job in adapted:
-        if job['record_key'] not in pending or trusted_key(job) or is_user_reviewable_job(job):
+        if job['record_key'] not in pending or trusted_key(job) or passes_source_trust_gate(job):
             continue
         status = job.get('official_url_status') or 'NOT_ATTEMPTED'
         last = normalize_datetime(job.get('official_url_resolved_at')) or normalize_datetime(job.get('previous_attempted_at'))
@@ -43,9 +46,31 @@ def pending_verification_rows(snapshot, visible_jobs, *, days=5, now=None):
             discovered_at=normalize_datetime(job.get('discovered_at')),
             original_source_url=job.get('apply_url') or '',
             description_state=job.get('description_state') or 'NEEDS_ENRICHMENT',
+            description_word_count=int(job.get('current_word_count') or 0),
+            title_classification=job.get('title_classification') or '',
             verification_status=status, last_attempt=normalize_datetime(job.get('previous_attempted_at')) or last,
             next_retry=retry, blocked_reason=reason))
     return sorted(result, key=lambda row: (-(row['discovered_at'].timestamp()), row['record_key']))
+
+
+def description_evidence_label(row):
+    """Stored-description evidence; never implies an assessment is possible."""
+    state, words = row.get('description_state'), int(row.get('description_word_count') or 0)
+    if state == 'FULL_JD':
+        return f'Complete description stored ({words} words)'
+    if state == 'PARTIAL_JD':
+        return f'Partial description only ({words} words)'
+    if state == 'ENRICHMENT_REJECTED':
+        return 'Missing (fetched description rejected by identity checks)'
+    return 'Missing (no job description stored)'
+
+
+def usable_source_url(url):
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    return parsed.scheme in {'http', 'https'} and bool(parsed.hostname) and not parsed.username and not parsed.password
 
 
 def render_pending_verification(st, rows):

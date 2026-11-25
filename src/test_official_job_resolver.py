@@ -545,7 +545,7 @@ def test_ui_open_link_prefers_verified_official_url() -> None:
     assert target.url == "https://boards.greenhouse.io/seismic/jobs/123"
 
 
-def test_ui_open_link_blocks_unverified_aggregator_source_page() -> None:
+def test_ui_open_link_labels_unverified_aggregator_source_page() -> None:
     target = select_job_open_target(
         {
             "apply_url": "https://lensa.com/generic-alert",
@@ -553,8 +553,13 @@ def test_ui_open_link_blocks_unverified_aggregator_source_page() -> None:
         }
     )
 
-    assert target.label == "Official job unavailable"
-    assert target.url is None
+    # The source listing stays reachable, but is never presented as official.
+    assert target.label == "Open original source listing — unverified"
+    assert target.url == "https://lensa.com/generic-alert"
+    assert "not verified" in target.note
+    unsafe = select_job_open_target({"apply_url": "https://user:pw@lensa.com/x",
+                                     "official_url_status": OFFICIAL_NOT_FOUND})
+    assert unsafe.url is None
 
 
 def main() -> None:
@@ -571,7 +576,7 @@ def main() -> None:
     test_identity_mismatch_rejects_official_candidate()
     test_dynamic_candidate_fetch_can_verify_official_job()
     test_ui_open_link_prefers_verified_official_url()
-    test_ui_open_link_blocks_unverified_aggregator_source_page()
+    test_ui_open_link_labels_unverified_aggregator_source_page()
     print("Official job resolver tests passed.")
 
 

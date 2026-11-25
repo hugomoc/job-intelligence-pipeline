@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -48,9 +49,15 @@ CI_TESTS = [
     "src/test_daily_workflow_service.py",
     "src/test_enrichment_recovery.py",
     "src/test_pending_verification.py",
+    "src/test_main_jobs_visibility.py",
+    "src/test_ats_posting_detail_fallbacks.py",
+    "src/test_end_date_default.py",
+    "src/test_retrieval_diagnostics.py",
     "src/test_employer_careers.py",
     "src/test_discovery_defects.py",
     "src/test_pinpoint_rippling_ats.py",
+    "src/test_locale_career_job_detail.py",
+    "src/test_database_isolation.py",
     "src/test_drain_enrichment_backlog.py",
     "src/test_enrich_jobs_official_retry.py",
     "src/test_glassdoor_parser.py",
@@ -142,9 +149,18 @@ def validate_test_inventory() -> None:
         raise SystemExit(1)
 
 
-def run_test(test_path: str) -> None:
+def isolated_database_environment(environment: dict[str, str], scratch_dir: str) -> dict[str, str]:
+    """Script tests never open data/jobs.duckdb: keep an explicit override
+    (CI sets one) or use a disposable path, and make src.database fail closed."""
+    if not environment.get("JOB_INTELLIGENCE_DB_PATH", "").strip():
+        environment["JOB_INTELLIGENCE_DB_PATH"] = str(Path(scratch_dir) / "jobs.duckdb")
+    environment["JOB_INTELLIGENCE_FORBID_DEFAULT_DB"] = "1"
+    return environment
+
+
+def run_test(test_path: str, scratch_dir: str) -> None:
     print(f"\n=== Running {test_path} ===", flush=True)
-    environment = os.environ.copy()
+    environment = isolated_database_environment(os.environ.copy(), scratch_dir)
     environment["PYTHONPATH"] = str(REPO_ROOT)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["RUN_LIVE_EMAIL_TESTS"] = "0"
@@ -168,8 +184,9 @@ def main() -> None:
     for path, reason in sorted(MANUAL_ONLY.items()):
         print(f" - {path}: {reason}")
 
-    for test_path in CI_TESTS:
-        run_test(test_path)
+    with tempfile.TemporaryDirectory(prefix="job-ci-tests-") as scratch_dir:
+        for test_path in CI_TESTS:
+            run_test(test_path, scratch_dir)
 
     print("\nAll deterministic offline CI tests passed.")
 

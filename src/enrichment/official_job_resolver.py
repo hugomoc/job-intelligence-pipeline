@@ -314,6 +314,22 @@ def company_domain_tokens(company_name: str | None) -> set[str]:
     }
 
 
+_LOCALE_SEGMENT = re.compile(r"[a-z]{2}(?:[-_][a-z]{2})?")
+
+
+def _is_locale_career_job_detail(segments: list[str]) -> bool:
+    """/<locale>/careers/JobDetail/[<slug>/]<numeric id>, e.g. en_US or en-US.
+
+    Narrow: the locale, careers root, JobDetail marker and numeric requisition
+    ID are all required, so locale-prefixed home/search pages stay rejected.
+    """
+    return (len(segments) in {4, 5}
+            and _LOCALE_SEGMENT.fullmatch(segments[0]) is not None
+            and segments[1] in {"career", "careers"}
+            and segments[2] == "jobdetail"
+            and re.fullmatch(r"[0-9]+", segments[-1]) is not None)
+
+
 def looks_like_individual_posting_url(url: str) -> bool:
     """Require an individual job URL, not an ATS root or generic career page.
 
@@ -353,6 +369,8 @@ def looks_like_individual_posting_url(url: str) -> bool:
         }
 
     if re.search(r"/(?:job|jobs|job-detail|requisition|posting|positions?)/[^/]+", path):
+        return True
+    if _is_locale_career_job_detail(segments):
         return True
     # Support employer /careers/specific-opening paths, not /about/careers.
     return (len(segments) >= 2 and segments[0] in {"career", "careers"}
@@ -661,6 +679,57 @@ def fetch_dynamic_job_description(
         return None
 
 
+def _incomplete_description(result: JobDescriptionResult) -> bool:
+    from src.repositories.recommendation_repository import (
+        MINIMUM_FULL_DESCRIPTION_WORDS, description_has_quality_signals,
+    )
+    return (result.word_count < MINIMUM_FULL_DESCRIPTION_WORDS
+            or not description_has_quality_signals(result.description))
+
+
+def _icims_iframe_url(url: str) -> str:
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query) if k != "in_iframe"] + [("in_iframe", "1")]
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def _ats_posting_detail_fallback(candidate, client, result, incomplete):
+    """One bounded request to the SAME posting's public ATS representation.
+
+    - Greenhouse: Job Board API detail when the posting page has no usable
+      Greenhouse-hosted description (e.g. redirected to an employer mirror).
+    - iCIMS: the posting's ``in_iframe=1`` view when the page has no description.
+    Never after an explicit refusal (401/403/429, bot check) or an HTTP error,
+    and never for a different posting: the posting key must stay identical.
+    Identity, requisition and JD-quality checks still run on the result.
+    """
+    from dataclasses import replace as _with
+    if result.status in {"blocked", "invalid_url"} or (result.status == "fetch_error" and result.http_status):
+        return result
+    from src.enrichment.ats.greenhouse import fetch_job_board_api_posting, greenhouse_posting_scope
+    from src.verified_posting_identity import verified_posting_key_from_url
+    if greenhouse_posting_scope(candidate.url) and (
+            result.status == "no_description" or incomplete
+            or (result.status == "enriched" and greenhouse_posting_scope(result.final_url or "") is None)):
+        api = fetch_job_board_api_posting(candidate.url, client,
+                                          timeout_seconds=CANDIDATE_HTTP_TIMEOUT_SECONDS)
+        note = f"greenhouse job board API {api.status}" + (f" (HTTP {api.http_status})" if api.http_status else "")
+        if api.status == "enriched":
+            return _with(api, posting_detail="used: " + note)
+        return _with(result, posting_detail="attempted: " + note)
+    if ats_type_for_url(candidate.url) == "icims" and (result.status == "no_description" or incomplete):
+        framed = fetch_job_description(_icims_iframe_url(candidate.url), client,
+                                       timeout_seconds=CANDIDATE_HTTP_TIMEOUT_SECONDS)
+        expected = verified_posting_key_from_url(candidate.url)
+        same = bool(expected) and verified_posting_key_from_url(framed.final_url or "") == expected
+        note = f"icims in_iframe view {framed.status}" + (f" (HTTP {framed.http_status})" if framed.http_status else "")
+        if framed.status == "enriched" and same:
+            return _with(framed, posting_detail="used: " + note)
+        return _with(result, posting_detail="attempted: " + note + ("" if same else "; different posting, ignored"))
+    return result
+
+
 def fetch_candidate_description(
     candidate: OfficialJobCandidate,
     client: httpx.Client,
@@ -678,23 +747,33 @@ def fetch_candidate_description(
         )
         incomplete = (result.word_count < MINIMUM_FULL_DESCRIPTION_WORDS
                       or not description_has_quality_signals(result.description))
+    from dataclasses import replace as _with
+    result = _ats_posting_detail_fallback(candidate, client, result, incomplete)
+    if result.status == "enriched" and require_full_jd:
+        incomplete = _incomplete_description(result)
+    elif result.status == "enriched":
+        incomplete = False
     if result.status != "no_description" and not incomplete:
-        return result
+        # Diagnostics only; the existing decision is unchanged.
+        reason = {"enriched": "not needed (description extracted)",
+                  "blocked": "skipped: access refused or bot check; browser is not used to bypass it",
+                  }.get(result.status, f"skipped: fetch status {result.status}")
+        return _with(result, browser_fallback=reason)
 
     dynamic_result = fetch_dynamic_job_description(
         candidate.url
     )
 
     if dynamic_result is None:
-        return result
+        return _with(result, browser_fallback="attempted: browser unavailable or failed")
 
     if dynamic_result.status == "enriched":
-        return dynamic_result
+        return _with(dynamic_result, browser_fallback="attempted: rendered description used")
 
     if dynamic_result.word_count > result.word_count:
-        return dynamic_result
+        return _with(dynamic_result, browser_fallback="attempted: rendered page used (no full description)")
 
-    return result
+    return _with(result, browser_fallback=f"attempted: rendered result not better ({dynamic_result.status})")
 
 
 def candidate_order_key(
@@ -862,6 +941,50 @@ def resolve_from_candidates(
     *,
     deadline: float | None = None,
 ) -> OfficialJobResolutionResult:
+    """Fetch and validate candidates; one retrieval diagnostic per attempt."""
+    attempts: list[tuple[str, JobDescriptionResult | None, int]] = []
+    try:
+        return _resolve_from_candidates(job, client, candidates, source,
+                                        deadline=deadline, attempts=attempts)
+    finally:
+        _record_candidate_diagnostics(job, source, attempts)
+
+
+def _record_candidate_diagnostics(job, source, attempts):
+    """Diagnostics use the final per-candidate trace reason; no behaviour change."""
+    from src.enrichment import retrieval_diagnostics as diagnostics
+    traces = job.get("candidate_validation_trace", [])
+    for url, result, index in attempts:
+        trace = traces[index] if index < len(traces) else {}
+        if result is None:
+            job.setdefault("retrieval_diagnostics", []).append({
+                "record_key": job.get("record_key"), "stage": f"candidate:{source}",
+                "candidate_url": diagnostics.sanitize_url(url), "method": "none",
+                "fetch_status": trace.get("fetch_status", "skipped"),
+                "note": trace.get("reason")})
+            continue
+        reason = str(trace.get("reason") or "")
+        if trace.get("accepted"):
+            identity = "accepted: " + reason
+        elif reason.startswith("identity not evaluated"):
+            identity = "not evaluated: fetch did not return a page"
+        else:
+            identity = "rejected: " + (reason or "unknown")
+        diagnostics.record(job, stage=f"candidate:{source}", url=url, result=result,
+                           method="http_get" + ("+browser" if str(getattr(result, "browser_fallback", "") or "")
+                                               .startswith("attempted") else ""),
+                           identity=identity)
+
+
+def _resolve_from_candidates(
+    job: dict,
+    client: httpx.Client,
+    candidates: Iterable[OfficialJobCandidate],
+    source: str,
+    *,
+    deadline: float | None = None,
+    attempts: list,
+) -> OfficialJobResolutionResult:
     job.setdefault("candidate_validation_trace", [])
     timing = job.setdefault("enrichment_timing", {})
     ranked = ranked_candidates(
@@ -901,6 +1024,7 @@ def resolve_from_candidates(
             )
         host = hostname(candidate.url)
         if host and host in blocked_hosts and not ats_type_for_url(candidate.url):
+            attempts.append((candidate.url, None, len(job["candidate_validation_trace"])))
             blocked_count += 1
             skipped_count += 1
             timing["blocked_host_skips"] = timing.get("blocked_host_skips", 0) + 1
@@ -914,6 +1038,7 @@ def resolve_from_candidates(
 
         fetch_started = time.monotonic()
         result = fetch_candidate_description(candidate, client)
+        attempts.append((candidate.url, result, len(job["candidate_validation_trace"])))
         from src.verified_posting_identity import breezy_posting_scope
         if breezy_posting_scope(result.final_url or '') and result.status == 'enriched':
             from dataclasses import replace

@@ -7,6 +7,7 @@ import ipaddress
 import os
 from pathlib import Path
 import socket
+import sys
 import tempfile
 
 import pytest
@@ -21,6 +22,8 @@ os.environ.update(
     TAVILY_API_KEY="",
     PUBLIC_SEARCH_PROVIDER="duckduckgo",
     PYTHON_DOTENV_DISABLED="1",
+    # src.database refuses data/jobs.duckdb while this is set (fail closed).
+    JOB_INTELLIGENCE_FORBID_DEFAULT_DB="1",
     DBT_SEND_ANONYMOUS_USAGE_STATS="false",
     DO_NOT_TRACK="1",
 )
@@ -51,6 +54,10 @@ def pytest_configure(config):
     config.add_cleanup(directory.cleanup)
     previous = os.environ.get("JOB_INTELLIGENCE_DB_PATH")
     os.environ["JOB_INTELLIGENCE_DB_PATH"] = str(Path(directory.name) / "jobs.db")
+    # If a plugin imported src.database first, its import-time path is stale.
+    cached = sys.modules.get("src.database")
+    if cached is not None:
+        cached.DATABASE_PATH = cached.configured_database_path()
 
     def restore_database_path():
         if previous is None:

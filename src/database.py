@@ -5,6 +5,7 @@ should never recreate or mutate the operational tables defined here.
 """
 
 import hashlib
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -16,13 +17,38 @@ from src.job_title_filter import classify_job_title
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
-DATABASE_PATH = DATA_DIR / "jobs.duckdb"
+DEFAULT_DATABASE_PATH = DATA_DIR / "jobs.duckdb"
+# Same variable dbt reads (job_intelligence_dbt/profiles.yml); tests and CI set it.
+DATABASE_PATH_ENV = "JOB_INTELLIGENCE_DB_PATH"
+# Set by test harnesses: opening the default production file is then an error.
+FORBID_DEFAULT_DATABASE_ENV = "JOB_INTELLIGENCE_FORBID_DEFAULT_DB"
+
+
+def configured_database_path() -> Path:
+    """Explicit override when set, otherwise the application database."""
+    override = os.environ.get(DATABASE_PATH_ENV, "").strip()
+    return Path(override).expanduser() if override else DEFAULT_DATABASE_PATH
+
+
+# Resolved once at import. Importers that cache this value see the override as
+# long as it is set before src.database is first imported (conftest does so).
+DATABASE_PATH = configured_database_path()
+
+
+def _is_default_database(path: Path) -> bool:
+    return Path(path).expanduser().resolve() == DEFAULT_DATABASE_PATH.resolve()
 
 
 def get_connection() -> duckdb.DuckDBPyConnection:
-    """Open a DuckDB connection to the local application database."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    return duckdb.connect(str(DATABASE_PATH))
+    """Open a DuckDB connection to the configured application database."""
+    path = Path(DATABASE_PATH)
+    if os.environ.get(FORBID_DEFAULT_DATABASE_ENV) == "1" and _is_default_database(path):
+        raise RuntimeError(
+            "Refusing to open the default application database while "
+            f"{FORBID_DEFAULT_DATABASE_ENV}=1; set {DATABASE_PATH_ENV} to a disposable path."
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return duckdb.connect(str(path))
 
 
 def initialize_database() -> None:

@@ -9,6 +9,7 @@ from src.description_quality import assess_description_quality
 from src.repositories.recommendation_repository import has_current_complete_ai_score
 from src.ui.job_pipeline_state import with_scoring_queue_membership,derive_job_pipeline_state
 from src.ui.job_visibility import filter_jobs_by_review_filter,count_job_review_buckets
+from src.ui.date_filters import pacific_date
 
 JD=('Responsibilities include building reliable SQL analytics pipelines and data models. '
     'Qualifications include SQL expertise and collaboration with business teams. ')*20
@@ -16,11 +17,13 @@ JD=('Responsibilities include building reliable SQL analytics pipelines and data
 class AuditTests(unittest.TestCase):
     def test_actual_streamlit_filter_nodes_reproduce_expected_fixture(self):
         m=ast.parse(Path('streamlit_app.py').read_text())
-        fn=next(n for n in m.body if isinstance(n,ast.FunctionDef) and n.name=='to_date')
         titles=next(n for n in m.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='TITLE_FIT_LABELS' for t in n.targets))
-        scope={'date':date};exec(compile(ast.Module(body=[fn,titles],type_ignores=[]),'streamlit_app.py','exec'),scope)
-        fixture=[dict(record_key=str(i),application_status='new',sent_at=datetime(2026,10,6+i%7,tzinfo=timezone.utc),title_classification=('STRONG_MATCH','POSSIBLE_MATCH','FILTERED_OUT')[i%3]) for i in range(67)]
-        extra=[dict(record_key='applied',application_status='applied',sent_at=date(2026,10,8)),dict(record_key='old',application_status='new',sent_at=datetime(2026,10,5,tzinfo=timezone.utc)),dict(record_key='future',application_status='new',sent_at=datetime(2026,10,13,tzinfo=timezone.utc))]
+        # Job dates are America/Los_Angeles calendar dates (src.ui.date_filters.pacific_date).
+        scope={'date':date,'pacific_date':pacific_date};exec(compile(ast.Module(body=[titles],type_ignores=[]),'streamlit_app.py','exec'),scope)
+        fixture=[dict(record_key=str(i),application_status='new',sent_at=datetime(2026,10,6+i%7,18,tzinfo=timezone.utc),title_classification=('STRONG_MATCH','POSSIBLE_MATCH','FILTERED_OUT')[i%3]) for i in range(67)]
+        extra=[dict(record_key='applied',application_status='applied',sent_at=date(2026,10,8)),dict(record_key='old',application_status='new',sent_at=datetime(2026,10,5,18,tzinfo=timezone.utc)),dict(record_key='future',application_status='new',sent_at=datetime(2026,10,13,18,tzinfo=timezone.utc)),
+               # 00:30 UTC Oct 6 is 17:30 PDT Oct 5: before the Pacific Start date.
+               dict(record_key='utc-only-in-range',application_status='new',sent_at=datetime(2026,10,6,0,30,tzinfo=timezone.utc),title_classification='STRONG_MATCH')]
         scope.update(all_jobs=fixture+extra,status_filter='New',source_filter='All',city_filter='All',start_date=date(2026,10,6),end_date=date(2026,10,12),scored_filter='All',recommendation_filter='All',fit_priority_filter='All',description_state_filter='All',selected_title_fits=['Strong','Possible','Filtered out'],review_visibility_filter='All',filter_jobs_by_review_filter=filter_jobs_by_review_filter,count_job_review_buckets=count_job_review_buckets)
         w=next(n for n in m.body if isinstance(n,ast.With) and any(isinstance(x.context_expr,ast.Name) and x.context_expr.id=='jobs_tab' for x in n.items))
         started=False

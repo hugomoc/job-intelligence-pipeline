@@ -46,7 +46,7 @@ def test_pending_respects_discovery_relevance_visibility_and_history():
     rows = [snapshot_row(), snapshot_row('old',first_discovered_at=NOW-timedelta(days=6)),
             snapshot_row('removed',application_status='removed'), snapshot_row('applied',application_status='applied'),
             snapshot_row('nurse',title='Registered Nurse'), snapshot_row('gap',critical_skill_gaps=['SAP']),
-            snapshot_row('visible',source='linkedin',_snapshot_new_source_visible=True)]
+            snapshot_row('visible',source='linkedin',apply_url='https://www.linkedin.com/jobs/view/1/')]
     assert [r['record_key'] for r in pending_verification_rows(rows,[rows[-1]],now=NOW)] == ['pending']
 
 

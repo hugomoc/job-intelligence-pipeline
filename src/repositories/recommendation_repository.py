@@ -34,7 +34,8 @@ from src.job_title_filter import (
 )
 from src.ui.job_visibility import (
     classify_job_review_bucket,
-    filter_user_reviewable_jobs,
+    filter_assessment_eligible_jobs,
+    passes_source_trust_gate,
 )
 from src.verified_posting_identity import (
     TRUSTED_VERIFIED_KEY_SOURCES,
@@ -2246,23 +2247,23 @@ def load_all_jobs(
         )
 
     if for_session_snapshot:
-        # Retain status-dependent hidden cards. Compute their NEW admission/source
-        # eligibility using the SAME existing functions once, then restore status.
-        # A callback can thus reveal a historical counterpart without a DB reload.
+        # Retain status-dependent hidden cards. Compute their NEW admission (the
+        # relevance gate) once, then restore status. Source trust is recorded for
+        # verification workflows only; it no longer hides any job.
         original_statuses = {job['record_key']: job.get('application_status', 'new') for job in jobs}
         for job in jobs:
             job['application_status'] = 'new'
-        new_source_keys = {job['record_key'] for job in filter_user_reviewable_jobs(jobs)}
+        trusted_source_keys = {job['record_key'] for job in jobs if passes_source_trust_gate(job)}
         admitted = apply_admission_gate(jobs=jobs, resume_hash=selected_resume_hash,
             preserve_statuses=("applied", "removed"))
         admitted_keys = {job['record_key'] for job in admitted}
         for job in jobs:
-            job['_snapshot_new_source_visible'] = job['record_key'] in new_source_keys
+            job['_snapshot_trusted_source'] = job['record_key'] in trusted_source_keys
             job['_snapshot_new_admitted'] = job['record_key'] in admitted_keys
             job['application_status'] = original_statuses[job['record_key']]
     else:
         jobs = apply_admission_gate(
-            jobs=filter_user_reviewable_jobs(jobs),
+            jobs=jobs,
             resume_hash=selected_resume_hash,
             preserve_statuses=("applied", "removed"),
         )
@@ -2337,10 +2338,11 @@ def verified_display_representative_rank(job: dict[str, Any]) -> tuple:
 
 def prepare_job_display(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Choose trusted representatives before existing display ordering/dedup."""
+    # Visibility = relevance (admission/title gate), from every source.
+    # Employer verification is shown on the card, never used to hide a job.
     jobs = [job for job in jobs if (
         job.get('application_status', 'new') in {'applied', 'removed'}
-        or (job.get('_snapshot_new_source_visible', True)
-            and job.get('_snapshot_new_admitted', True)))]
+        or job.get('_snapshot_new_admitted', True))]
     # Fingerprints can suggest prior history, but never establish identity.
     removed_alerts: dict[tuple[str, str], list[tuple[tuple[str, ...], datetime]]] = {}
     for job in jobs:
@@ -2445,10 +2447,18 @@ def prepare_job_display(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             verified_representatives[verified_key] = job
     display_jobs.extend(verified_representatives.values())
 
+    from src.ui.date_filters import pacific_date
+    title_tier = {'STRONG_MATCH': 0, 'POSSIBLE_MATCH': 1}
+
     def display_order(job):
+        # Scored first by score; then newest Pacific discovery day, with strong
+        # title matches ahead of possible ones within the same day.
         score = job.get('ai_score')
         ingested = normalize_datetime(job.get('discovered_at'))
+        day = pacific_date(ingested)
         return (score is None, -(score if score is not None else 0),
+                -(day.toordinal() if day else 0),
+                title_tier.get(job.get('title_classification'), 2),
                 -(ingested.timestamp() if ingested else float('-inf')),
                 trusted_display_posting_key(job) or job.get('exact_posting_key')
                 or job.get('canonical_job_key') or job.get('record_key') or '')
@@ -3007,7 +3017,9 @@ def load_candidate_jobs(
         columns = [description[0] for description in cursor.description]
         rows = cursor.fetchall()
 
-    jobs = filter_user_reviewable_jobs(
+    # Assessment eligibility (not UI visibility): trusted sources, or an
+    # unverified job whose own stored description is a FULL_JD.
+    jobs = filter_assessment_eligible_jobs(
         [
             dict(zip(columns, row))
             for row in rows
@@ -3470,7 +3482,9 @@ def load_unscreened_job_eligibility_candidates(
         columns = [description[0] for description in cursor.description]
         rows = cursor.fetchall()
 
-    jobs = filter_user_reviewable_jobs(
+    # Assessment eligibility (not UI visibility): trusted sources, or an
+    # unverified job whose own stored description is a FULL_JD.
+    jobs = filter_assessment_eligible_jobs(
         [
             dict(zip(columns, row))
             for row in rows

@@ -1,7 +1,13 @@
-"""User-facing job visibility rules.
+"""Job visibility, assessment eligibility and verification, kept separate.
 
-Raw aggregator alerts are useful discovery inputs, but they are not actionable
-review cards until an employer/ATS URL has been verified.
+- Visibility: every relevant discovered job is shown, from every source.
+  Relevance is the existing admission/title gate (recommendation_repository).
+- Source trust gate (passes_source_trust_gate): employer-verified or direct
+  source. Defines "awaiting employer verification" for Pending Verification
+  and hidden-job recovery; never a visibility requirement.
+- Assessment eligibility (is_assessment_eligible_job): which jobs the paid
+  screening/scoring queues may consider. Those queues still require a FULL_JD.
+- Employer verification: a trusted posting key (src.actionability.trusted_key).
 """
 
 from __future__ import annotations
@@ -29,9 +35,10 @@ def has_verified_non_aggregator_official_url(
     )
 
 
-def is_user_reviewable_job(
+def passes_source_trust_gate(
     job: dict[str, Any],
 ) -> bool:
+    """Formerly is_user_reviewable_job: employer-verified or direct-source job."""
     if str(job.get("application_status") or "new").lower() in {"applied", "removed"}:
         return True
     from src.job_domains import BUILT_IN_DOMAINS, is_domain_in
@@ -47,14 +54,54 @@ def is_user_reviewable_job(
     return has_verified_non_aggregator_official_url(job)
 
 
-def filter_user_reviewable_jobs(
+def is_assessment_eligible_job(
+    job: dict[str, Any],
+) -> bool:
+    """May the screening/scoring queues consider this job?
+
+    Trusted-source jobs keep today's behaviour. An unverified aggregator job is
+    eligible only when its own stored description is a FULL_JD under the
+    existing quality rules and was not rejected by identity validation (raw
+    descriptions are stored only from the alert itself or an identity-accepted
+    fetch). This never marks the job verified, ACTIVE or Recommended.
+    """
+    if passes_source_trust_gate(job):
+        return True
+    if str(job.get("enrichment_status") or "") == "resolution_rejected":
+        return False
+    from src.repositories.recommendation_repository import description_state
+    return description_state(job) == "FULL_JD"
+
+
+def filter_assessment_eligible_jobs(
     jobs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    return [
-        job
-        for job in jobs
-        if is_user_reviewable_job(job)
-    ]
+    return [job for job in jobs if is_assessment_eligible_job(job)]
+
+
+def is_employer_verified(job: dict[str, Any]) -> bool:
+    from src.actionability import trusted_key
+    return bool(trusted_key(job))
+
+
+JOB_STATE_VERIFIED_SCORED = "Verified · Scored"
+JOB_STATE_VERIFIED_NEEDS_DESCRIPTION = "Verified · Needs description"
+JOB_STATE_VERIFIED_NOT_SCORED = "Verified · Not scored"
+JOB_STATE_UNVERIFIED_SCORED = "Unverified · Scored"
+JOB_STATE_UNVERIFIED_JD_AVAILABLE = "Unverified · JD available"
+JOB_STATE_UNVERIFIED_NEEDS_DESCRIPTION = "Unverified · Needs description"
+
+
+def job_card_state(job: dict[str, Any]) -> str:
+    """Verification x description x score state shown on every job card."""
+    from src.repositories.recommendation_repository import description_state, has_current_complete_ai_score
+    verified = is_employer_verified(job)
+    if has_current_complete_ai_score(job):
+        return JOB_STATE_VERIFIED_SCORED if verified else JOB_STATE_UNVERIFIED_SCORED
+    full = (job.get("description_state") or description_state(job)) == "FULL_JD"
+    if verified:
+        return JOB_STATE_VERIFIED_NOT_SCORED if full else JOB_STATE_VERIFIED_NEEDS_DESCRIPTION
+    return JOB_STATE_UNVERIFIED_JD_AVAILABLE if full else JOB_STATE_UNVERIFIED_NEEDS_DESCRIPTION
 
 
 REVIEW_BUCKET_RECOMMENDED = "recommended"
@@ -65,12 +112,16 @@ REVIEW_FILTER_RECOMMENDED = "Recommended"
 REVIEW_FILTER_NEEDS_REVIEW = "Needs review"
 REVIEW_FILTER_ALL = "All"
 REVIEW_FILTER_LOW_FIT = "Low fit"
+# Default: Recommended + Needs review buckets (every relevant job, any source,
+# verified or not). Low fit and the unfiltered All view stay optional.
+REVIEW_FILTER_ALL_RELEVANT = "All relevant"
 
 REVIEW_FILTER_OPTIONS = (
+    REVIEW_FILTER_ALL_RELEVANT,
     REVIEW_FILTER_RECOMMENDED,
     REVIEW_FILTER_NEEDS_REVIEW,
-    REVIEW_FILTER_ALL,
     REVIEW_FILTER_LOW_FIT,
+    REVIEW_FILTER_ALL,
 )
 
 
@@ -178,6 +229,9 @@ def is_visible_for_review_filter(
         return True
 
     bucket = classify_job_review_bucket(job, actionability_config=actionability_config, now=now)
+
+    if review_filter == REVIEW_FILTER_ALL_RELEVANT:
+        return bucket != REVIEW_BUCKET_LOW_FIT
 
     if review_filter == REVIEW_FILTER_LOW_FIT:
         return bucket == REVIEW_BUCKET_LOW_FIT
