@@ -1205,7 +1205,7 @@ def resolve_official_job(
     """Discover direct ATS postings first, under a cooperative per-job budget."""
     timing = job.setdefault("enrichment_timing", {})
     deadline = time.monotonic() + OFFICIAL_RESOLUTION_BUDGET_SECONDS
-    from src.enrichment.employer_careers import discover_employer_candidates
+    from src.enrichment.employer_careers import discover_employer_candidates, excluded_corporate_lead
     employer_candidates = discover_employer_candidates(job, client, deadline=deadline)
     if employer_candidates:
         employer_result = resolve_from_candidates(job, client, employer_candidates, 'employer', deadline=deadline)
@@ -1298,12 +1298,24 @@ def resolve_official_job(
     # itself never grants employer provenance.
     corporate_leads = [hit.get('url', '') for hit in search_trace.get('organic_results', [])
                        if not looks_like_individual_posting_url(hit.get('url', ''))
-                       and not ats_type_for_url(hit.get('url', ''))][:2]
+                       and not ats_type_for_url(hit.get('url', ''))
+                       and not excluded_corporate_lead(hit.get('url', ''))][:2]
     if corporate_leads and time.monotonic() < deadline:
         for lead in discover_employer_candidates(job, client, deadline=deadline, corporate_leads=corporate_leads):
             if lead.url not in seen_urls:
                 candidates.append(lead)
                 seen_urls.add(lead.url)
+                continue
+            # The employer chain independently reached this exact posting URL
+            # (brand -> careers link -> inventory). Swap it in for the
+            # search-only copy at the same position, so no duplicate fetch
+            # occurs. Provenance comes only from the chain, never from search.
+            proven = (lead.source == 'employer' and lead.employer_provenance
+                      and lead.employer_provenance.get('posting_url') == lead.url)
+            index = next((i for i, existing in enumerate(candidates)
+                          if existing.url == lead.url and not existing.employer_provenance), None)
+            if proven and index is not None:
+                candidates[index] = lead
     workday_homepages = [
         hit["url"] for hit in search_trace.get("organic_results", [])
         if ats_type_for_url(hit.get("url", "")) == "workday"
