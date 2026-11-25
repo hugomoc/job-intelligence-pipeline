@@ -91,7 +91,7 @@ class Tests(unittest.TestCase):
         apex = 'https://bask.health/'
         careers_url = 'https://jobs.bask.health/careers'
         post_url = 'https://jobs.bask.health/careers/905C5C2826'
-        org = dict(type='Organization')  # The fetched page, not the search result, supplies proof.
+        # The fetched page, not the search result, supplies ownership evidence.
         organization = {'@type': 'Organization',
                         'name': 'Bask Health' if branding else 'Wrong Employer',
                         'url': apex}
