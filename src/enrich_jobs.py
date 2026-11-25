@@ -1743,7 +1743,7 @@ def process_enrichment_batch(
         from src.enrichment.retrieval_diagnostics import sanitize_url
         for event in job.get("employer_discovery_trace", []):
             details = {"record_key": job.get("record_key"),
-                       "url": sanitize_url(event.get("url"))}
+                       "url": (sanitize_url(event.get("url")) or "").replace("://", "[:]//")}
             for field in ("reason", "method", "http_status", "candidates_found"):
                 if field in event:
                     details[field] = event[field]
