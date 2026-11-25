@@ -343,9 +343,10 @@ def get_description_information(
         description.split()
     )
 
+    from src.description_attachment import enrichment_rejection_applies
     description_complete = (
         assess_description_quality(description).full_jd
-        and job.get("enrichment_status") != "resolution_rejected"
+        and not enrichment_rejection_applies(job)
     )
 
     return (

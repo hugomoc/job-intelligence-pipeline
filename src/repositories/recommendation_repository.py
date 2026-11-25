@@ -1371,9 +1371,11 @@ def load_resume_profile_payload(
 
 def description_state(job: dict[str, Any]) -> str:
     """Classify JD quality independently from resume-fit evaluation."""
-    enrichment_status = str(job.get("enrichment_status") or "")
+    from src.description_attachment import enrichment_rejection_applies
 
-    if enrichment_status == "resolution_rejected":
+    # Option B: an active, hash-matching user paste is judged on its own text;
+    # the historical rejection itself stays recorded.
+    if enrichment_rejection_applies(job):
         return "ENRICHMENT_REJECTED"
 
     words = current_description_word_count(job)
@@ -2197,6 +2199,9 @@ def load_all_jobs(
     from src.actionability import attach_cached
     with get_connection() as connection:
         attach_cached(jobs, connection)
+    from src.description_attachment import annotate_description_attachments
+    with get_connection() as connection:
+        annotate_description_attachments(connection, jobs)
 
 
     for job in jobs:
@@ -2684,6 +2689,8 @@ def load_candidate_jobs(
         from src.candidate_assessments import register_completed_filter
         register_completed_filter(connection, resume_hash)
         register_automatic_status_filter(connection)
+        from src.description_attachment import register_attachment_function
+        register_attachment_function(connection)
         cursor = connection.execute(
             """
             WITH jobs AS (
@@ -2828,7 +2835,8 @@ def load_candidate_jobs(
             enrichment_attempts AS (
                 SELECT
                     record_key,
-                    status AS enrichment_status,
+                    -- Option B: an active, hash-matching user paste lifts only this scoring restriction.
+                    CASE WHEN status = 'resolution_rejected' AND description_attachment_active(record_key) THEN 'user_pasted_description' ELSE status END AS enrichment_status,
                     official_job_url,
                     official_url_status
                 FROM job_enrichment_attempts
@@ -3105,6 +3113,8 @@ def count_unscored_candidate_jobs(
         from src.candidate_assessments import register_completed_filter
         register_completed_filter(connection, resume_hash)
         register_automatic_status_filter(connection)
+        from src.description_attachment import register_attachment_function
+        register_attachment_function(connection)
         result = connection.execute(
             """
             WITH jobs AS (
@@ -3177,7 +3187,8 @@ def count_unscored_candidate_jobs(
             enrichment_attempts AS (
                 SELECT
                     record_key,
-                    status AS enrichment_status
+                    -- Option B: an active, hash-matching user paste lifts only this scoring restriction.
+                    CASE WHEN status = 'resolution_rejected' AND description_attachment_active(record_key) THEN 'user_pasted_description' ELSE status END AS enrichment_status
                 FROM job_enrichment_attempts
             ),
 
@@ -3322,6 +3333,8 @@ def load_unscreened_job_eligibility_candidates(
         from src.candidate_assessments import register_completed_filter
         register_completed_filter(connection, resume_hash)
         register_automatic_status_filter(connection)
+        from src.description_attachment import register_attachment_function
+        register_attachment_function(connection)
         cursor = connection.execute(
             """
             WITH jobs AS (
@@ -3370,7 +3383,8 @@ def load_unscreened_job_eligibility_candidates(
             enrichment_attempts AS (
                 SELECT
                     record_key,
-                    status AS enrichment_status,
+                    -- Option B: an active, hash-matching user paste lifts only this scoring restriction.
+                    CASE WHEN status = 'resolution_rejected' AND description_attachment_active(record_key) THEN 'user_pasted_description' ELSE status END AS enrichment_status,
                     official_job_url,
                     official_url_status
                 FROM job_enrichment_attempts

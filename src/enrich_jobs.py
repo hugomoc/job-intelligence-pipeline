@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from src.ai.resume_matcher import MATCHER_PROMPT_VERSION
 from src.job_title_filter import classify_job_title
+from src.description_attachment import USER_PASTED_RETAINED
 
 import argparse
 import os
@@ -127,6 +128,18 @@ class EnrichmentProcessingResult:
     official_resolution: OfficialJobResolutionResult | None
     updated: bool
     pending_description: JobDescriptionResult | None = None
+    pending_description_trusted: bool = False
+
+
+def verified_official_description(official_resolution, identity_validation) -> bool:
+    """Existing trusted verification: FOUND_VERIFIED with accepted fetched identity.
+
+    Only such a description may supersede a user-pasted description; the
+    caller still requires FULL_JD quality before replacing it.
+    """
+    return bool(official_resolution is not None
+                and official_resolution.status == OFFICIAL_FOUND_VERIFIED
+                and identity_validation is not None and identity_validation.accepted)
 
 
 @dataclass(frozen=True)
@@ -456,6 +469,7 @@ def needs_official_resolution(
         return True
 
     if (job.get("description_state") == "FULL_JD"
+            and not job.get("manual_description_active")  # a paste never stops employer lookups
             and not is_aggregator_job(job)
             and not job.get("requires_trusted_posting_key")):
         return False  # Legacy description-only callers; daily identity work is explicit.
@@ -1013,6 +1027,7 @@ def reuse_verified_description(
         identity_validation=validation,
         official_resolution=official_resolution,
         description_update=result,
+        description_update_trusted=True,  # matching authoritative verified posting key
     )
 
 
@@ -1370,6 +1385,11 @@ def load_jobs_to_enrich(
         dict(zip(columns, row))
         for row in rows
     ]
+    # Active user pastes: protects them from unverified refetches and applies
+    # the narrow resolution_rejected exception to description_state.
+    from src.description_attachment import annotate_description_attachments
+    with get_connection() as connection:
+        annotate_description_attachments(connection, jobs)
 
     for job in jobs:
         current_word_count = count_words(
@@ -1781,6 +1801,7 @@ def process_enrichment_batch(
                 identity_validation=identity_validation,
                 official_resolution=processed.official_resolution,
                 description_update=processed.pending_description,
+                description_update_trusted=getattr(processed, "pending_description_trusted", False),
             )
         except Exception as error:
             # The identity guard and atomic save retain the prior attempt.
@@ -2047,6 +2068,7 @@ def save_enrichment_attempt(
     identity_validation: JobIdentityValidation | None = None,
     official_resolution: OfficialJobResolutionResult | None = None,
     description_update: JobDescriptionResult | None = None,
+    description_update_trusted: bool = False,
 ) -> None:
     identity_validation = _validate_official_identity_for_save(
         job, result, identity_validation, official_resolution,
@@ -2124,7 +2146,12 @@ def save_enrichment_attempt(
     posting_status = job.get("posting_status") or "unknown"
     reused_description = bool(job.get("reused_description"))
 
+    from src.description_attachment import (
+        ensure_attachment_table, supersede_attachment, unverified_write_guard_sql,
+    )
     with get_connection() as connection:
+        if description_update is not None:
+            ensure_attachment_table(connection)
         connection.execute("BEGIN TRANSACTION")
         try:
             connection.execute(
@@ -2274,18 +2301,35 @@ def save_enrichment_attempt(
             )
 
             if description_update is not None:
+                # Final write recheck: an active user paste is replaced only by
+                # an identity-verified official description, even when this job
+                # dict was loaded before the paste was saved.
                 changed = connection.execute(
-                    """
+                    f"""
                     UPDATE raw_jobs SET
                         description = ?,
                         description_updated_at = CURRENT_TIMESTAMP
                     WHERE record_key = ?
+                      AND {unverified_write_guard_sql()}
                     RETURNING record_key
                     """,
-                    [description_update.description, job["record_key"]],
+                    [description_update.description, job["record_key"],
+                     bool(description_update_trusted)],
                 ).fetchall()
-                if len(changed) != 1:
-                    raise ValueError("Cannot persist description for missing record")
+                if changed and description_update_trusted:
+                    supersede_attachment(connection, job["record_key"])
+                elif not changed:
+                    exists = connection.execute(
+                        "SELECT count(*) FROM raw_jobs WHERE record_key = ?",
+                        [job["record_key"]]).fetchone()[0]
+                    if not exists:
+                        raise ValueError("Cannot persist description for missing record")
+                    # The paste was kept: record the true outcome, not a
+                    # fabricated successful description update.
+                    connection.execute(
+                        """UPDATE job_enrichment_attempts SET status = 'not_improved',
+                               error_message = ? WHERE record_key = ?""",
+                        [USER_PASTED_RETAINED, job["record_key"]])
             connection.execute("COMMIT")
         except Exception:
             connection.execute("ROLLBACK")
@@ -2294,8 +2338,16 @@ def save_enrichment_attempt(
 
 def description_update_is_improvement(
     job: dict[str, Any], result: JobDescriptionResult, *, replace_incomplete: bool = False,
+    trusted_official: bool = False,
 ) -> bool:
-    """Share the same replacement decision between persistence and dry runs."""
+    """Share the same replacement decision between persistence and dry runs.
+
+    An active user-pasted FULL_JD is replaced only by an identity-verified
+    official FULL_JD (regardless of length), never by longer unverified text.
+    """
+    if job.get("manual_description_active"):
+        return bool(trusted_official and result.word_count >= 80
+                    and description_has_quality_signals(result.description))
     if result.word_count > int(job.get("current_word_count") or 0):
         return True
     return bool(replace_incomplete and description_state(job) != "FULL_JD"
@@ -2308,31 +2360,50 @@ def update_job_description(
     result: JobDescriptionResult,
     *,
     replace_incomplete: bool = False,
+    trusted_official: bool = False,
 ) -> bool:
-    if not description_update_is_improvement(job, result, replace_incomplete=replace_incomplete):
+    if not description_update_is_improvement(job, result, replace_incomplete=replace_incomplete,
+                                             trusted_official=trusted_official):
         return False
 
+    from src.description_attachment import (
+        ensure_attachment_table, supersede_attachment, unverified_write_guard_sql,
+    )
     with get_connection() as connection:
         register_exact_posting_identity_function(connection)
-        connection.execute(
-            """
-            UPDATE raw_jobs
-            SET
-                description = ?,
-                description_updated_at =
-                    CURRENT_TIMESTAMP
-            WHERE record_key = ?
-            """,
-            [
-                result.description,
-                job["record_key"],
-            ],
-        )
+        ensure_attachment_table(connection)
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            # Recheck provenance at the write: a stale job dict (for example a
+            # long-running drain) must not overwrite a newer user paste.
+            changed = connection.execute(
+                f"""
+                UPDATE raw_jobs
+                SET
+                    description = ?,
+                    description_updated_at =
+                        CURRENT_TIMESTAMP
+                WHERE record_key = ?
+                  AND {unverified_write_guard_sql()}
+                RETURNING record_key
+                """,
+                [
+                    result.description,
+                    job["record_key"],
+                    bool(trusted_official),
+                ],
+            ).fetchall()
+            if changed and trusted_official:
+                supersede_attachment(connection, job["record_key"])
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
 
         # description_updated_at makes older AI scores stale without deleting
         # historical scoring rows.
 
-    return True
+    return bool(changed)
 
 
 def existing_description_result(
@@ -2523,10 +2594,13 @@ def fetch_verified_official_description(
                 status, error = "no_description", "verified page lacks FULL_JD quality"
             else:
                 status, error = "enriched", None
-                if not description_update_is_improvement(job, result, replace_incomplete=True):
+                # Exact trusted posting key plus accepted fetched identity.
+                if not description_update_is_improvement(job, result, replace_incomplete=True,
+                                                         trusted_official=True):
                     status, error = "not_improved", "existing full description retained"
                 elif persist:
-                    updated = update_job_description(job, result, replace_incomplete=True)
+                    updated = update_job_description(job, result, replace_incomplete=True,
+                                                     trusted_official=True)
                     if updated:
                         job["description_hash"] = description_hash(result.description)
                         job["description_source"] = "verified_official_direct"
@@ -2560,7 +2634,8 @@ def fetch_verified_official_description(
     return EnrichmentProcessingResult(result=result, stored_status=status,
         stored_error=error, identity_validation=validation,
         official_resolution=resolution, updated=updated,
-        pending_description=pending_description)
+        pending_description=pending_description,
+        pending_description_trusted=pending_description is not None)
 
 
 def process_enrichment_job(
@@ -2609,16 +2684,21 @@ def process_enrichment_job(
     identity_validation: JobIdentityValidation | None = None
     official_resolution: OfficialJobResolutionResult | None = None
     pending_description: JobDescriptionResult | None = None
+    pending_description_trusted = False
 
-    def apply_or_stage(candidate: JobDescriptionResult) -> bool:
-        nonlocal pending_description
+    def apply_or_stage(candidate: JobDescriptionResult, *, trusted_official: bool = False) -> bool:
+        # trusted_official: an identity-verified (FOUND_VERIFIED) official
+        # description; only it may replace an active user-pasted description.
+        nonlocal pending_description, pending_description_trusted
         if defer_description_write:
-            if not description_update_is_improvement(job, candidate):
+            if not description_update_is_improvement(job, candidate, trusted_official=trusted_official):
                 return False
-            if pending_description is None or candidate.word_count > pending_description.word_count:
+            if (pending_description is None or candidate.word_count > pending_description.word_count
+                    or (trusted_official and job.get("manual_description_active"))):
                 pending_description = candidate
+                pending_description_trusted = trusted_official
             return True
-        return update_job_description(job, candidate)
+        return update_job_description(job, candidate, trusted_official=trusted_official)
 
     if needs_description and result.status == "enriched":
         identity_validation = validate_enrichment_identity(
@@ -2638,6 +2718,7 @@ def process_enrichment_job(
             if not updated:
                 stored_status = "not_improved"
                 stored_error = (
+                    USER_PASTED_RETAINED if job.get("manual_description_active") else
                     "The extracted description was not longer than the "
                     "existing description."
                 )
@@ -2663,7 +2744,8 @@ def process_enrichment_job(
         identity_validation = official_resolution.identity_validation
         stored_status = result.status
         stored_error = result.error_message
-        updated = apply_or_stage(result)
+        updated = apply_or_stage(result, trusted_official=verified_official_description(
+            official_resolution, identity_validation))
 
         if not updated:
             stored_status = "not_improved"
@@ -2700,7 +2782,8 @@ def process_enrichment_job(
             identity_validation = official_resolution.identity_validation
             stored_status = result.status
             stored_error = result.error_message
-            updated = apply_or_stage(result)
+            updated = apply_or_stage(result, trusted_official=verified_official_description(
+                official_resolution, identity_validation))
 
             if not updated:
                 stored_status = "not_improved"
@@ -2717,6 +2800,7 @@ def process_enrichment_job(
         official_resolution=official_resolution,
         updated=updated,
         pending_description=pending_description,
+        pending_description_trusted=pending_description_trusted,
     )
 
 

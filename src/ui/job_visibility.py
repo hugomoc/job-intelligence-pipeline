@@ -67,7 +67,8 @@ def is_assessment_eligible_job(
     """
     if passes_source_trust_gate(job):
         return True
-    if str(job.get("enrichment_status") or "") == "resolution_rejected":
+    from src.description_attachment import enrichment_rejection_applies
+    if enrichment_rejection_applies(job):  # Option B: active user paste is judged on its text
         return False
     from src.repositories.recommendation_repository import description_state
     return description_state(job) == "FULL_JD"
