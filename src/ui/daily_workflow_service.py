@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 from dataclasses import dataclass
 
 from src.targeted_enrichment import plan_daily_enrichment, plan_recent_hidden_recovery
@@ -47,6 +48,33 @@ from src.repositories.recommendation_repository import (
     count_unscored_candidate_jobs,
     load_candidate_jobs,
 )
+
+# "All unscored" is resolved after ingestion/enrichment and never exceeds this
+# many scoring attempts per run. Explicit numeric selections are not capped.
+ALL_UNSCORED_MAX_ATTEMPTS_ENV = "ALL_UNSCORED_MAX_ATTEMPTS"
+DEFAULT_ALL_UNSCORED_MAX_ATTEMPTS = 30
+ALL_UNSCORED_CHOICE_PREFIX = "All unscored"
+
+
+def all_unscored_max_attempts() -> int:
+    """Configured cap for automatic all-unscored runs (invalid values: default)."""
+    raw = os.environ.get(ALL_UNSCORED_MAX_ATTEMPTS_ENV, "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_ALL_UNSCORED_MAX_ATTEMPTS
+    except ValueError:
+        value = DEFAULT_ALL_UNSCORED_MAX_ATTEMPTS
+    return value if value >= 1 else DEFAULT_ALL_UNSCORED_MAX_ATTEMPTS
+
+
+def all_unscored_choice_label(cap: int | None = None) -> str:
+    return f"{ALL_UNSCORED_CHOICE_PREFIX} (max {cap or all_unscored_max_attempts()})"
+
+
+def requested_score_limit(choice: str) -> int | None:
+    """Numeric choices stay explicit; None means resolve all-unscored later."""
+    if str(choice).startswith(ALL_UNSCORED_CHOICE_PREFIX):
+        return None
+    return int(choice)
 
 
 @dataclass(frozen=True)
@@ -104,6 +132,11 @@ class UiBacklogSummary:
     jobs_skipped: int = 0
     screening_failures: int = 0
     recovery_record_keys: tuple[str, ...] | None = None
+    limit_mode: str = "explicit"
+    effective_limit: int | None = None
+    eligible_before_scoring: int | None = None
+    scoring_attempts: int = 0
+    remaining_eligible: int | None = None
 
 
 @dataclass(frozen=True)
@@ -376,9 +409,16 @@ def automatic_enrichment_limit(
     )
 
 
+def _scoring_limit_lines(mode, requested, effective, eligible, cap):
+    if mode == "all_unscored":
+        return (f"Scoring limit: {all_unscored_choice_label(cap)}; eligible unscored after "
+                f"ingestion/enrichment: {eligible}; effective limit: {effective}",)
+    return (f"Scoring limit: {requested} (explicit selection); effective limit: {effective}",)
+
+
 def run_unscored_job_backlog(
     resume_hash: str | None,
-    limit: int,
+    limit: int | None,
     minimum_rule_score: int,
     workflow: str = "score_unscored",
     enrichment_summary: EnrichmentSummary | None = None,
@@ -386,7 +426,13 @@ def run_unscored_job_backlog(
     retry_failed: bool = True,
     search_request_limit: int = 25,
     recent_hidden_days: int | None = None,
+    all_unscored_cap: int | None = None,
 ) -> UiBacklogSummary:
+    """Score a batch. ``limit=None`` means "All unscored (max N)": the eligible
+    backlog is counted after ingestion/enrichment, capped at N attempts, and a
+    zero queue makes no screening or scoring provider requests."""
+    limit_mode = "all_unscored" if limit is None else "explicit"
+    cap = (all_unscored_cap or all_unscored_max_attempts()) if limit is None else None
     selected_resume_hash = (
         resume_hash
         or load_latest_resume_hash(
@@ -405,21 +451,57 @@ def run_unscored_job_backlog(
     try:
         if enrichment_summary is None:
             enrichment_summary = run_description_enrichment(
-                limit=enrichment_limit or automatic_enrichment_limit(limit),
+                limit=enrichment_limit or automatic_enrichment_limit(limit if limit is not None else cap),
                 minimum_words=80, resume_hash=resume_hash,
                 retry_failed=retry_failed, search_request_limit=search_request_limit,
                 recent_hidden_days=recent_hidden_days,
             )
         if recent_hidden_days is not None and enrichment_summary.recovery_record_keys is None:
             raise ValueError("Recent recovery requires an explicit record scope")
-        summary, log_lines = capture_stdout_lines(
-            score_backlog,
-            resume_hash=resume_hash,
-            limit=limit,
-            minimum_rule_score=minimum_rule_score,
-            **({"record_keys": enrichment_summary.recovery_record_keys}
-               if enrichment_summary.recovery_record_keys is not None else {}),
+        scope = enrichment_summary.recovery_record_keys
+        eligible_before = None
+        if limit is None:
+            # Count with the scoring loader itself, after ingestion/enrichment,
+            # rather than the stale pre-run session count.
+            status = load_scoring_backlog_status(resume_hash, minimum_rule_score, record_keys=scope)
+            if status.resume_hash is None:
+                raise ValueError("No cached resume profile was found for scoring.")
+            eligible_before = status.unscored_candidates
+            effective_limit = min(eligible_before, cap)
+        else:
+            effective_limit = limit
+        limit_lines = _scoring_limit_lines(limit_mode, limit, effective_limit, eligible_before, cap)
+        if effective_limit <= 0:
+            summary = BacklogSummary(
+                resume_hash=(status.resume_hash if limit is None else selected_resume_hash) or "",
+                model_name=get_model_name(), candidates_selected=0,
+                already_scored=0, scores_saved=0, jobs_failed=0, gemini_scores_saved=0,
+                openai_scores_saved=0, quota_exhausted=False, dbt_was_run=False)
+            log_lines = ("No eligible unscored jobs; no screening or scoring provider requests were made.",)
+        else:
+            summary, log_lines = capture_stdout_lines(
+                score_backlog,
+                resume_hash=resume_hash,
+                limit=effective_limit,
+                minimum_rule_score=minimum_rule_score,
+                **({"record_keys": scope} if scope is not None else {}),
+            )
+        scoring_attempts = summary.scores_saved + summary.jobs_failed
+        try:
+            remaining = load_scoring_backlog_status(
+                resume_hash, minimum_rule_score, record_keys=scope).unscored_candidates
+        except Exception as error:  # Reporting only; never fails a completed run.
+            remaining = None
+            print(f"Remaining backlog count unavailable: {type(error).__name__}")
+        outcome_lines = (
+            f"Scoring attempts: {scoring_attempts} (saved {summary.scores_saved}, failed "
+            f"{summary.jobs_failed}, skipped {getattr(summary, 'jobs_skipped', 0)}); "
+            f"remaining eligible unscored: {'unknown' if remaining is None else remaining}",
         )
+        if limit_mode == "all_unscored" and remaining:
+            outcome_lines += (f"Stopped at the all-unscored cap of {cap}; {remaining} eligible "
+                              "jobs remain for a later run. The backlog is not fully drained.",)
+        log_lines = limit_lines + tuple(log_lines) + outcome_lines
         combined_log_lines = (
             (
                 "Automatic description enrichment",
@@ -463,6 +545,11 @@ def run_unscored_job_backlog(
             jobs_skipped=getattr(summary, "jobs_skipped", 0),
             screening_failures=getattr(summary, "screening_failures", 0),
             recovery_record_keys=enrichment_summary.recovery_record_keys,
+            limit_mode=limit_mode,
+            effective_limit=effective_limit,
+            eligible_before_scoring=eligible_before,
+            scoring_attempts=scoring_attempts,
+            remaining_eligible=remaining,
         )
 
         if run_id:
@@ -512,6 +599,7 @@ def run_unscored_job_backlog(
 def load_scoring_backlog_status(
     resume_hash: str | None,
     minimum_rule_score: int,
+    record_keys: tuple[str, ...] | None = None,
 ) -> ScoringBacklogStatus:
     model_name = get_model_name()
     selected_resume_hash = resume_hash or load_latest_resume_hash(
@@ -538,6 +626,7 @@ def load_scoring_backlog_status(
         resume_hash=selected_resume_hash, model_name=model_name, limit=100000,
         minimum_rule_score=minimum_rule_score, prompt_version=MATCHER_PROMPT_VERSION,
         reuse_any_model=True,
+        **({"record_keys": record_keys} if record_keys is not None else {}),
     )
     return ScoringBacklogStatus(
         resume_hash=selected_resume_hash,

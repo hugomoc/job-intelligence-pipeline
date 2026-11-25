@@ -424,6 +424,55 @@ def test_empty_daily_queue_does_not_load_careers_history() -> None:
         load.assert_not_called()
 
 
+def test_streamlit_all_unscored_choice_is_resolved_after_enrichment_and_capped() -> None:
+    """The stale pre-run count (0) must not become limit 1; the service gets None."""
+    from streamlit.testing.v1 import AppTest
+    from src.ui.daily_workflow_service import UiBacklogSummary
+
+    metrics = recommendation_repository.reviewable_job_metrics([])
+    metrics.update(raw_jobs=0, exact_postings=0, enrichment_attempts={})
+    calls = []
+
+    def fake_backlog(**kwargs):
+        calls.append(kwargs)
+        return UiBacklogSummary(
+            resume_hash="test-resume", model_name="fixture", candidates_selected=30, already_scored=0,
+            scores_saved=30, jobs_failed=0, gemini_scores_saved=30, openai_scores_saved=0,
+            quota_exhausted=False, dbt_was_run=False,
+            log_lines=("Scoring limit: All unscored (max 30); eligible unscored after "
+                       "ingestion/enrichment: 45; effective limit: 30",),
+            limit_mode="all_unscored", effective_limit=30, eligible_before_scoring=45,
+            scoring_attempts=30, remaining_eligible=15)
+
+    with disposable_enrichment_database(), \
+         patch.object(daily_workflow_service, "run_unscored_job_backlog", side_effect=fake_backlog), \
+         patch.object(daily_workflow_service, "load_scoring_backlog_status",
+                      return_value=ScoringBacklogStatus("test-resume", 0, 0, ())), \
+         patch.object(recommendation_repository, "load_all_jobs", return_value=[]), \
+         patch.object(recommendation_repository, "load_pipeline_operation_metrics", return_value=metrics), \
+         patch("src.actionability.refresh_daily", return_value=None):
+        app = AppTest.from_string(Path("streamlit_app.py").read_text(), default_timeout=30)
+        app.session_state["resume_hash"] = "test-resume"
+        app.run()
+        assert not app.exception, str(app.exception)
+        selector = next(s for s in app.selectbox if s.label == "Unscored jobs to process")
+        assert list(selector.options) == ["20", "50", "100", "All unscored (max 30)"]
+        selector.set_value("All unscored (max 30)").run()
+        next(b for b in app.button if b.label == "Score unscored jobs").click().run()
+        assert not app.exception, str(app.exception)
+        assert calls and calls[-1]["limit"] is None
+        values = [item.value for item in app.markdown]
+        assert "Effective scoring limit: 30" in values
+        assert "Scoring attempts: 30" in values
+        assert "Eligible unscored jobs remaining: 15" in values
+
+        calls.clear()
+        selector = next(s for s in app.selectbox if s.label == "Unscored jobs to process")
+        selector.set_value("50").run()
+        next(b for b in app.button if b.label == "Score unscored jobs").click().run()
+        assert calls and calls[-1]["limit"] == 50
+
+
 def main() -> None:
     test_resume_profile_cache_survives_scoring_model_change()
     test_automatic_enrichment_limit_uses_shared_default()
@@ -435,6 +484,7 @@ def main() -> None:
     test_streamlit_renders_partial_enrichment_diagnostics()
     test_daily_careers_cache_seed_reuses_one_trusted_candidate_load()
     test_empty_daily_queue_does_not_load_careers_history()
+    test_streamlit_all_unscored_choice_is_resolved_after_enrichment_and_capped()
     print("Daily workflow service tests passed.")
 
 

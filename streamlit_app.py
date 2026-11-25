@@ -25,7 +25,10 @@ from src.scoring_run_repository import load_latest_completed_ingestion_run, load
 from src.ui.date_filters import apply_latest_ingestion_end_date, pacific_date, pacific_today
 from src.ui.daily_workflow_service import (
     DailyWorkflowError,
+    all_unscored_choice_label,
+    all_unscored_max_attempts,
     load_scoring_backlog_status,
+    requested_score_limit,
     run_description_enrichment,
     run_email_ingestion,
     run_unscored_job_backlog,
@@ -608,18 +611,16 @@ with st.sidebar:
             "20",
             "50",
             "100",
-            "All unscored",
+            all_unscored_choice_label(),
         ],
         help=(
             "Batch size for this run. Already-scored jobs are "
-            "skipped automatically."
+            "skipped automatically. All unscored counts the eligible "
+            "backlog after ingestion and enrichment, up to the cap."
         ),
     )
-    daily_score_limit = (
-        max(backlog_status.unscored_candidates, 1)
-        if score_limit_choice == "All unscored"
-        else int(score_limit_choice)
-    )
+    # None = resolve "All unscored" after ingestion/enrichment (capped).
+    daily_score_limit = requested_score_limit(score_limit_choice)
 
 run_ingestion_clicked = st.sidebar.button(
     "Ingest emails",
@@ -789,7 +790,10 @@ if uploaded_file and score_uploaded_clicked:
             result = process_resume_upload(
                 uploaded_file=uploaded_file,
                 candidate_id=st.session_state.get("candidate_id"),
-                limit=int(daily_score_limit),
+                # A new resume has no meaningful pre-run backlog count: bound
+                # "All unscored" by the same safety cap.
+                limit=(int(daily_score_limit) if daily_score_limit is not None
+                       else all_unscored_max_attempts()),
                 minimum_rule_score=int(daily_minimum_rule_score),
             )
 
@@ -942,7 +946,7 @@ if resume_preparation_succeeded and (
         with st.status("Scoring unscored jobs...", expanded=True) as status:
             backlog_result = run_unscored_job_backlog(
                 resume_hash=st.session_state.get("resume_hash"),
-                limit=int(daily_score_limit),
+                limit=daily_score_limit,
                 minimum_rule_score=int(daily_minimum_rule_score),
                 recent_hidden_days=5 if recent_hidden_recovery else None,
                 enrichment_summary=enrichment_result,
@@ -966,7 +970,12 @@ if resume_preparation_succeeded and (
             recovery_activity_keys = backlog_result.recovery_record_keys
             st.session_state["resume_hash"] = backlog_result.resume_hash
             st.write(f"Already cached job scores: {backlog_result.already_scored}")
+            st.write(f"Effective scoring limit: {backlog_result.effective_limit}")
             st.write(f"Jobs selected for scoring: {backlog_result.candidates_selected}")
+            st.write(f"Scoring attempts: {backlog_result.scoring_attempts}")
+            remaining = backlog_result.remaining_eligible
+            st.write("Eligible unscored jobs remaining: "
+                     + ("unknown" if remaining is None else str(remaining)))
             st.write(f"New job scores saved: {backlog_result.scores_saved}")
             st.write(f"Gemini scores saved: {backlog_result.gemini_scores_saved}")
             st.write(f"OpenAI scores saved: {backlog_result.openai_scores_saved}")
