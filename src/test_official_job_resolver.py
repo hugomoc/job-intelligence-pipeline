@@ -562,6 +562,150 @@ def test_ui_open_link_labels_unverified_aggregator_source_page() -> None:
     assert unsafe.url is None
 
 
+# S2 R1 correction: a search copy of a posting is replaced only by the same
+# exact URL after the employer chain independently proves it. Mocked HTTP only.
+BASK_APEX = "https://bask.health/"
+BASK_CAREERS = "https://jobs.bask.health/careers"
+BASK_POST = "https://jobs.bask.health/careers/905C5C2826"
+BASK_OTHER = "https://jobs.bask.health/careers/77AA11BB22"
+
+
+def bask_posting(company="Bask Health", title="Data Engineer", canonical=BASK_POST,
+                 identifier="905C5C2826") -> str:
+    node = {"@type": "JobPosting", "title": title, "hiringOrganization": {"name": company},
+            "identifier": {"value": identifier}, "jobLocation": {"name": "Remote"},
+            "description": DESCRIPTION * 3}
+    return (f"<title>{title}</title><link rel='canonical' href='{canonical}'>"
+            f"<script type='application/ld+json'>{json.dumps(node)}</script>")
+
+
+def bask_site(*, org_name="Bask Health", org_url=BASK_APEX, inventory=(BASK_POST,),
+              posting=None) -> dict[str, str]:
+    org = {"@type": "Organization", "name": org_name, "url": org_url}
+    anchors = "".join(f"<a href='{url}'>Data Engineer</a>" for url in inventory)
+    return {
+        BASK_APEX: f"<script type='application/ld+json'>{json.dumps(org)}</script>"
+                   f"<a href='{BASK_CAREERS}'>Careers</a>",
+        BASK_CAREERS: f"<title>Bask Health Careers</title><a href='{BASK_APEX}'>Home</a>{anchors}",
+        BASK_POST: posting or bask_posting(),
+    }
+
+
+def resolve_bask(pages: dict[str, str], search_urls: list[str], **job_fields):
+    from src.enrichment import employer_careers
+    from src.enrichment.ats import ATS_DISCOVERY_CACHE
+    from src.enrichment.ats.base import OfficialJobCandidate
+    employer_careers.CAREERS_CACHE.clear()
+    ATS_DISCOVERY_CACHE.clear()
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        body = pages.get(str(request.url))
+        return httpx.Response(200 if body is not None else 404, text=body or "",
+                              headers={"content-type": "text/html"})
+
+    job = {"title": "Data Engineer", "company_name": "Bask Health", "location": "Remote",
+           "source": "builtin", "record_key": "s2-bask", **job_fields}
+
+    def fake_search(searched_job, _client, provider=None):
+        searched_job["public_search_trace"] = {"organic_results": [{"url": BASK_CAREERS}]}
+        return [OfficialJobCandidate(url, "Data Engineer", "search") for url in search_urls]
+
+    with httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True) as client, \
+         patch.object(official_resolver, "discover_ats_candidates", return_value=[]), \
+         patch.object(official_resolver, "search_candidates", side_effect=fake_search), \
+         patch.object(official_resolver, "fetch_dynamic_job_description", return_value=None):
+        result = resolve_official_job(job, client)
+    return result, job, requests
+
+
+def test_s2_bask_employer_proof_replaces_search_copy_of_same_posting() -> None:
+    result, job, requests = resolve_bask(bask_site(), [BASK_POST])
+
+    assert result.status == OFFICIAL_FOUND_VERIFIED, result.official_url_validation_reason
+    assert result.official_url_source == "employer"
+    assert result.official_job_url == BASK_POST
+    # The chain's own evidence, unchanged: fetched brand, careers link, inventory.
+    assert result.employer_provenance == {
+        "company": "bask health", "corporate_url": BASK_APEX, "careers_url": BASK_CAREERS,
+        "basis": "fetched_corporate_brand_and_published_careers_link",
+        "platforms": [], "inventory_url": BASK_CAREERS, "posting_url": BASK_POST}
+    # One effective candidate: fetched once, no artificial ambiguity.
+    assert requests.count(BASK_POST) == 1
+    traces = [t for t in job["candidate_validation_trace"] if t["url"] == BASK_POST]
+    assert [(t["official_url_source"], t["accepted"]) for t in traces] == [("employer", True)]
+
+
+def test_s2_bask_corporate_brand_failure_keeps_search_copy_untrusted() -> None:
+    for org in ({"org_name": "Bask Health Partners"}, {"org_url": "https://elsewhere.com/"}):
+        result, job, _ = resolve_bask(bask_site(**org), [BASK_POST])
+        assert result.status != OFFICIAL_FOUND_VERIFIED
+        assert result.official_job_url is None
+        assert result.employer_provenance is None
+        traces = [t for t in job["candidate_validation_trace"] if t["url"] == BASK_POST]
+        assert [(t["official_url_source"], t["accepted"]) for t in traces] == [("search", False)]
+        assert traces[0]["reason"] == "fetched URL lacks supported specific posting identity/provenance"
+    pages = bask_site()
+    pages[BASK_APEX] = f"<title>Bask Health</title><a href='{BASK_CAREERS}'>Careers</a>"
+    result, _, _ = resolve_bask(pages, [BASK_POST])
+    assert result.status != OFFICIAL_FOUND_VERIFIED and result.employer_provenance is None
+
+
+def test_s2_unauthorized_external_posting_never_gains_employer_provenance() -> None:
+    external = "https://unrelated-careers.com/jobs/data-engineer/905C5C2826"
+    pages = bask_site(inventory=(external,))
+    pages[external] = bask_posting(canonical=external)
+    result, job, _ = resolve_bask(pages, [external])
+    assert result.status != OFFICIAL_FOUND_VERIFIED
+    assert result.employer_provenance is None
+    assert all(t["official_url_source"] != "employer" for t in job["candidate_validation_trace"])
+
+
+def test_s2_search_only_posting_stays_untrusted_when_chain_never_reaches_it() -> None:
+    # Brand and careers link verify, but the inventory lists a different posting.
+    result, job, _ = resolve_bask(bask_site(inventory=(BASK_OTHER,)), [BASK_POST])
+    assert result.status != OFFICIAL_FOUND_VERIFIED
+    assert result.official_job_url is None and result.employer_provenance is None
+    traces = [t for t in job["candidate_validation_trace"] if t["url"] == BASK_POST]
+    assert [(t["official_url_source"], t["accepted"]) for t in traces] == [("search", False)]
+
+
+def test_s2_employer_proven_posting_still_fails_conflicting_identity() -> None:
+    cases = {
+        "company": ({"posting": bask_posting(company="Other Company")}, {}),
+        "title": ({"posting": bask_posting(title="Registered Nurse")}, {}),
+        "canonical": ({"posting": bask_posting(canonical=BASK_OTHER)}, {}),
+        "requisition": ({}, {"original_requisition_id": "REQ-OTHER-1"}),
+    }
+    for name, (site, fields) in cases.items():
+        result, job, _ = resolve_bask(bask_site(**site), [BASK_POST], **fields)
+        assert result.status != OFFICIAL_FOUND_VERIFIED, name
+        assert result.official_job_url is None, name
+        traces = [t for t in job["candidate_validation_trace"] if t["url"] == BASK_POST]
+        # The proven candidate was the one checked, and it was still rejected.
+        assert [(t["official_url_source"], t["accepted"]) for t in traces] == [("employer", False)], name
+
+
+def test_s2_duplicate_discovery_yields_one_candidate_and_keeps_unrelated_distinct() -> None:
+    unrelated = "https://jobs.bask.health/careers/31CC44DD55"
+    pages = bask_site()
+    pages[unrelated] = bask_posting(title="Registered Nurse", canonical=unrelated, identifier="31CC44DD55")
+    result, job, requests = resolve_bask(pages, [BASK_POST, unrelated])
+    assert result.status == OFFICIAL_FOUND_VERIFIED
+    assert result.official_url_source == "employer"
+    assert requests.count(BASK_POST) == 1 and requests.count(unrelated) == 1
+    sources = {t["url"]: t["official_url_source"] for t in job["candidate_validation_trace"]}
+    assert sources == {BASK_POST: "employer", unrelated: "search"}
+
+
+def test_s2_bask_verifies_via_employer_chain_when_search_returns_nothing() -> None:
+    result, _, requests = resolve_bask(bask_site(), [])
+    assert result.status == OFFICIAL_FOUND_VERIFIED
+    assert result.official_url_source == "employer"
+    assert requests.count(BASK_POST) == 1
+
+
 def main() -> None:
     test_lensa_generic_page_falls_back_to_official_job()
     test_source_apply_url_is_preserved_when_official_url_is_stored()
@@ -577,6 +721,13 @@ def main() -> None:
     test_dynamic_candidate_fetch_can_verify_official_job()
     test_ui_open_link_prefers_verified_official_url()
     test_ui_open_link_labels_unverified_aggregator_source_page()
+    test_s2_bask_employer_proof_replaces_search_copy_of_same_posting()
+    test_s2_bask_corporate_brand_failure_keeps_search_copy_untrusted()
+    test_s2_unauthorized_external_posting_never_gains_employer_provenance()
+    test_s2_search_only_posting_stays_untrusted_when_chain_never_reaches_it()
+    test_s2_employer_proven_posting_still_fails_conflicting_identity()
+    test_s2_duplicate_discovery_yields_one_candidate_and_keeps_unrelated_distinct()
+    test_s2_bask_verifies_via_employer_chain_when_search_returns_nothing()
     print("Official job resolver tests passed.")
 
 

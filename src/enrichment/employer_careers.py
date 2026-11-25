@@ -126,16 +126,29 @@ def excluded_corporate_lead(url):
     ))
 
 
+# Generic leading words never identify an employer's domain on their own.
+PARENT_PROBE_STOP_WORDS = frozenset({
+    'a', 'an', 'the', 'and', 'of', 'at', 'for', 'in', 'on', 'by', 'to', 'with',
+})
+
+
+def parent_probe_token(company):
+    """First significant company token (>= 3 chars), or None: no probe."""
+    tokens = [t for t in normalize_company_name(company).split() if t not in PARENT_PROBE_STOP_WORDS]
+    return tokens[0] if tokens and len(tokens[0]) >= 3 else None
+
+
 def parent_roots_from_careers_leads(company, leads):
     """Generate bounded, untrusted apex probes from company-token subdomains.
 
     A search hit never establishes ownership. The derived site still needs
     independent JSON-LD corporate branding and a published careers link.
+    The parent's first label must start with the first significant company
+    token (``bask`` -> ``bask.health``, ``sevita`` -> ``sevitahealth.com``).
     """
-    tokens = normalize_company_name(company).split()
-    if not tokens:
+    first = parent_probe_token(company)
+    if not first:
         return []
-    first = tokens[0]
     roots = []
     for lead in leads[:2]:
         if not public_https_url(lead) or excluded_corporate_lead(lead):
@@ -144,7 +157,7 @@ def parent_roots_from_careers_leads(company, leads):
         if len(labels) < 3:
             continue
         parent = '.'.join(labels[1:])
-        if first not in labels[1]:
+        if not labels[1].startswith(first):
             continue
         root = 'https://' + parent + '/'
         if public_https_url(root) and root not in roots:
@@ -173,6 +186,27 @@ def corporate_brand_matches(html, company, url):
         except (ValueError, TypeError):
             continue
     return False
+
+
+def corporate_brand_failure_reason(html, company, url):
+    """Diagnostic category only; acceptance stays in corporate_brand_matches."""
+    soup = BeautifulSoup(html, 'html.parser')
+    expected = normalize_company_name(company)
+    named = False
+    organizations = False
+    for script in soup.find_all('script', type='application/ld+json'):
+        try:
+            for node in walk_json(json.loads(script.get_text())):
+                if node.get('@type') not in ('Organization', 'Corporation', 'WebSite'):
+                    continue
+                organizations = True
+                if normalize_company_name(node.get('legalName') or node.get('name')) == expected:
+                    named = True
+        except (ValueError, TypeError):
+            continue
+    if not organizations:
+        return 'organization_data_missing'
+    return 'organization_host_mismatch' if named else 'organization_name_mismatch'
 
 
 def platform_evidence(soup, url):
@@ -255,8 +289,12 @@ def discover_employer_candidates(job, client, *, deadline=None, corporate_leads=
         # not borrowed from another unverified record or a search result.
         proof = remember_verified_careers(job)
         if proof is None:
-            # Keep the four existing lead/guessed roots intact. Derived parents
-            # are supplemental and stay inside the existing 12-GET budget.
+            # Up to four primary roots (search leads, then guessed .com roots)
+            # plus up to two supplemental derived parents (one per lead). All
+            # share this call's 12-GET PublicPages budget; redirects count.
+            # The resolver makes at most two calls per job (24 counted GETs).
+            # ATS discovery, public search and candidate fetches are bounded
+            # by their own separate controls, not by this budget.
             # Discard known job aggregators *before* they occupy lead slots.
             leads = [lead for lead in corporate_leads
                      if public_https_url(lead) and not excluded_corporate_lead(lead)][:2]
@@ -264,11 +302,17 @@ def discover_employer_candidates(job, client, *, deadline=None, corporate_leads=
             roots.extend(root for root in parent_roots_from_careers_leads(company, leads)
                          if root not in roots)
             for root in roots:
+                # Every root source (lead, guessed .com, derived parent) must
+                # pass the same guard before any request reaches the transport.
+                if is_aggregator_domain(root) or not public_https_url(root):
+                    continue
                 response = pages.get(root)
                 if response is None:
                     continue
                 if not corporate_brand_matches(response.text, company, str(response.url)):
-                    trace.append(dict(url=str(response.url), reason='corporate_brand_unconfirmed'))
+                    trace.append(dict(url=str(response.url), reason='corporate_brand_unconfirmed',
+                                      detail=corporate_brand_failure_reason(
+                                          response.text, company, str(response.url))))
                     continue
                 trace.append(dict(url=str(response.url), reason='corporate_brand_confirmed'))
                 soup = BeautifulSoup(response.text, 'html.parser')

@@ -1305,6 +1305,17 @@ def resolve_official_job(
             if lead.url not in seen_urls:
                 candidates.append(lead)
                 seen_urls.add(lead.url)
+                continue
+            # The employer chain independently reached this exact posting URL
+            # (brand -> careers link -> inventory). Swap it in for the
+            # search-only copy at the same position, so no duplicate fetch
+            # occurs. Provenance comes only from the chain, never from search.
+            proven = (lead.source == 'employer' and lead.employer_provenance
+                      and lead.employer_provenance.get('posting_url') == lead.url)
+            index = next((i for i, existing in enumerate(candidates)
+                          if existing.url == lead.url and not existing.employer_provenance), None)
+            if proven and index is not None:
+                candidates[index] = lead
     workday_homepages = [
         hit["url"] for hit in search_trace.get("organic_results", [])
         if ats_type_for_url(hit.get("url", "")) == "workday"

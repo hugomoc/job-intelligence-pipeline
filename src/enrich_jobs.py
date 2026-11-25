@@ -1744,7 +1744,7 @@ def process_enrichment_batch(
         for event in job.get("employer_discovery_trace", []):
             details = {"record_key": job.get("record_key"),
                        "url": (sanitize_url(event.get("url")) or "").replace("://", "[:]//")}
-            for field in ("reason", "method", "http_status", "candidates_found"):
+            for field in ("reason", "detail", "method", "http_status", "candidates_found"):
                 if field in event:
                     details[field] = event[field]
             log("Employer chain diagnostic: " + json.dumps(details))
@@ -2575,6 +2575,7 @@ def process_enrichment_job(
     job["enrichment_timing"] = {}
     job["public_search_diagnostics"] = []
     job["retrieval_diagnostics"] = []
+    job["employer_discovery_trace"] = []
     needs_description = bool(
         job.get(
             "needs_description_enrichment",
