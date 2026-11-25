@@ -107,6 +107,51 @@ def corporate_roots(company):
     return [url for url in roots if public_https_url(url)]
 
 
+# These are search-result intermediaries, not an employer's corporate home.
+# Check hostname label boundaries; similarly named corporate sites remain eligible.
+NON_EMPLOYER_LEAD_DOMAINS = frozenset({
+    'indeed.com', 'talent.com', 'jobgether.com', 'tavily.com',
+})
+
+
+def excluded_corporate_lead(url):
+    from src.enrichment.official_job_resolver import is_aggregator_domain
+    try:
+        host = (urlsplit(url).hostname or '').casefold()
+    except (ValueError, TypeError):
+        return True
+    return (is_aggregator_domain(url) or any(
+        host == domain or host.endswith('.' + domain)
+        for domain in NON_EMPLOYER_LEAD_DOMAINS
+    ))
+
+
+def parent_roots_from_careers_leads(company, leads):
+    """Generate bounded, untrusted apex probes from company-token subdomains.
+
+    A search hit never establishes ownership. The derived site still needs
+    independent JSON-LD corporate branding and a published careers link.
+    """
+    tokens = normalize_company_name(company).split()
+    if not tokens:
+        return []
+    first = tokens[0]
+    roots = []
+    for lead in leads[:2]:
+        if not public_https_url(lead) or excluded_corporate_lead(lead):
+            continue
+        labels = (urlsplit(lead).hostname or '').casefold().split('.')
+        if len(labels) < 3:
+            continue
+        parent = '.'.join(labels[1:])
+        if first not in labels[1]:
+            continue
+        root = 'https://' + parent + '/'
+        if public_https_url(root) and root not in roots:
+            roots.append(root)
+    return roots
+
+
 def corporate_brand_matches(html, company, url):
     """Require full normalized company branding in fetched structured data.
 
@@ -210,13 +255,22 @@ def discover_employer_candidates(job, client, *, deadline=None, corporate_leads=
         # not borrowed from another unverified record or a search result.
         proof = remember_verified_careers(job)
         if proof is None:
-            roots = list(dict.fromkeys([*corporate_leads, *corporate_roots(company)]))[:4]
+            # Keep the four existing lead/guessed roots intact. Derived parents
+            # are supplemental and stay inside the existing 12-GET budget.
+            # Discard known job aggregators *before* they occupy lead slots.
+            leads = [lead for lead in corporate_leads
+                     if public_https_url(lead) and not excluded_corporate_lead(lead)][:2]
+            roots = list(dict.fromkeys([*leads, *corporate_roots(company)]))[:4]
+            roots.extend(root for root in parent_roots_from_careers_leads(company, leads)
+                         if root not in roots)
             for root in roots:
-                if is_aggregator_domain(root) or not public_https_url(root):
-                    continue
                 response = pages.get(root)
-                if response is None or not corporate_brand_matches(response.text, company, str(response.url)):
+                if response is None:
                     continue
+                if not corporate_brand_matches(response.text, company, str(response.url)):
+                    trace.append(dict(url=str(response.url), reason='corporate_brand_unconfirmed'))
+                    continue
+                trace.append(dict(url=str(response.url), reason='corporate_brand_confirmed'))
                 soup = BeautifulSoup(response.text, 'html.parser')
                 for a in soup.find_all('a', href=True):
                     if not re.search(r'\b(careers?|jobs?|join (?:our|the) team)\b', a.get_text(' ', strip=True), re.I):
@@ -226,9 +280,11 @@ def discover_employer_candidates(job, client, *, deadline=None, corporate_leads=
                         continue
                     proof = dict(company=key, corporate_url=str(response.url), careers_url=target,
                                  basis='fetched_corporate_brand_and_published_careers_link')
+                    trace.append(dict(url=target, reason='published_careers_link_found'))
                     break
                 if proof:
                     break
+                trace.append(dict(url=str(response.url), reason='published_careers_link_missing'))
     if proof is None:
         return []
     queue = [proof['careers_url']]
@@ -240,6 +296,7 @@ def discover_employer_candidates(job, client, *, deadline=None, corporate_leads=
         visited.add(url)
         response = pages.get(url)
         if response is None:
+            trace.append(dict(url=url, reason='careers_inventory_unavailable'))
             continue
         final = str(response.url)
         # Careers redirects may lead to an ATS, but never an aggregator.
@@ -296,6 +353,8 @@ def discover_employer_candidates(job, client, *, deadline=None, corporate_leads=
                     except ValueError:
                         pass
         ranked = filter_and_rank_candidates(job, found, max_results=5)
+        trace.append(dict(url=final, reason='careers_inventory_candidates',
+                          candidates_found=len(ranked)))
         for candidate in ranked:
             # An arbitrary external link must not inherit employer provenance.
             same_host = urlsplit(candidate.url).hostname == urlsplit(final).hostname
