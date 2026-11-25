@@ -103,12 +103,31 @@ def load_raw_jobs() -> list[dict[str, Any]]:
     ]
 
 
-def refresh_job_matches(
-    results: list[MatchResult],
-) -> None:
-    initialize_match_table()
+JOB_MATCH_INSERT_SQL = """
+    INSERT INTO job_matches (
+        record_key,
+        search_id,
+        search_title,
+        match_score,
+        title_score,
+        location_score,
+        keyword_score,
+        freshness_score,
+        matched_keywords,
+        excluded_keywords,
+        reasons,
+        is_recommended,
+        needs_review
+    )
+    VALUES (
+        ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?
+    )
+"""
 
-    rows = [
+
+def job_match_rows(results: list[MatchResult]) -> list[tuple]:
+    return [
         (
             result.record_key,
             result.search_id,
@@ -136,6 +155,14 @@ def refresh_job_matches(
         for result in results
     ]
 
+
+def refresh_job_matches(
+    results: list[MatchResult],
+) -> None:
+    initialize_match_table()
+
+    rows = job_match_rows(results)
+
     with get_connection() as connection:
         connection.execute(
             "BEGIN TRANSACTION"
@@ -149,30 +176,7 @@ def refresh_job_matches(
             )
 
             if rows:
-                connection.executemany(
-                    """
-                    INSERT INTO job_matches (
-                        record_key,
-                        search_id,
-                        search_title,
-                        match_score,
-                        title_score,
-                        location_score,
-                        keyword_score,
-                        freshness_score,
-                        matched_keywords,
-                        excluded_keywords,
-                        reasons,
-                        is_recommended,
-                        needs_review
-                    )
-                    VALUES (
-                        ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?
-                    )
-                    """,
-                    rows,
-                )
+                connection.executemany(JOB_MATCH_INSERT_SQL, rows)
 
             connection.execute("COMMIT")
 

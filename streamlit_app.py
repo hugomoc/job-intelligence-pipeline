@@ -58,6 +58,14 @@ from src.ui.job_visibility import (
 )
 from src.ui.pagination import PAGE_SIZE_OPTIONS, paginate_items
 from src.ui.pending_verification import description_evidence_label
+from src.ui.job_visibility import is_employer_verified
+from src.description_attachment import (
+    attachment_form_mode,
+    save_attached_description,
+    superseded_after_scoring,
+    undo_attached_description,
+    validate_pasted_description,
+)
 
 from src.ui.jobs_snapshot import (
     invalidate_data, jobs_snapshot, display_snapshot, scoring_snapshot,
@@ -103,6 +111,85 @@ def manual_rescore(record_key):
         invalidate_data(st.session_state, 'manual rescore completed')
     except Exception:
         st.error('Rescore failed. The previous saved assessment is unchanged.')
+
+
+def attach_text_key(record_key):
+    return f"attach-text-{record_key}"
+
+
+def attach_message_key(record_key):
+    return f"attach-message-{record_key}"
+
+
+def save_description_attachment(record_key):
+    """One persistence operation; never scores, enriches or calls a provider."""
+    try:
+        outcome = save_attached_description(
+            record_key, st.session_state.get(attach_text_key(record_key), ""),
+            resume_hash=st.session_state.get("resume_hash"))
+    except Exception:
+        st.session_state[attach_message_key(record_key)] = (
+            "error", "The description could not be saved. Nothing was changed.")
+        return
+    kind = {"saved": "success", "unchanged": "info"}.get(outcome.status, "error")
+    st.session_state[attach_message_key(record_key)] = (kind, outcome.message)
+    if outcome.status == "saved":
+        st.session_state[attach_text_key(record_key)] = ""
+        invalidate_data(st.session_state, "description attached")
+
+
+def undo_description_attachment(record_key):
+    try:
+        outcome = undo_attached_description(record_key, resume_hash=st.session_state.get("resume_hash"))
+    except Exception:
+        st.session_state[attach_message_key(record_key)] = (
+            "error", "Undo failed. Nothing was changed.")
+        return
+    st.session_state[attach_message_key(record_key)] = (
+        "success" if outcome.status == "undone" else "error", outcome.message)
+    if outcome.status == "undone":
+        invalidate_data(st.session_state, "description attachment undone")
+
+
+def render_attach_description(job: dict, mode: str) -> None:
+    """V1 form: New, unscored jobs without a complete description (or your own paste)."""
+    record_key = job["record_key"]
+    label = "Attach description" if mode == "attach" else "Replace pasted description"
+    with st.expander(label, expanded=bool(st.session_state.get(attach_message_key(record_key)))):
+        message = st.session_state.pop(attach_message_key(record_key), None)
+        if message:
+            getattr(st, message[0])(message[1])
+        st.markdown(f"**{job.get('title') or 'Untitled job'}** · {job.get('company_name') or 'Unknown company'}")
+        target = select_job_open_target(job)
+        if target.url:
+            st.link_button(f"Open original posting ({target.label})", target.url)
+        state_label = description_evidence_label(dict(
+            description_state=job.get("description_state"),
+            description_word_count=job.get("raw_description_word_count") or job.get("description_word_count") or 0))
+        verification = "Verified employer posting" if is_employer_verified(job) else "Unverified posting"
+        st.caption(f"Current description: {state_label} · {verification}")
+        if job.get("manual_description_active"):
+            st.caption(f"Description source: user pasted · {job.get('manual_description_attached_at')}")
+        st.caption("Saving makes this job eligible for normal AI scoring if it passes the other "
+                   "requirements. It does not verify the employer or posting. No AI request is made now.")
+        text = st.text_area("Paste the complete job description", key=attach_text_key(record_key), height=220)
+        preview = validate_pasted_description(text, title=job.get("title"), company=job.get("company_name"))
+        if text.strip():
+            st.caption(f"Words: {preview.word_count}"
+                       + (f" · {preview.duplicates_removed} repeated block(s) removed"
+                          if preview.duplicates_removed else ""))
+            if not preview.accepted:
+                st.error(preview.reason)
+            elif preview.warning:
+                st.warning(preview.warning)
+            else:
+                st.caption("Complete job description detected.")
+        save_label = "Save description" if mode == "attach" else "Replace description"
+        st.button(save_label, key=f"attach-save-{record_key}", disabled=not preview.accepted,
+                  on_click=save_description_attachment, args=(record_key,))
+        if job.get("manual_description_has_previous"):
+            st.button("Undo last paste", key=f"attach-undo-{record_key}",
+                      on_click=undo_description_attachment, args=(record_key,))
 
 
 STATUS_LABELS = {
@@ -451,6 +538,13 @@ def render_job_listing(job: dict) -> None:
             )
         if job.get("enrichment_status") == "resolution_rejected":
             notes.append("Enrichment: identity mismatch rejected.")
+        if job.get("manual_description_active"):
+            notes.append("Description: user pasted (unverified)")
+        elif job.get("manual_description_status") == "superseded":
+            notes.append("Your pasted description was replaced by a verified official description")
+        if superseded_after_scoring(job):
+            notes.append("This assessment used your earlier pasted description; a verified official "
+                         "description has since replaced it. Use 'Rescore this job' to update it")
         if notes:
             st.caption(" · ".join(notes))
 
@@ -552,6 +646,10 @@ def render_job_listing(job: dict) -> None:
                         "Official validation: "
                         f"{job['official_url_validation_reason']}"
                     )
+
+        attach_mode = attachment_form_mode(job)
+        if attach_mode:
+            render_attach_description(job, attach_mode)
 
         if job.get("candidate_assessment_id"):
             with st.expander("Advanced actions"):
