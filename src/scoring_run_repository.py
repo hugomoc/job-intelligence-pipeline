@@ -220,3 +220,31 @@ def load_latest_scoring_run(
         quota_exhausted=bool(row[14]),
         log_lines=log_lines,
     )
+
+
+# Written only when "Run daily" ingested and enriched successfully
+# (streamlit_app: run_daily_clicked and ingestion_succeeded and enrichment_succeeded).
+INGESTION_WORKFLOW = "ingest_enrich_score"
+
+
+def load_latest_completed_ingestion_run() -> tuple[str, datetime] | None:
+    """(run_id, completed_at) of the newest completed daily ingestion run.
+
+    Failed or unfinished runs, score-only workflows and job discovery dates are
+    never treated as evidence of a completed ingestion run.
+    """
+    initialize_scoring_run_table()
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT run_id, completed_at
+            FROM scoring_runs
+            WHERE workflow = ?
+              AND status = 'completed'
+              AND completed_at IS NOT NULL
+            ORDER BY completed_at DESC, run_id DESC
+            LIMIT 1
+            """,
+            [INGESTION_WORKFLOW],
+        ).fetchone()
+    return (str(row[0]), row[1]) if row else None

@@ -105,6 +105,13 @@ class JobDescriptionResult:
     resolved_job_id_source: str | None = None
     canonical_url: str | None = None
     resolved_employer_website: str | None = None
+    # Retrieval diagnostics only (never identity evidence or AI input):
+    # e.g. "http_403", "http_429", "bot_check:captcha",
+    # "javascript_required:enable javascript and cookies".
+    access_signal: str | None = None
+    retry_after: str | None = None
+    browser_fallback: str | None = None
+    posting_detail: str | None = None  # ATS posting-detail fallback outcome
 
 
 def create_http_client(
@@ -665,9 +672,22 @@ def extract_selector_description(
     )
 
 
-def appears_to_be_block_page(
+# Interstitials that ordinary browser rendering can satisfy (no human check).
+JAVASCRIPT_REQUIRED_PHRASES = frozenset({"enable javascript and cookies"})
+
+
+def block_page_signal(soup: BeautifulSoup) -> str | None:
+    """Name the matched block phrase: javascript_required:... or bot_check:..."""
+    phrase = matched_block_phrase(soup)
+    if phrase is None:
+        return None
+    kind = "javascript_required" if phrase in JAVASCRIPT_REQUIRED_PHRASES else "bot_check"
+    return f"{kind}:{phrase}"
+
+
+def matched_block_phrase(
     soup: BeautifulSoup,
-) -> bool:
+) -> str | None:
     title = ""
 
     if soup.title and soup.title.string:
@@ -682,10 +702,16 @@ def appears_to_be_block_page(
         )[:4_000]
     ).casefold()
 
-    return any(
-        phrase in page_preview
-        for phrase in BLOCK_PAGE_PHRASES
+    return next(
+        (phrase for phrase in BLOCK_PAGE_PHRASES if phrase in page_preview),
+        None,
     )
+
+
+def appears_to_be_block_page(
+    soup: BeautifulSoup,
+) -> bool:
+    return matched_block_phrase(soup) is not None
 
 
 def extract_job_description_from_html(
@@ -724,6 +750,7 @@ def extract_job_description_from_html(
                 "The response appears to be "
                 "an access-control or CAPTCHA page."
             ),
+            access_signal=block_page_signal(soup),
             resolved_title=metadata.get("title"),
             resolved_company=metadata.get("company"),
             resolved_location=metadata.get("location"),
@@ -974,6 +1001,8 @@ def fetch_job_description(
                 "The job site rejected or "
                 "rate-limited the request."
             ),
+            access_signal=f"http_{http_status}",
+            retry_after=(response.headers.get("retry-after") or None),
         )
 
     if http_status >= 400:

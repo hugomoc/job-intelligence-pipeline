@@ -1751,6 +1751,11 @@ def process_enrichment_batch(
                 f"reason={official.official_url_validation_reason}"
             )
 
+        from src.enrichment.retrieval_diagnostics import format_line
+        for entry in job.get("retrieval_diagnostics", []):
+            # Sanitized: identity URL parts only; no HTML, cookies or secrets.
+            log(safe_enrichment_log_message(format_line(entry)))
+
         for trace in job.get("candidate_validation_trace", []):
             if trace.get("reason") == "fetched URL lacks supported specific posting identity/provenance":
                 log_identity_diagnostics(log, job, trace.get("final_url") or trace.get("url"),
@@ -2558,6 +2563,7 @@ def process_enrichment_job(
     # Run-local only: diagnostics never become identity evidence or AI input.
     job["enrichment_timing"] = {}
     job["public_search_diagnostics"] = []
+    job["retrieval_diagnostics"] = []
     needs_description = bool(
         job.get(
             "needs_description_enrichment",
@@ -2623,6 +2629,15 @@ def process_enrichment_job(
                     "The extracted description was not longer than the "
                     "existing description."
                 )
+
+    from src.enrichment import retrieval_diagnostics
+    retrieval_diagnostics.record(
+        job, stage="source", url=job.get("apply_url"), result=source_result,
+        method="http_get" if needs_description else "stored_description",
+        identity=(None if identity_validation is None else
+                  ("accepted: " if identity_validation.accepted else "rejected: ")
+                  + str(identity_validation.reason)),
+    )
 
     known_candidate_verification = verify_known_official_candidate(
         job=job,

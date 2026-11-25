@@ -19,6 +19,7 @@ from src.repositories.recommendation_repository import (
     load_candidate_jobs,
 )
 from src.ui.job_links import select_job_open_target
+from src.ui.job_visibility import job_card_state
 from src.ui.pagination import paginate_items
 
 
@@ -274,7 +275,7 @@ def scoring_record_keys() -> list[str]:
     ]
 
 
-def test_unresolved_lensa_is_stored_and_enrichment_eligible_but_not_reviewable() -> None:
+def test_unresolved_lensa_is_stored_enrichment_eligible_and_visible_unverified() -> None:
     def scenario() -> None:
         seed_lensa(
             record_key="aceable-null",
@@ -299,12 +300,15 @@ def test_unresolved_lensa_is_stored_and_enrichment_eligible_but_not_reviewable()
             job["record_key"]
             for job in enrichment_jobs
         ] == ["aceable-null"]
-        assert review_record_keys() == []
+        # Visible in Jobs, explicitly unverified (no trusted employer key).
+        [job] = load_all_jobs(resume_hash="")
+        assert job["record_key"] == "aceable-null"
+        assert job_card_state(job).startswith("Unverified")
 
     with_temp_database(scenario)
 
 
-def test_lensa_non_verified_statuses_are_hidden() -> None:
+def test_lensa_non_verified_statuses_are_visible_but_unverified() -> None:
     def scenario() -> None:
         for status in (
             OFFICIAL_BLOCKED,
@@ -317,7 +321,13 @@ def test_lensa_non_verified_statuses_are_hidden() -> None:
                 official_status=status,
             )
 
-        assert review_record_keys() == []
+        jobs = load_all_jobs(resume_hash="")
+        assert len(jobs) == 4
+        for job in jobs:
+            assert job_card_state(job).startswith("Unverified")
+            target = select_job_open_target(job)
+            assert target.label == "Open original source listing — unverified"
+            assert target.url == job["apply_url"]
 
     with_temp_database(scenario)
 
@@ -344,7 +354,7 @@ def test_verified_lensa_with_official_greenhouse_url_is_visible_and_opens_offici
     with_temp_database(scenario)
 
 
-def test_verified_lensa_with_lensa_official_url_is_hidden() -> None:
+def test_verified_lensa_with_lensa_official_url_is_visible_but_not_verified() -> None:
     def scenario() -> None:
         seed_lensa(
             record_key="aceable-bad-verified",
@@ -352,7 +362,10 @@ def test_verified_lensa_with_lensa_official_url_is_hidden() -> None:
             official_url="https://lensa.com/jobs/aceable-bad-verified",
         )
 
-        assert review_record_keys() == []
+        [job] = load_all_jobs(resume_hash="")
+        # An aggregator "official" URL never counts as employer verification.
+        assert job_card_state(job).startswith("Unverified")
+        assert select_job_open_target(job).label == "Inspect third-party listing"
 
     with_temp_database(scenario)
 
@@ -378,7 +391,7 @@ def test_direct_jobs_remain_visible() -> None:
     with_temp_database(scenario)
 
 
-def test_visibility_counts_pagination_and_scoring_ignore_unresolved_aggregators() -> None:
+def test_visibility_counts_pagination_and_scoring_eligibility_for_unresolved_aggregators() -> None:
     def scenario() -> None:
         for index in range(10):
             seed_job(
@@ -392,6 +405,13 @@ def test_visibility_counts_pagination_and_scoring_ignore_unresolved_aggregators(
                 record_key=f"hidden-lensa-{index}",
                 official_status=None,
             )
+
+        for index in range(3):  # unverified with only a partial description
+            seed_lensa(record_key=f"partial-lensa-{index}", official_status=None)
+            with database.get_connection() as connection:
+                connection.execute(
+                    "UPDATE raw_jobs SET description = 'Build dashboards.' WHERE record_key = ?",
+                    [f"partial-lensa-{index}"])
 
         for index in range(5):
             seed_lensa(
@@ -418,19 +438,23 @@ def test_visibility_counts_pagination_and_scoring_ignore_unresolved_aggregators(
             minimum_rule_score=0,
         )
 
-        assert len(review_jobs) == 15
-        assert len(page.items) == 15
-        assert len(scoring_jobs) == 15
-        assert unscored_count == 15
-        assert all(
-            not job["record_key"].startswith("hidden-lensa")
-            for job in review_jobs + scoring_jobs
-        )
+        # Every relevant job is visible, whatever its verification status.
+        assert len(review_jobs) == 38
+        assert len(page.items) == 25
+        # "Verified" requires a trusted employer posting key, which none of these
+        # legacy fixtures carry (status/URL alone is not verification).
+        assert all(job_card_state(job).startswith("Unverified") for job in review_jobs)
+        # Scoring needs a FULL_JD: unverified Lensa jobs with a complete stored
+        # description are eligible; partial descriptions never are.
+        scored_keys = {job["record_key"] for job in scoring_jobs}
+        assert len(scoring_jobs) == 35 and unscored_count == 35
+        assert not any(key.startswith("partial-lensa") for key in scored_keys)
+        assert {f"hidden-lensa-{i}" for i in range(20)} <= scored_keys
 
     with_temp_database(scenario)
 
 
-def test_unresolved_lensa_open_target_has_no_url() -> None:
+def test_unresolved_lensa_open_target_is_the_labelled_source_listing() -> None:
     target = select_job_open_target(
         {
             "source": "lensa",
@@ -440,17 +464,19 @@ def test_unresolved_lensa_open_target_has_no_url() -> None:
         }
     )
 
-    assert target.url is None
+    assert target.url == "https://lensa.com/jobs/generic"
+    assert target.label == "Open original source listing — unverified"
+    assert "not verified" in target.note
 
 
 def main() -> None:
-    test_unresolved_lensa_is_stored_and_enrichment_eligible_but_not_reviewable()
-    test_lensa_non_verified_statuses_are_hidden()
+    test_unresolved_lensa_is_stored_enrichment_eligible_and_visible_unverified()
+    test_lensa_non_verified_statuses_are_visible_but_unverified()
     test_verified_lensa_with_official_greenhouse_url_is_visible_and_opens_official()
-    test_verified_lensa_with_lensa_official_url_is_hidden()
+    test_verified_lensa_with_lensa_official_url_is_visible_but_not_verified()
     test_direct_jobs_remain_visible()
-    test_visibility_counts_pagination_and_scoring_ignore_unresolved_aggregators()
-    test_unresolved_lensa_open_target_has_no_url()
+    test_visibility_counts_pagination_and_scoring_eligibility_for_unresolved_aggregators()
+    test_unresolved_lensa_open_target_is_the_labelled_source_listing()
     print("Aggregator visibility tests passed.")
 
 

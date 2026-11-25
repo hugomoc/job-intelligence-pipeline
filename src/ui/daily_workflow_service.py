@@ -233,7 +233,10 @@ def load_daily_enrichment_plan(*, limit, minimum_words=80, source=None,
     if recent_hidden_days is not None:
         from src.repositories.recommendation_repository import load_all_jobs, prepare_job_display
         snapshot = load_all_jobs(resume_hash=resume_hash, for_session_snapshot=True)
-        visible = prepare_job_display(snapshot)
+        # Recovery targets jobs awaiting employer verification: "hidden" means
+        # absent from the trusted-source set (every relevant job is now visible).
+        from src.ui.job_visibility import passes_source_trust_gate
+        visible = [job for job in prepare_job_display(snapshot) if passes_source_trust_gate(job)]
         selected, stats = plan_recent_hidden_recovery(inventory, visible, limit,
             days=recent_hidden_days, retry_failed=retry_failed, minimum_words=minimum_words)
     else:

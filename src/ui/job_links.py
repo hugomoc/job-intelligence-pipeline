@@ -59,10 +59,12 @@ def select_job_open_target(job: dict[str, Any]) -> JobOpenTarget:
         )
 
     if is_aggregator_job(job):
+        from src.ui.pending_verification import usable_source_url
+        source_url = str(job.get("apply_url") or "").strip()
         return JobOpenTarget(
-            label="Official job unavailable",
-            url=None,
-            note="Aggregator source hidden until an official employer/ATS link is verified.",
+            label="Open original source listing — unverified",
+            url=source_url if usable_source_url(source_url) else None,
+            note="Aggregator listing. Employer posting and current activity are not verified.",
         )
 
     resolved_url = str(job.get("resolved_candidate_url") or "").strip()

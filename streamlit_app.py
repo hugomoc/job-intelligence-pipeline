@@ -7,6 +7,7 @@ and AI scoring live in src/ so they can be tested without Streamlit.
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date, timedelta
 from html import escape
 
@@ -20,7 +21,8 @@ from src.repositories.recommendation_repository import (
     update_application_status,
 )
 from src.resume.extractor import ResumeExtractionError, create_resume_hash
-from src.scoring_run_repository import load_latest_scoring_run
+from src.scoring_run_repository import load_latest_completed_ingestion_run, load_latest_scoring_run
+from src.ui.date_filters import apply_latest_ingestion_end_date, pacific_date, pacific_today
 from src.ui.daily_workflow_service import (
     DailyWorkflowError,
     load_scoring_backlog_status,
@@ -40,10 +42,13 @@ from src.ui.job_visibility import (
     REVIEW_BUCKET_NEEDS_REVIEW,
     REVIEW_BUCKET_RECOMMENDED,
     REVIEW_FILTER_OPTIONS,
+    JOB_STATE_UNVERIFIED_SCORED,
     count_job_review_buckets,
+    job_card_state,
     filter_jobs_by_review_filter,
 )
 from src.ui.pagination import PAGE_SIZE_OPTIONS, paginate_items
+from src.ui.pending_verification import description_evidence_label
 
 from src.ui.jobs_snapshot import (
     invalidate_data, jobs_snapshot, display_snapshot, scoring_snapshot,
@@ -64,6 +69,22 @@ def change_application_status(record_key, status):
         # potentially stale status in the view. No network check is requested.
         invalidate_data(st.session_state, "status persistence error")
         st.session_state["status_change_error"] = "Could not update application status. Please retry."
+
+
+LATEST_INGESTION_RUN_CACHE_KEY = "latest_completed_ingestion_run_cache"
+
+
+def latest_completed_ingestion_run():
+    """One small query per session dataset version, not per rerun.
+
+    The cache is dropped after a successful "Run daily" so End date advances.
+    """
+    version = st.session_state.get("dataset_version", 0)
+    cached = st.session_state.get(LATEST_INGESTION_RUN_CACHE_KEY)
+    if cached is None or cached["version"] != version:
+        cached = {"version": version, "run": load_latest_completed_ingestion_run()}
+        st.session_state[LATEST_INGESTION_RUN_CACHE_KEY] = cached
+    return cached["run"]
 
 
 def manual_rescore(record_key):
@@ -129,33 +150,13 @@ def format_seen_date(value: object) -> str | None:
     return value_text.split()[0]
 
 
-def to_date(value: object) -> date | None:
-    if value is None:
-        return None
-
-    if hasattr(value, "date"):
-        return value.date()
-
-    value_text = str(value).strip()
-
-    if not value_text:
-        return None
-
-    try:
-        return date.fromisoformat(
-            value_text.split()[0]
-        )
-    except ValueError:
-        return None
-
-
 def default_date_range(
     job_dates: list[date],
     days: int = 7,
 ) -> tuple[date, date]:
     """Default to the complete inventory; only explicit user filters restrict age."""
     if not job_dates:
-        today = date.today()
+        today = pacific_today()
         return today, today
 
     min_job_date = min(job_dates)
@@ -366,8 +367,10 @@ def render_job_listing(job: dict) -> None:
                 )
             )
 
+        card_state = job_card_state(job)
         with assessment:
             render_assessment_badges(job, pipeline_state.label)
+            st.markdown(f"**{card_state}**")
             st.caption(APPLICATION_STATUS_LABELS.get(application_status, application_status))
 
         open_target = select_job_open_target(job)
@@ -408,7 +411,10 @@ def render_job_listing(job: dict) -> None:
         metadata.extend([
             title_caption,
             f"Fit priority: {fit_priority_label(job)}",
-            f"Description: {DESCRIPTION_STATE_LABELS.get(job.get('description_state'), 'Unknown')}",
+            "Description: " + description_evidence_label(dict(
+                description_state=job.get("description_state"),
+                description_word_count=job.get("raw_description_word_count")
+                or job.get("description_word_count") or 0)),
         ])
         st.caption(" · ".join(metadata))
 
@@ -425,6 +431,9 @@ def render_job_listing(job: dict) -> None:
                 "LOCATION_MISMATCH": "Location mismatch", "UNKNOWN": "Current status unknown"}[current_actionability])
         if open_target.note:
             notes.append(open_target.note)
+        if card_state == JOB_STATE_UNVERIFIED_SCORED:
+            notes.append("Unverified posting: this assessment is not a confirmed-active "
+                         "application recommendation")
         if job.get("has_incomplete_description"):
             word_count = job.get("description_word_count")
             notes.append(
@@ -946,6 +955,10 @@ if resume_preparation_succeeded and (
                     else "score_unscored"
                 ),
             )
+            if run_daily_clicked:
+                # A completed ingestion run was just persisted: re-read it so
+                # the Jobs End date advances (ordinary reruns keep the cache).
+                st.session_state.pop(LATEST_INGESTION_RUN_CACHE_KEY, None)
             if (backlog_result.scores_saved or getattr(backlog_result, "enrichment_jobs_processed", 0)
                     or st.session_state.get("resume_hash") != backlog_result.resume_hash):
                 invalidate_data(st.session_state, "scoring/enrichment/resume changed")
@@ -1042,7 +1055,7 @@ with jobs_tab:
     job_dates = [
         job_date
         for job_date in (
-            to_date(job.get("sent_at"))
+            pacific_date(job.get("sent_at"))
             for job in all_jobs
         )
         if job_date is not None
@@ -1104,6 +1117,14 @@ with jobs_tab:
         if st.session_state.get(date_key) not in available_dates:
             st.session_state.pop(date_key, None)
 
+    # End date follows the latest *completed* ingestion run (America/Los_Angeles
+    # date), once per run; reruns and manual choices are left alone.
+    if available_dates:
+        apply_latest_ingestion_end_date(
+            st.session_state, key=end_date_key, available_dates=available_dates,
+            latest_run=latest_completed_ingestion_run(),
+        )
+
     with filter_cols[3]:
         if available_dates:
             start_date_input = st.selectbox(
@@ -1121,7 +1142,10 @@ with jobs_tab:
             end_date_input = st.selectbox(
                 "End date",
                 options=available_dates,
-                index=available_dates.index(default_end_date),
+                # A session value (run-based or manual) wins; index 0 avoids
+                # Streamlit's default-vs-Session-State conflict warning.
+                index=(0 if end_date_key in st.session_state
+                       else available_dates.index(default_end_date)),
                 key=end_date_key,
                 format_func=lambda value: value.strftime("%Y-%m-%d"),
             )
@@ -1149,10 +1173,11 @@ with jobs_tab:
             options=list(REVIEW_FILTER_OPTIONS),
             index=0,
             help=(
-                "Recommended shows current scored, actionable jobs worth considering. "
-                "Needs review shows jobs awaiting a description or score. "
-                "Low fit keeps completed AI rejections available. "
-                "All shows every reviewable job."
+                "All relevant (default) shows every relevant discovered job from every "
+                "source, verified or not. Recommended shows scored, verified, currently "
+                "active jobs worth applying to. Needs review shows jobs awaiting a "
+                "description, score or verification. Low fit keeps AI rejections and weak "
+                "title matches. All also includes Low fit."
             ),
         )
 
@@ -1232,9 +1257,9 @@ with jobs_tab:
             job
             for job in filtered_jobs
             if (
-                to_date(job.get("sent_at")) is not None
+                pacific_date(job.get("sent_at")) is not None
                 and start_date
-                <= to_date(job.get("sent_at"))
+                <= pacific_date(job.get("sent_at"))
                 <= end_date
             )
         ]
@@ -1435,7 +1460,10 @@ with jobs_tab:
     st.caption(
         f"{page.total_items} jobs match filters. "
         f"{page_range_label}. {page_label}. "
-        f"{len(all_jobs)} total reviewable jobs. "
+        f"{len(all_jobs)} total relevant jobs. "
+        "Card states on this filter: " + (", ".join(
+            f"{state} {count}" for state, count in sorted(
+                Counter(job_card_state(job) for job in filtered_jobs).items())) or "none") + ". "
         f"Review buckets before Review view filter: "
         f"Recommended {review_bucket_counts[REVIEW_BUCKET_RECOMMENDED]}, "
         f"Needs review {review_bucket_counts[REVIEW_BUCKET_NEEDS_REVIEW]}, "

@@ -246,6 +246,7 @@ def discover_from_search_homepage(
         f"https://{host}/wday/cxs/{quote(tenant, safe='')}/"
         f"{quote(site, safe='')}/jobs"
     )
+    from src.enrichment.retrieval_diagnostics import record_listing
     try:
         response = client.post(
             endpoint,
@@ -254,13 +255,19 @@ def discover_from_search_homepage(
             timeout=8.0, follow_redirects=False,
         )
         if response.status_code != 200:
+            record_listing(job, stage="workday_listing", url=endpoint, http_status=response.status_code,
+                           outcome="non-200 response; no listing candidates")
             return []
         payload = response.json()
-    except (httpx.RequestError, ValueError):
+    except (httpx.RequestError, ValueError) as error:
+        record_listing(job, stage="workday_listing", url=endpoint, http_status=None,
+                       outcome=f"request or JSON error: {type(error).__name__}")
         return []
 
     postings = payload.get("jobPostings") if isinstance(payload, dict) else None
     if not isinstance(postings, list):
+        record_listing(job, stage="workday_listing", url=endpoint, http_status=200,
+                       outcome="unexpected payload; no jobPostings list")
         return []
     base = f"https://{host}/en-US/{site}"
     candidates = []
@@ -278,5 +285,7 @@ def discover_from_search_homepage(
         if candidate:
             candidates.append(candidate)
     ranked = filter_and_rank_candidates(job, candidates, max_results=5)
+    record_listing(job, stage="workday_listing", url=endpoint, http_status=200,
+                   outcome="listing returned (titles/paths only; no description)", candidates=len(ranked))
     cache[key] = tuple(ranked)
     return ranked

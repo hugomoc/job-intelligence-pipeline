@@ -141,7 +141,7 @@ class SafetyReview(unittest.TestCase):
    self.assertEqual(loaded['distinct-new']['application_status'],'new')
   with_temp_database(forged_scenario)
  def test_legacy_builtin_safe_visible_unknown(self):
-  from src.ui.job_visibility import is_user_reviewable_job
+  from src.ui.job_visibility import passes_source_trust_gate as is_user_reviewable_job
   j=tagged(official_job_url='https://www.builtinsf.com/job/role/123',source='builtin')
   self.assertTrue(is_user_reviewable_job(j));self.assertEqual(classify_job_review_bucket(j),'needs_review')
   self.assertIn('third-party',select_job_open_target(j).label)
