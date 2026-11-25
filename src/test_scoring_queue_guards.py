@@ -217,7 +217,8 @@ class ScreeningAndProviderGuards(unittest.TestCase):
                 return JobEligibilityDecision(record_key=job['record_key'],canonical_job_key=job['canonical_job_key'],resume_hash='r',model_name='mock',prompt_version=ELIGIBILITY_PROMPT_VERSION,analysis=JobEligibilityAnalysis(decision=kind,confidence='high',reason='fixture'))
             err=matcher.ResumeMatcherError('request payload: private resume and secret')
             with patch.object(job_screening,'load_unscreened_job_eligibility_candidates',return_value=jobs),patch.object(job_screening,'evaluate_job_eligibility',side_effect=[err,decision(jobs[1],'eligible'),decision(jobs[2],'exclude')]),patch.object(job_screening,'save_job_eligibility_decision') as save,redirect_stdout(io.StringIO()) as log:
-                summary=job_screening.screen_unscreened_jobs('r',object(),3,'mock')
+                # Screening is off by default; this test covers the enabled screening path.
+                summary=job_screening.screen_unscreened_jobs('r',object(),3,'mock',budget=job_screening.ScreeningBudget(3))
             self.assertEqual(summary.failed_record_keys,('failed',))
             self.assertEqual((summary.failed,summary.eligible,summary.excluded),(1,1,1))
             self.assertEqual(save.call_count,2)
@@ -296,6 +297,504 @@ class ScreeningAndProviderGuards(unittest.TestCase):
                 self.assertIn('Canonical identity: verified:greenhouse:'+str(i),text)
             self.assertIn('selected=81; saved=74; failed=2; skipped=5',text)
         with_temp_review_database(run)
+
+
+# --- Batch-limit fix ("All unscored (max N)") and total drain cap -------------
+from src.ui import daily_workflow_service as svc  # noqa: E402
+from src import drain_scoring_backlog as drain  # noqa: E402
+
+DAILY_QUOTA = '429 RESOURCE_EXHAUSTED GenerateRequestsPerDayPerProjectPerModel quota exceeded'
+OPENAI_QUOTA = 'OpenAI 429 insufficient_quota: You exceeded your current quota'
+
+
+def no_enrichment():
+    return svc.EnrichmentSummary(jobs_selected=0, jobs_processed=0, eligible_for_enrichment=0,
+        descriptions_updated=0, enriched=0, blocked=0, no_description=0, fetch_error=0, invalid_url=0,
+        not_improved=0, rule_matches_refreshed=0, log_lines=())
+
+
+def seed_jobs(count, prefix='job', start=0):
+    for i in range(start, start+count):
+        seed_linked(f'{prefix}-{i}', str(7000000+i))
+
+
+def confirm_candidate():
+    with database.get_connection() as c:
+        preview=make_preview(c,'Fixture','Candidate',None,[OLD,NEW])
+        c.execute('BEGIN');apply_preview(c,preview);c.execute('COMMIT')
+
+
+def candidate_with_jobs(count, prefix='job', start=0):
+    """Active resume NEW (candidate-confirmed) plus `count` eligible FULL_JD postings."""
+    initialize_ai_tables();profile(OLD);profile(NEW)
+    seed_jobs(count, prefix, start)
+    confirm_candidate()
+
+
+def eligibility_rows():
+    with database.get_connection() as c:
+        return sorted(c.execute('SELECT resume_hash,canonical_job_key,decision,prompt_version FROM resume_job_eligibility').fetchall())
+
+
+class ProviderFakes:
+    """Counts paid requests. Saving removes the job from the queue, as a stored score would."""
+    def __init__(self, gemini_error=None, openai_error_after=None):
+        self.gemini=self.openai=self.screened=0;self.saved=[]
+        self.gemini_error, self.openai_error_after = gemini_error, openai_error_after
+
+    def screen(self, **kw):
+        self.screened += 1
+        job=kw['job']
+        analysis=JobEligibilityAnalysis(decision='eligible',confidence='high',reason='fixture')
+        return JobEligibilityDecision(job['canonical_job_key'],job['record_key'],kw['resume_hash'],'fixture-model',
+                                      ELIGIBILITY_PROMPT_VERSION,analysis)
+
+    def gemini_score(self, **kw):
+        self.gemini += 1
+        if self.gemini_error:raise matcher.ResumeMatcherError(self.gemini_error)
+        return SimpleNamespace(record_key=kw['job']['record_key'],**vars(fake_match()))
+
+    def openai_score(self, **kw):
+        self.openai += 1
+        if self.openai_error_after is not None and self.openai > self.openai_error_after:
+            raise matcher.ResumeMatcherError(OPENAI_QUOTA)
+        return SimpleNamespace(record_key=kw['job']['record_key'],**vars(fake_match()))
+
+    def save(self, resume_hash, match):
+        self.saved.append(match.record_key)
+        with database.get_connection() as c:
+            c.execute('DELETE FROM job_matches WHERE record_key=?',[match.record_key])
+
+
+@contextmanager
+def screening_env(value):
+    """Set (or, with None, remove) SCREENING_MAX_PER_RUN for one block; restored afterwards."""
+    import os
+    with patch.dict('os.environ', {}):
+        os.environ.pop(job_screening.SCREENING_MAX_PER_RUN_ENV, None)
+        if value is not None:
+            os.environ[job_screening.SCREENING_MAX_PER_RUN_ENV] = value
+        yield
+
+
+def run_service(limit, fakes, *, enrichment=None, **kwargs):
+    """Real service, real queue counts and real score_backlog; only providers are fakes."""
+    patches=dict(load_cached_resume_text=Mock(return_value='synthetic SQL resume'),
+                 score_resume_against_job=fakes.gemini_score,
+                 score_resume_against_job_openai=fakes.openai_score,
+                 save_job_score=fakes.save, run_dbt_build=Mock())
+    with patch.multiple(backlog,**patches), \
+         patch.object(job_screening,'evaluate_job_eligibility',side_effect=fakes.screen), \
+         patch.object(job_screening,'evaluate_job_eligibility_openai',side_effect=fakes.screen), \
+         patch.object(svc,'start_scoring_run',return_value=None), \
+         patch.object(svc,'run_description_enrichment',side_effect=enrichment or (lambda **kw:no_enrichment())), \
+         redirect_stdout(io.StringIO()):
+        return svc.run_unscored_job_backlog(resume_hash=NEW,limit=limit,minimum_rule_score=0,**kwargs)
+
+
+def drain_job(prefix, i):
+    return dict(record_key=f'{prefix}-{i}',canonical_job_key=f'linkedin|{prefix}{i}',title='Data Engineer',company_name='Example')
+
+
+@contextmanager
+def offline_drain():
+    from contextlib import nullcontext
+    with patch.object(store,'scoring_claim',lambda h,j:nullcontext(True)), \
+         patch.object(store,'latest_candidate_resume',side_effect=lambda c,h:h), \
+         patch.object(drain,'get_model_name',return_value='fixture-model'), \
+         patch.object(drain,'get_openai_model_name',return_value='fixture-openai'):
+        yield
+
+
+class BatchLimitAndDrainCap(unittest.TestCase):
+    def test_ui_choice_label_and_explicit_numeric_choices(self):
+        self.assertEqual(svc.all_unscored_choice_label(),'All unscored (max 30)')
+        self.assertIsNone(svc.requested_score_limit('All unscored (max 30)'))
+        self.assertEqual([svc.requested_score_limit(v) for v in ('20','50','100')],[20,50,100])
+        with patch.dict('os.environ',{svc.ALL_UNSCORED_MAX_ATTEMPTS_ENV:'12'}):
+            self.assertEqual(svc.all_unscored_max_attempts(),12)
+            self.assertEqual(svc.all_unscored_choice_label(),'All unscored (max 12)')
+        for bad in ('0','-3','many'):
+            with patch.dict('os.environ',{svc.ALL_UNSCORED_MAX_ATTEMPTS_ENV:bad}):
+                self.assertEqual(svc.all_unscored_max_attempts(),30)
+
+    def test_initial_zero_then_enrichment_makes_jobs_eligible(self):
+        def run():
+            candidate_with_jobs(0)
+            # The pre-run count is 0; the old formula max(0, 1) scored a single job.
+            self.assertEqual(svc.load_scoring_backlog_status(NEW,0).unscored_candidates,0)
+            def enrichment(**kw):
+                seed_jobs(4);return no_enrichment()
+            fakes=ProviderFakes()
+            result=run_service(None,fakes,enrichment=enrichment)
+            self.assertEqual((result.eligible_before_scoring,result.effective_limit),(4,4))
+            self.assertEqual((result.scores_saved,result.scoring_attempts,result.remaining_eligible),(4,4,0))
+            self.assertEqual(len(fakes.saved),4)
+        with_temp_review_database(run)
+
+    def test_initial_nonzero_then_more_jobs_uses_final_queue(self):
+        def run():
+            candidate_with_jobs(2)
+            def enrichment(**kw):
+                seed_jobs(3,start=10);return no_enrichment()
+            result=run_service(None,ProviderFakes(),enrichment=enrichment)
+            self.assertEqual((result.eligible_before_scoring,result.effective_limit,result.scores_saved),(5,5,5))
+        with_temp_review_database(run)
+
+    def test_zero_eligible_queue_makes_no_provider_requests(self):
+        def run():
+            candidate_with_jobs(0)
+            fakes=ProviderFakes()
+            with patch.object(svc,'score_backlog',side_effect=AssertionError('nothing eligible: no screening/scoring')):
+                result=run_service(None,fakes)
+            self.assertEqual((fakes.screened,fakes.gemini,fakes.openai),(0,0,0))
+            self.assertEqual((result.effective_limit,result.scoring_attempts,result.remaining_eligible),(0,0,0))
+            self.assertIn('no screening or scoring provider requests',' '.join(result.log_lines))
+        with_temp_review_database(run)
+
+    def test_exactly_thirty_and_more_than_thirty_stop_at_cap(self):
+        for total,remaining in ((30,0),(45,15)):
+            with self.subTest(total=total):
+                def run():
+                    candidate_with_jobs(total)
+                    fakes=ProviderFakes()
+                    result=run_service(None,fakes)
+                    self.assertEqual(result.eligible_before_scoring,total)
+                    self.assertEqual(result.effective_limit,30)
+                    self.assertLessEqual(fakes.gemini+fakes.openai,30)
+                    self.assertLessEqual(fakes.screened,30)
+                    self.assertEqual((result.scoring_attempts,result.remaining_eligible),(30,remaining))
+                    log='\n'.join(result.log_lines)
+                    self.assertIn('Scoring limit: All unscored (max 30); eligible unscored after ingestion/enrichment: '
+                                  f'{total}; effective limit: 30',log)
+                    self.assertIn(f'remaining eligible unscored: {remaining}',log)
+                    self.assertEqual('The backlog is not fully drained' in log, bool(remaining))
+                with_temp_review_database(run)
+
+    def test_numeric_selections_are_not_reinterpreted_as_the_cap(self):
+        for limit in (20,50,100):
+            with self.subTest(limit=limit):
+                def run():
+                    candidate_with_jobs(40)   # more than the all-unscored cap of 30
+                    result=run_service(limit,ProviderFakes())
+                    self.assertEqual((result.limit_mode,result.effective_limit),('explicit',limit))
+                    self.assertIsNone(result.eligible_before_scoring)
+                    self.assertEqual(result.scoring_attempts,min(limit,40))
+                    self.assertEqual(result.remaining_eligible,40-min(limit,40))
+                    self.assertIn(f'Scoring limit: {limit} (explicit selection)','\n'.join(result.log_lines))
+                with_temp_review_database(run)
+
+    def test_existing_queue_protections_still_apply(self):
+        def run():
+            initialize_ai_tables();profile(OLD);profile(NEW)
+            seed_linked('scored','8100001',verified='81');seed_score(score('scored',NEW))
+            seed_linked('scored-dup','8100001')              # exact sibling of a completed posting
+            seed_linked('applied','8100002',state='applied')
+            seed_linked('removed','8100003',state='removed')
+            seed_review_job('thin','Senior Data Engineer',source='linkedin',description='SQL only.')
+            seed_jobs(2,'fresh')
+            confirm_candidate()
+            fakes=ProviderFakes()
+            result=run_service(None,fakes)
+            self.assertEqual(result.eligible_before_scoring,2)
+            self.assertEqual(sorted(fakes.saved),['fresh-0','fresh-1'])
+        with_temp_review_database(run)
+
+    def test_current_and_legacy_exclusions_keep_behavior_and_decisions_are_not_rewritten(self):
+        def run():
+            candidate_with_jobs(4)
+            keys={j['record_key']:j['canonical_job_key'] for j in repo.load_candidate_jobs(NEW,None,100,0,reuse_any_model=True)}
+            rows=[('job-0','exclude','v2'),('job-1','exclude','v1'),('job-2','eligible','v2'),('job-3','eligible','v2')]
+            with database.get_connection() as c:
+                for record,decision,version in rows:
+                    c.execute("INSERT INTO resume_job_eligibility(resume_hash,canonical_job_key,record_key,decision,confidence,reason,matched_resume_signals,missing_or_mismatched_signals,model_name,prompt_version,screened_at) VALUES(?,?,?,?,'high','fixture','[]','[]','fixture',?,current_timestamp)",
+                              [NEW,keys[record],record,decision,version])
+            before=eligibility_rows()
+            fakes=ProviderFakes()
+            with screening_env(None):                      # default: screening disabled
+                result=run_service(None,fakes)
+            # job-0: current exclusion; job-1: legacy v1 exclusion with no current decision.
+            self.assertEqual(result.eligible_before_scoring,2)
+            self.assertEqual(fakes.screened,0)
+            self.assertEqual(sorted(fakes.saved),['job-2','job-3'])   # saved eligible decisions still score
+            self.assertEqual(eligibility_rows(),before)    # both exclusions persist and keep blocking
+            self.assertEqual(result.remaining_eligible,0)
+        with_temp_review_database(run)
+
+    def test_enabled_screening_keeps_existing_order_for_legacy_exclusions(self):
+        def run():
+            candidate_with_jobs(4)
+            keys={j['record_key']:j['canonical_job_key'] for j in repo.load_candidate_jobs(NEW,None,100,0,reuse_any_model=True)}
+            rows=[('job-0','exclude','v2'),('job-1','exclude','v1'),('job-2','eligible','v2'),('job-3','eligible','v2')]
+            with database.get_connection() as c:
+                for record,decision,version in rows:
+                    c.execute("INSERT INTO resume_job_eligibility(resume_hash,canonical_job_key,record_key,decision,confidence,reason,matched_resume_signals,missing_or_mismatched_signals,model_name,prompt_version,screened_at) VALUES(?,?,?,?,'high','fixture','[]','[]','fixture',?,current_timestamp)",
+                              [NEW,keys[record],record,decision,version])
+            before=eligibility_rows()
+            fakes=ProviderFakes()
+            with screening_env('1'):
+                result=run_service(None,fakes)
+            # With screening enabled, score_backlog still screens first: the legacy-held job
+            # is re-screened under v2 and may take a slot in the same run (unchanged).
+            self.assertEqual((fakes.screened,result.screening_attempts,result.screening_decisions_saved),(1,1,1))
+            self.assertNotIn('job-0',fakes.saved)
+            self.assertEqual(sorted(fakes.saved),['job-1','job-2'])
+            after=eligibility_rows()
+            self.assertTrue(set(before)<=set(after))
+            self.assertEqual(set(after)-set(before),{(NEW,keys['job-1'],'eligible','v2')})
+        with_temp_review_database(run)
+
+    def test_gemini_daily_quota_switches_to_openai_and_openai_quota_stops(self):
+        def run():
+            candidate_with_jobs(35)
+            fakes=ProviderFakes(gemini_error=DAILY_QUOTA)
+            result=run_service(None,fakes)
+            self.assertEqual((fakes.gemini,fakes.openai),(1,30))
+            self.assertTrue(result.quota_exhausted)
+            self.assertEqual((result.scores_saved,result.openai_scores_saved,result.scoring_attempts),(30,30,30))
+        with_temp_review_database(run)
+        def run_stop():
+            candidate_with_jobs(35)
+            fakes=ProviderFakes(gemini_error=DAILY_QUOTA,openai_error_after=3)
+            result=run_service(None,fakes)
+            self.assertEqual((fakes.gemini,fakes.openai),(1,4))   # only the final provider stop halts requests
+            self.assertEqual((result.scores_saved,result.jobs_failed,result.scoring_attempts),(3,1,4))
+            self.assertEqual(result.remaining_eligible,32)
+        with_temp_review_database(run_stop)
+
+    def test_drain_total_cap_across_batches_and_failures_are_not_retried(self):
+        with offline_drain():
+            queue=[drain_job('d',i) for i in range(100)];calls=[]
+            def load():return list(queue)
+            def save(resume_hash,match):queue[:]=[j for j in queue if j['record_key']!=match]
+            def ok(**kw):calls.append(kw['job']['record_key']);return kw['job']['record_key']
+            def run(**kw):return drain.drain_scores('r',loader=load,profile=object(),delay=0,emit=lambda s:None,save=save,**kw)
+            report=run(score=ok,batch_size=7,max_attempts=30)
+            self.assertEqual((report['attempts'],report['scored'],len(calls),report['batches']),(30,30,30,5))
+            self.assertEqual(report['stop_reason'],'total attempt cap reached (30)')
+            self.assertEqual((report['remaining_eligible_unscored'],report['fully_drained']),(70,False))
+            calls.clear();report=run(score=ok,batch_size=25)          # default total cap
+            self.assertEqual((report['attempts'],len(calls),report['max_attempts']),(30,30,30))
+            queue[:]=[drain_job('d',i) for i in range(5)];calls.clear()
+            def fail(**kw):calls.append(kw['job']['record_key']);raise matcher.ResumeMatcherError('fixture validation failure')
+            report=run(score=fail,batch_size=2,max_attempts=30)
+            self.assertEqual(sorted(calls),[f'd-{i}' for i in range(5)])   # each failing job tried once
+            self.assertEqual((report['attempts'],report['failed']),(5,5))
+            self.assertIn('failed in this run',report['stop_reason'])
+            queue[:]=[drain_job('d',i) for i in range(3)];calls.clear()
+            report=run(score=ok,batch_size=25)
+            self.assertEqual((report['attempts'],report['fully_drained'],report['stop_reason']),
+                             (3,True,'no eligible unscored jobs remain'))
+            with self.assertRaises(ValueError):run(score=ok,max_attempts=0)
+
+    def test_drain_quota_and_fallback_handling_is_unchanged(self):
+        with offline_drain():
+            queue=[drain_job('q',i) for i in range(10)]
+            def save(resume_hash,match):queue[:]=[j for j in queue if j['record_key']!=match]
+            fallback=Mock(side_effect=lambda **kw:kw['job']['record_key'])
+            def run(error):
+                return drain.drain_scores('r',loader=lambda:list(queue),profile=object(),delay=0,emit=lambda s:None,
+                    score=Mock(side_effect=matcher.ResumeMatcherError(error)),fallback=fallback,save=save)
+            report=run(DAILY_QUOTA)            # existing drain policy: quota/429 stops the drain
+            self.assertIn('quota/rate-limit safety',report['stop_reason']);self.assertEqual(fallback.call_count,0)
+            report=run('Gemini PERMISSION_DENIED')   # unavailability switches to OpenAI for the rest
+            self.assertEqual((report['openai'],report['attempts']),(10,10))
+
+
+# --- Screening-1: global, independently configurable screening cap -----------
+from src.ui import job_recommendation_service as upload_service  # noqa: E402
+
+
+def upload_scoring(fakes, limit):
+    """Real process_resume_upload: real screening guard, real queue and claims; fake providers."""
+    prepared=upload_service.PreparedResume(
+        resume=SimpleNamespace(resume_hash=NEW,filename='fixture.pdf',word_count=400,page_count=1,text='synthetic SQL resume'),
+        profile=object(),model_name='fixture-model',profile_was_cached=True)
+    with patch.object(upload_service,'prepare_resume_upload',return_value=prepared), \
+         patch.object(upload_service,'score_resume_against_job',side_effect=fakes.gemini_score), \
+         patch.object(upload_service,'score_resume_against_job_openai',side_effect=fakes.openai_score), \
+         patch.object(upload_service,'save_job_score',side_effect=fakes.save), \
+         patch.object(upload_service,'run_dbt_build'), \
+         patch.object(upload_service,'start_scoring_run',return_value='fixture-run'), \
+         patch.object(upload_service,'finish_scoring_run'), \
+         patch.object(job_screening,'evaluate_job_eligibility',side_effect=fakes.screen), \
+         patch.object(job_screening,'evaluate_job_eligibility_openai',side_effect=fakes.screen), \
+         redirect_stdout(io.StringIO()):
+        return upload_service.process_resume_upload(uploaded_file=None,limit=limit,minimum_rule_score=0)
+
+
+def direct_backlog(fakes, limit, **kwargs):
+    """Real score_backlog (CLI/library entry point) with fake providers only."""
+    with patch.multiple(backlog,load_cached_resume_text=Mock(return_value='synthetic SQL resume'),
+                        score_resume_against_job=fakes.gemini_score,
+                        score_resume_against_job_openai=fakes.openai_score,
+                        save_job_score=fakes.save,run_dbt_build=Mock()), \
+         patch.object(job_screening,'evaluate_job_eligibility',side_effect=fakes.screen), \
+         patch.object(job_screening,'evaluate_job_eligibility_openai',side_effect=fakes.screen), \
+         redirect_stdout(io.StringIO()) as output:
+        summary=backlog.score_backlog(NEW,limit,0,**kwargs)
+    return summary,output.getvalue()
+
+
+class ScreeningSafetyGuard(unittest.TestCase):
+    OPTIONS=((20,20),(50,35),(100,35),(None,30))   # (selection, expected scoring attempts with 35 eligible)
+
+    def test_configuration_parsing_zero_positive_and_invalid(self):
+        parse=job_screening.screening_max_per_run
+        env=job_screening.SCREENING_MAX_PER_RUN_ENV
+        self.assertEqual(parse({}),0)
+        for value,expected in (('',0),('  ',0),('0',0),('00',0),('1',1),(' 3 ',3),('25',25)):
+            self.assertEqual(parse({env:value}),expected,value)
+        for bad in ('-1','abc','1.5','+2','²','1e3','None','0x1'):
+            with self.subTest(bad=bad), self.assertRaises(job_screening.ScreeningConfigurationError):
+                parse({env:bad})
+        with screening_env(None):
+            self.assertEqual(job_screening.ScreeningBudget.from_config().limit,0)
+        for bad in (-1,True,1.0,'3',None):
+            with self.subTest(budget=bad), self.assertRaises(job_screening.ScreeningConfigurationError):
+                job_screening.ScreeningBudget(bad)
+        zero=job_screening.ScreeningBudget(0)
+        self.assertEqual((zero.limit,zero.remaining),(0,0))
+        self.assertEqual(job_screening.screening_status_line(0,0,0),
+                         'Eligibility screening: disabled by SCREENING_MAX_PER_RUN=0')
+
+    def test_zero_budget_never_loads_or_calls_providers(self):
+        with patch.object(job_screening,'load_unscreened_job_eligibility_candidates',side_effect=AssertionError('loader')), \
+             patch.object(job_screening,'evaluate_job_eligibility',side_effect=AssertionError('gemini')), \
+             patch.object(job_screening,'evaluate_job_eligibility_openai',side_effect=AssertionError('openai')), \
+             patch.object(job_screening,'save_job_eligibility_decision',side_effect=AssertionError('save')), \
+             redirect_stdout(io.StringIO()) as out:
+            with screening_env(None):
+                summary=job_screening.screen_unscreened_jobs('r',object(),100,'m')
+            explicit=job_screening.screen_unscreened_jobs('r',object(),100,'m',budget=job_screening.ScreeningBudget(0))
+        for s in (summary,explicit):
+            self.assertEqual((s.screened,s.attempts,s.configured_limit,s.disabled),(0,0,0,True))
+        self.assertIn('Eligibility screening: disabled by SCREENING_MAX_PER_RUN=0',out.getvalue())
+
+    def test_every_batch_option_defaults_to_zero_screening_and_still_scores(self):
+        for selection,attempts in self.OPTIONS:
+            with self.subTest(selection=selection):
+                def run():
+                    candidate_with_jobs(35)          # unscreened FULL_JD jobs, no saved decisions
+                    fakes=ProviderFakes()
+                    with screening_env(None):
+                        result=run_service(selection,fakes)
+                    self.assertEqual((fakes.screened,result.screening_attempts,result.screening_decisions_saved),(0,0,0))
+                    self.assertEqual(result.screening_limit,0)
+                    self.assertEqual(result.effective_limit,selection if selection else 30)
+                    self.assertEqual((result.scoring_attempts,result.scores_saved),(attempts,attempts))
+                    self.assertEqual(result.selected_option,str(selection) if selection else 'All unscored (max 30)')
+                    self.assertEqual(eligibility_rows(),[])          # no new decisions
+                    self.assertIn('Eligibility screening: disabled by SCREENING_MAX_PER_RUN=0','\n'.join(result.log_lines))
+                with_temp_review_database(run)
+
+    def test_every_batch_option_respects_positive_cap(self):
+        for selection,attempts in self.OPTIONS:
+            with self.subTest(selection=selection):
+                def run():
+                    candidate_with_jobs(35)
+                    fakes=ProviderFakes()
+                    with screening_env('3'):
+                        result=run_service(selection,fakes)
+                    self.assertEqual((fakes.screened,result.screening_attempts,result.screening_decisions_saved),(3,3,3))
+                    self.assertEqual(len(eligibility_rows()),3)
+                    self.assertEqual(result.effective_limit,selection if selection else 30)  # scoring limit unchanged
+                    self.assertEqual(result.scoring_attempts,attempts)
+                    self.assertIn('Eligibility screening: limit 3 per run (SCREENING_MAX_PER_RUN); attempts 3; '
+                                  'new decisions saved 3','\n'.join(result.log_lines))
+                with_temp_review_database(run)
+
+    def test_direct_score_backlog_defaults_to_zero_and_caps_positive(self):
+        def run():
+            candidate_with_jobs(12)
+            fakes=ProviderFakes()
+            with screening_env(None):
+                summary,log=direct_backlog(fakes,10)
+            self.assertEqual((fakes.screened,summary.screening_limit,summary.screening_attempts),(0,0,0))
+            self.assertEqual((summary.candidates_selected,summary.scores_saved),(10,10))
+            self.assertEqual(eligibility_rows(),[])
+            self.assertIn('Eligibility screening: disabled by SCREENING_MAX_PER_RUN=0',log)
+            with screening_env('1'):
+                summary,_=direct_backlog(fakes,10)
+            self.assertEqual((fakes.screened,summary.screening_attempts,summary.screening_decisions_saved),(1,1,1))
+            with screening_env('-4'), self.assertRaises(job_screening.ScreeningConfigurationError):
+                direct_backlog(ProviderFakes(),10)
+        with_temp_review_database(run)
+
+    def test_uploaded_resume_scoring_defaults_to_zero_and_caps_positive(self):
+        def run():
+            candidate_with_jobs(8)
+            fakes=ProviderFakes()
+            with screening_env(None):
+                summary=upload_scoring(fakes,5)
+            self.assertEqual((fakes.screened,summary.screening_limit,summary.screening_attempts),(0,0,0))
+            self.assertEqual((summary.candidate_count,summary.successful_score_count),(5,5))
+            self.assertEqual(eligibility_rows(),[])
+            self.assertTrue(any('disabled by SCREENING_MAX_PER_RUN=0' in l for l in summary.log_lines))
+            with screening_env('2'):
+                summary=upload_scoring(fakes,5)
+            self.assertEqual((fakes.screened,summary.screening_attempts),(2,2))
+            self.assertLessEqual(summary.candidate_count,5)              # scoring limit unchanged
+        with_temp_review_database(run)
+
+    def test_shared_budget_caps_total_across_multiple_screening_calls(self):
+        def run():
+            candidate_with_jobs(10)
+            fakes=ProviderFakes();budget=job_screening.ScreeningBudget(3)
+            with patch.object(job_screening,'evaluate_job_eligibility',side_effect=fakes.screen), \
+                 redirect_stdout(io.StringIO()) as out:
+                first=job_screening.screen_unscreened_jobs(NEW,object(),2,'m',budget=budget)
+                second=job_screening.screen_unscreened_jobs(NEW,object(),10,'m',budget=budget)
+                third=job_screening.screen_unscreened_jobs(NEW,object(),10,'m',budget=budget)
+            self.assertEqual((first.attempts,second.attempts,third.attempts),(2,1,0))
+            self.assertEqual((fakes.screened,budget.used,budget.remaining),(3,3,0))
+            self.assertIn('per-run limit of 3 already used',out.getvalue())
+            # The same shared budget also bounds repeated score_backlog calls.
+            budget=job_screening.ScreeningBudget(2);fakes=ProviderFakes()
+            direct_backlog(fakes,1,screening_budget=budget);direct_backlog(fakes,1,screening_budget=budget)
+            self.assertEqual(fakes.screened,2)
+        with_temp_review_database(run)
+
+    def test_screening_fallback_still_works_within_the_cap(self):
+        def run():
+            candidate_with_jobs(6)
+            calls={'gemini':0,'openai':0}
+            def gemini(**kw):
+                calls['gemini']+=1;raise matcher.ResumeMatcherError(DAILY_QUOTA)
+            def openai(**kw):
+                calls['openai']+=1;return ProviderFakes().screen(**kw)
+            with patch.object(job_screening,'evaluate_job_eligibility',side_effect=gemini), \
+                 patch.object(job_screening,'evaluate_job_eligibility_openai',side_effect=openai), \
+                 redirect_stdout(io.StringIO()):
+                summary=job_screening.screen_unscreened_jobs(NEW,object(),6,'m',budget=job_screening.ScreeningBudget(4))
+            self.assertEqual((calls['gemini'],calls['openai'],summary.attempts,summary.screened),(1,4,4,4))
+            self.assertTrue(summary.quota_exhausted)
+        with_temp_review_database(run)
+
+    def test_invalid_configuration_is_rejected_before_any_work(self):
+        enrichment=Mock(side_effect=AssertionError('no enrichment when misconfigured'))
+        start=Mock(side_effect=AssertionError('no scoring run when misconfigured'))
+        for bad in ('-1','abc'):
+            with self.subTest(bad=bad), screening_env(bad), \
+                 patch.object(svc,'run_description_enrichment',enrichment), \
+                 patch.object(svc,'start_scoring_run',start), redirect_stdout(io.StringIO()):
+                with self.assertRaises(svc.DailyWorkflowError) as raised:
+                    svc.run_unscored_job_backlog(resume_hash=NEW,limit=20,minimum_rule_score=0)
+                self.assertIn('SCREENING_MAX_PER_RUN must be a non-negative integer',str(raised.exception))
+            with self.subTest(upload=bad), screening_env(bad), \
+                 patch.object(upload_service,'prepare_resume_upload',side_effect=AssertionError('no profiling')):
+                with self.assertRaises(upload_service.JobRecommendationServiceError):
+                    upload_service.process_resume_upload(uploaded_file=None,limit=20,minimum_rule_score=0)
+
+    def test_drain_has_no_screening_dependency(self):
+        with offline_drain(), screening_env('5'), \
+             patch.object(job_screening,'screen_unscreened_jobs',side_effect=AssertionError('drain must not screen')), \
+             patch.object(job_screening,'evaluate_job_eligibility',side_effect=AssertionError('drain must not screen')):
+            queue=[drain_job('s',i) for i in range(40)]
+            def save(resume_hash,match):queue[:]=[j for j in queue if j['record_key']!=match]
+            report=drain.drain_scores('r',loader=lambda:list(queue),profile=object(),delay=0,emit=lambda s:None,
+                                      score=lambda **kw:kw['job']['record_key'],save=save,batch_size=25)
+            self.assertEqual((report['attempts'],report['scored'],report['remaining_eligible_unscored']),(30,30,10))
 
 
 if __name__=='__main__':unittest.main()

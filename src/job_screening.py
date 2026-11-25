@@ -7,6 +7,8 @@ full scoring, which keeps unrelated jobs out of later expensive steps.
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 
 from src.ai.job_eligibility import (
@@ -25,6 +27,62 @@ from src.repositories.recommendation_repository import (
 )
 
 
+# Temporary global safety guard (Screening-1). Saved "exclude" decisions are
+# persistent, so AI eligibility screening is off unless deliberately enabled:
+# the default is 0 new screening attempts per workflow invocation.
+SCREENING_MAX_PER_RUN_ENV = "SCREENING_MAX_PER_RUN"
+DEFAULT_SCREENING_MAX_PER_RUN = 0
+
+
+class ScreeningConfigurationError(ValueError):
+    """SCREENING_MAX_PER_RUN is not a non-negative integer."""
+
+
+def screening_max_per_run(environ=None) -> int:
+    """Validated cap; unset or blank means 0. Never falls back to a positive value."""
+    source = os.environ if environ is None else environ
+    raw = source.get(SCREENING_MAX_PER_RUN_ENV)
+    if raw is None or not str(raw).strip():
+        return DEFAULT_SCREENING_MAX_PER_RUN
+    text = str(raw).strip()
+    if not re.fullmatch(r"[0-9]+", text):
+        raise ScreeningConfigurationError(
+            f"{SCREENING_MAX_PER_RUN_ENV} must be a non-negative integer (0 disables "
+            f"eligibility screening); got {raw!r}.")
+    return int(text)
+
+
+@dataclass
+class ScreeningBudget:
+    """New screening attempts allowed for one complete workflow invocation.
+
+    Pass the same budget to every screening call in a workflow; attempts are
+    counted per job (a Gemini attempt plus its OpenAI fallback is one attempt).
+    """
+    limit: int
+    used: int = 0
+
+    def __post_init__(self):
+        if isinstance(self.limit, bool) or not isinstance(self.limit, int) or self.limit < 0:
+            raise ScreeningConfigurationError(
+                f"Screening limit must be a non-negative integer; got {self.limit!r}.")
+
+    @classmethod
+    def from_config(cls, environ=None) -> "ScreeningBudget":
+        return cls(screening_max_per_run(environ))
+
+    @property
+    def remaining(self) -> int:
+        return max(self.limit - self.used, 0)
+
+
+def screening_status_line(limit: int, attempts: int, saved: int) -> str:
+    if limit == 0:
+        return f"Eligibility screening: disabled by {SCREENING_MAX_PER_RUN_ENV}=0"
+    return (f"Eligibility screening: limit {limit} per run ({SCREENING_MAX_PER_RUN_ENV}); "
+            f"attempts {attempts}; new decisions saved {saved}")
+
+
 @dataclass(frozen=True)
 class JobScreeningSummary:
     candidates_selected: int
@@ -38,6 +96,9 @@ class JobScreeningSummary:
     quota_exhausted: bool
     failed_record_keys: tuple[str, ...] = ()
     failed_posting_keys: tuple[str, ...] = ()
+    configured_limit: int = DEFAULT_SCREENING_MAX_PER_RUN
+    attempts: int = 0
+    disabled: bool = False
 
 
 def is_gemini_quota_exhausted(error: ResumeMatcherError) -> bool:
@@ -82,8 +143,22 @@ def screen_unscreened_jobs(
     limit: int,
     model_name: str,
     record_keys: tuple[str, ...] | None = None,
+    budget: ScreeningBudget | None = None,
 ) -> JobScreeningSummary:
-    """Screen uncached canonical jobs and persist their eligibility decisions."""
+    """Screen uncached canonical jobs and persist their eligibility decisions.
+
+    At most ``budget.remaining`` jobs are screened. Without an explicit budget
+    the validated SCREENING_MAX_PER_RUN configuration applies (default 0).
+    """
+    budget = ScreeningBudget.from_config() if budget is None else budget
+    if budget.remaining <= 0:
+        print(screening_status_line(budget.limit, budget.used, 0) if budget.limit == 0 else
+              f"Eligibility screening: per-run limit of {budget.limit} already used; no new screening.")
+        return JobScreeningSummary(
+            candidates_selected=0, screened=0, eligible=0, needs_description=0, excluded=0,
+            failed=0, gemini_screened=0, openai_screened=0, quota_exhausted=False,
+            configured_limit=budget.limit, attempts=0, disabled=budget.limit == 0)
+
     jobs = load_unscreened_job_eligibility_candidates(
         resume_hash=resume_hash,
         limit=limit,
@@ -96,6 +171,9 @@ def screen_unscreened_jobs(
         **job,
         "raw_description_word_count": len((job.get("description") or "").split()),
     }) == "FULL_JD"]
+    # Existing selection order, bounded by the workflow's remaining budget.
+    jobs = jobs[:budget.remaining]
+    attempts = 0
 
     screened = 0
     eligible = 0
@@ -118,6 +196,8 @@ def screen_unscreened_jobs(
         print(f"Screening {len(jobs)} jobs for resume fit before scoring.")
 
     for index, job in enumerate(jobs, start=1):
+        budget.used += 1
+        attempts += 1
         print(
             f"Screening {index}/{len(jobs)}: "
             f"{job.get('title') or 'Untitled job'} | "
@@ -214,6 +294,8 @@ def screen_unscreened_jobs(
         quota_exhausted=quota_exhausted,
         failed_record_keys=tuple(failed_records),
         failed_posting_keys=tuple(failed_postings),
+        configured_limit=budget.limit,
+        attempts=attempts,
     )
 
 
