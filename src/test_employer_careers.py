@@ -86,6 +86,146 @@ class Tests(unittest.TestCase):
             self.assertEqual(checked.evidence['application_url'], APPLY)
             self.assertFalse(checked.evidence['application_submission_tested'])
 
+    # S2 R1: company-token parent-site probes remain discovery hints only.
+    def bask_pages(self, *, branding=True, posting_host=None):
+        apex = 'https://bask.health/'
+        careers_url = 'https://jobs.bask.health/careers'
+        post_url = 'https://jobs.bask.health/careers/905C5C2826'
+        org = dict(type='Organization')  # The fetched page, not the search result, supplies proof.
+        organization = {'@type': 'Organization',
+                        'name': 'Bask Health' if branding else 'Wrong Employer',
+                        'url': apex}
+        return {
+            apex: '<script type="application/ld+json">' + json.dumps(organization) + '</script>'
+                  + f'<a href="{careers_url}">Careers</a>',
+            careers_url: '<title>Bask Health Careers</title><a href="' + apex + '">Corporate</a>'
+                         + '<a href="' + (posting_host or post_url) + '">Data Engineer</a>',
+            post_url: posting(company='Bask Health', req='905C5C2826', canonical=post_url),
+        }
+
+    def test_s2_parent_site_probe_establishes_existing_employer_chain(self):
+        job = original() | {'company_name': 'Bask Health'}
+        pages = self.bask_pages()
+        with self.client(pages) as client:
+            candidates = careers.discover_employer_candidates(
+                job, client, corporate_leads=['https://jobs.bask.health/careers'])
+        self.assertIn('https://bask.health/', self.requests)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source, 'employer')
+        self.assertEqual(candidates[0].employer_provenance['corporate_url'], 'https://bask.health/')
+        reasons = [event.get('reason') for event in job['employer_discovery_trace']]
+        self.assertIn('corporate_brand_confirmed', reasons)
+        self.assertIn('published_careers_link_found', reasons)
+        self.assertIn('careers_inventory_candidates', reasons)
+
+    def test_s2_missing_or_mismatched_corporate_brand_never_grants_provenance(self):
+        for wrong in ('wrong_name', 'wrong_host', 'no_org'):
+            with self.subTest(wrong=wrong):
+                careers.CAREERS_CACHE.clear()
+                job = original() | {'company_name': 'Bask Health'}
+                pages = self.bask_pages()
+                apex = 'https://bask.health/'
+                if wrong == 'wrong_name':
+                    pages[apex] = pages[apex].replace('Bask Health', 'Other Company')
+                elif wrong == 'wrong_host':
+                    pages[apex] = pages[apex].replace('"url": "https://bask.health/"',
+                                                     '"url": "https://unrelated.com/"')
+                else:
+                    pages[apex] = '<title>Bask Health</title><a href="https://jobs.bask.health/careers">Careers</a>'
+                with self.client(pages) as client:
+                    self.assertFalse(careers.discover_employer_candidates(
+                        job, client, corporate_leads=['https://jobs.bask.health/careers']))
+                self.assertIn('corporate_brand_unconfirmed',
+                              [event.get('reason') for event in job['employer_discovery_trace']])
+
+    def test_s2_aggregator_corporate_leads_filtered_before_two_slot_limit(self):
+        leads = ['https://indeed.com/viewjob?jk=123', 'https://talent.com/view',
+                 'https://jobgether.com/offer/42', 'https://tavily.com/knowledge/company/bask',
+                 'https://jobs.bask.health/careers']
+        for url in leads[:4]:
+            self.assertTrue(careers.excluded_corporate_lead(url))
+        self.assertFalse(careers.excluded_corporate_lead(leads[4]))
+        job = original() | {'company_name': 'Bask Health'}
+        with self.client(self.bask_pages()) as client:
+            candidates = careers.discover_employer_candidates(job, client, corporate_leads=leads)
+        self.assertEqual(len(candidates), 1)
+        self.assertNotIn('https://indeed.com/viewjob?jk=123', self.requests)
+        self.assertIn('https://bask.health/', self.requests)
+
+    def test_s2_derived_parents_never_displace_valid_guessed_com_root(self):
+        first = 'https://jobs.examplewidget.org/careers'
+        second = 'https://careers.examplewidget.net/search'
+        with self.client(self.pages()) as client:
+            candidates = careers.discover_employer_candidates(
+                original(), client, corporate_leads=[first, second])
+        self.assertEqual([c.url for c in candidates], [POST])
+        self.assertIn(CORP, self.requests)
+        self.assertLess(self.requests.index(CORP), self.requests.index(CAREERS))
+
+    def test_s2_derived_probe_strict_host_tokens_and_public_urls(self):
+        self.assertEqual(careers.parent_roots_from_careers_leads(
+            'Allia Health Group', ['https://www.unitedhealthgroup.com/careers']), [])
+        self.assertEqual(careers.parent_roots_from_careers_leads(
+            'General Motors (GM)', ['https://search-careers.gm.com/en/jobs']), [])
+        self.assertEqual(careers.parent_roots_from_careers_leads(
+            'Bask Health', ['https://bask.health/', 'https://jobgether.com/offer']), [])
+        self.assertEqual(careers.parent_roots_from_careers_leads(
+            'Sevita', ['https://jobs.sevitahealth.com/us/en/c/information-technology-jobs']),
+            ['https://sevitahealth.com/'])
+        self.assertEqual(careers.parent_roots_from_careers_leads(
+            'Bask Health', ['https://127.0.0.1/jobs', 'http://jobs.bask.health/']), [])
+
+    def test_s2_employer_posting_on_unrelated_host_cannot_inherit_proof(self):
+        wrong = 'https://unrelated.com/jobs/data-engineer/99881'
+        job = original() | {'company_name': 'Bask Health'}
+        with self.client(self.bask_pages(posting_host=wrong)) as client:
+            candidates = careers.discover_employer_candidates(
+                job, client, corporate_leads=['https://jobs.bask.health/careers'])
+        self.assertEqual(candidates, [])
+        self.assertNotIn(wrong, self.requests)
+
+    def test_s2_search_posting_still_rejected_without_corporate_proof(self):
+        from src.enrichment.ats.base import OfficialJobCandidate
+        post_url = 'https://jobs.bask.health/careers/905C5C2826'
+        job = original() | {'company_name': 'Bask Health',
+                            'public_search_trace': {'organic_results': [
+                                {'url': 'https://jobs.bask.health/careers'}]}}
+        pages = self.bask_pages(branding=False)
+        with self.client(pages) as client, \
+             patch.object(resolver, 'discover_ats_candidates', return_value=[]), \
+             patch.object(resolver, 'search_candidates', return_value=[
+                 OfficialJobCandidate(post_url, 'Data Engineer', 'search')]):
+            result = resolver.resolve_official_job(job, client)
+        self.assertNotEqual(result.status, 'FOUND_VERIFIED')
+        self.assertIsNone(result.official_job_url)
+        self.assertIn('corporate_brand_unconfirmed',
+                      [event.get('reason') for event in job['employer_discovery_trace']])
+
+    def test_s2_employer_chain_trace_reaches_run_log_safely(self):
+        from src import enrich_jobs
+        job = original() | {'record_key': 's2-test'}
+
+        def failed_with_trace(**kwargs):
+            job['employer_discovery_trace'] = [
+                dict(url='https://jobs.bask.health/careers?token=private-secret',
+                     method='GET', http_status=200),
+                dict(url='https://bask.health/', reason='corporate_brand_unconfirmed'),
+                dict(url='https://jobs.bask.health/careers', reason='careers_inventory_candidates',
+                     candidates_found=0),
+            ]
+            raise RuntimeError('synthetic offline error')
+
+        with patch.object(enrich_jobs, 'process_enrichment_job', side_effect=failed_with_trace), \
+             patch.object(enrich_jobs, 'save_enrichment_attempt', return_value=None):
+            summary = enrich_jobs.process_enrichment_batch([job], None)
+        lines = [line for line in summary.log_lines if 'Employer chain diagnostic:' in line]
+        self.assertEqual(len(lines), 3)
+        self.assertIn('jobs.bask.health/careers', lines[0])
+        self.assertNotIn('token=private-secret', '\n'.join(lines))
+        self.assertIn('corporate_brand_unconfirmed', lines[1])
+        self.assertIn('careers_inventory_candidates', lines[2])
+        self.assertIn('"candidates_found": 0', lines[2])
+
     def test_hostname_probe_and_job_self_claim_not_corporate_proof(self):
         with self.client({CORP: posting()}) as client:
             self.assertEqual(careers.discover_employer_candidates(original(), client), [])
