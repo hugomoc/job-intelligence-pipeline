@@ -2,6 +2,10 @@
 from src.job_title_filter import classify_job_title
 from src.repositories.recommendation_repository import description_state, job_age_days
 
+# Deferred employer-lookup retries for postings first discovered this recently
+# are ordered ahead of older retries (newest first). Eligibility is unchanged.
+RECENT_RETRY_DAYS = 14
+
 
 def relevant_missing_jd(job):
     return (
@@ -103,6 +107,10 @@ def plan_daily_enrichment(jobs, limit, *, retry_failed=True, minimum_words=80, n
         latest = max(members, key=lambda j: (
             as_utc_datetime(j.get('previous_attempted_at')) or oldest,
             as_utc_datetime(j.get('official_url_resolved_at')) or oldest))
+        # First discovery is the earliest alias, so a new alert never makes an
+        # old posting look recent. Any unknown alias date means unknown.
+        discovered = [as_utc_datetime(j.get('discovered_at')) for j in members]
+        first_discovered = None if any(d is None for d in discovered) else min(discovered)
         schedule = dict(job)
         if not trusted_key(job):
             for field in ('official_url_status', 'official_url_source',
@@ -174,6 +182,7 @@ def plan_daily_enrichment(jobs, limit, *, retry_failed=True, minimum_words=80, n
                    daily_queue_kind=('fresh_description' if fresh_description else
                                      'deferred_retry' if historical else 'employer_first'),
                    daily_queue_last_attempt=latest.get('previous_attempted_at'),
+                   daily_queue_first_discovered_at=first_discovered,
                    exact_posting_key=job.get('exact_posting_key') or job['record_key'])
         candidates.append(job)
     # Round-robin fresh and deferred lanes within ONE final bound. A busy fresh
@@ -183,8 +192,19 @@ def plan_daily_enrichment(jobs, limit, *, retry_failed=True, minimum_words=80, n
                 not is_fit_recommended(j),
                 classify_job_title(j.get('title')).category != 'STRONG_MATCH',
                 -int(j.get('rule_score') or 0), str(j['record_key']))
+    from datetime import timedelta
+    reference = as_utc_datetime(now) or now
+    recent_cutoff = reference - timedelta(days=RECENT_RETRY_DAYS)
+
+    def retry_priority(j):
+        # Recent tier first (newest discovery first); everything else, including
+        # unknown discovery dates, keeps the existing oldest-attempt order.
+        first = j.get('daily_queue_first_discovered_at')
+        if first is not None and recent_cutoff <= first <= reference:
+            return (0, -first.timestamp(), *priority(j))
+        return (1, 0.0, *priority(j))
     fresh = sorted((j for j in candidates if j['daily_queue_kind'] != 'deferred_retry'), key=priority)
-    retries = sorted((j for j in candidates if j['daily_queue_kind'] == 'deferred_retry'), key=priority)
+    retries = sorted((j for j in candidates if j['daily_queue_kind'] == 'deferred_retry'), key=retry_priority)
     ordered = []
     for index in range(max(len(fresh), len(retries))):
         if index < len(fresh): ordered.append(fresh[index])

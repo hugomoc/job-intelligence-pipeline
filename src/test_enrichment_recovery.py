@@ -399,6 +399,133 @@ def test_daily_scoring_propagates_even_empty_recovery_scope():
         assert result.recovery_record_keys == ()
 
 
+# --- Recent employer-verification retries come first (RECENT_RETRY_DAYS) -----------------
+from src.targeted_enrichment import RECENT_RETRY_DAYS  # noqa: E402
+
+
+def lookup_retry(key, *, discovered=None, attempted=OLD, **kwargs):
+    """An unverified posting whose employer lookup found nothing, as in the frozen cohort."""
+    return retry(key, status='OFFICIAL_NOT_FOUND', when=attempted, discovered_at=discovered, **kwargs)
+
+
+def stale_retries(count, *, attempted=NOW - timedelta(days=30)):
+    # Older than the recent window, attempted earlier than any recent posting.
+    return [lookup_retry(f'stale-{n:04d}', discovered=NOW - timedelta(days=60),
+                         attempted=attempted + timedelta(seconds=n)) for n in range(count)]
+
+
+def retry_order(jobs, **kwargs):
+    selected, stats = plan(jobs, len(jobs), **kwargs)
+    return [j['record_key'] for j in selected if j['daily_queue_kind'] == 'deferred_retry'], selected, stats
+
+
+def test_recent_retry_after_cooldown_is_selected_ahead_of_2000_older_retries():
+    recent = lookup_retry('recent', discovered=NOW - timedelta(days=9), attempted=NOW - timedelta(days=8))
+    fresh = [job(f'fresh-{n:02d}') for n in range(30)]
+    selected, stats = plan(fresh + stale_retries(2000) + [recent])
+    assert 'recent' in [j['record_key'] for j in selected]
+    assert len(selected) == 25 and stats['eligible_deferred_retries'] == 2001
+    # Without a discovery date it would sit behind every older attempt, as before.
+    undated = dict(recent, discovered_at=None)
+    selected, _ = plan(fresh + stale_retries(2000) + [undated])
+    assert 'recent' not in [j['record_key'] for j in selected]
+
+
+def test_recent_retry_inside_its_cooldown_is_not_selected():
+    cooling = lookup_retry('cooling', discovered=NOW - timedelta(days=4), attempted=NOW - timedelta(days=3))
+    selected, stats = plan(stale_retries(3) + [cooling])
+    assert 'cooling' not in [j['record_key'] for j in selected]
+    assert stats['cooldown'] == 1 and stats['runnable'] == 3
+
+
+def test_older_retries_keep_oldest_attempt_order():
+    attempts = [NOW - timedelta(days=d) for d in (9, 30, 12, 20, 15)]
+    dated = [lookup_retry(f'old-{n}', discovered=NOW - timedelta(days=40 + n), attempted=a)
+             for n, a in enumerate(attempts)]
+    expected = [j['record_key'] for j in sorted(dated, key=lambda j: j['previous_attempted_at'])]
+    assert retry_order(dated)[0] == expected
+    # Identical to the order the same postings get with no discovery dates (pre-change order).
+    assert retry_order([dict(j, discovered_at=None) for j in dated])[0] == expected
+
+
+def test_fresh_lane_and_round_robin_are_unchanged():
+    fresh = [job(f'fresh-{n}') for n in range(4)]
+    recent = [lookup_retry(f'recent-{n}', discovered=NOW - timedelta(days=8 + n)) for n in range(3)]
+    old = stale_retries(3)
+    _, selected, _ = retry_order(fresh + old + recent)
+    kinds = [j['daily_queue_kind'] for j in selected]
+    assert kinds[:6] == ['fresh_description', 'deferred_retry'] * 3
+    baseline = plan(fresh + old + [dict(j, discovered_at=None) for j in recent], 25)[0]
+    lane = lambda rows: [j['record_key'] for j in rows if j['daily_queue_kind'] != 'deferred_retry']
+    assert lane(selected) == lane(baseline) == [f'fresh-{n}' for n in range(4)]
+    # Newest recent discovery first, then the older tier in its existing order.
+    assert retry_order(fresh + old + recent)[0] == ['recent-0', 'recent-1', 'recent-2'] + [j['record_key'] for j in old]
+
+
+def test_retry_failed_false_still_disables_recent_retries_with_same_counters():
+    recent = [lookup_retry(f'recent-{n}', discovered=NOW - timedelta(days=9)) for n in range(2)]
+    fresh = [job('fresh')]
+    selected, stats = plan(fresh + recent, retry_failed=False)
+    _, baseline = plan(fresh + [dict(j, discovered_at=None) for j in recent], retry_failed=False)
+    assert [j['record_key'] for j in selected] == ['fresh']
+    assert stats['retry_disabled'] == 2 and stats == baseline
+
+
+def test_new_alias_alert_does_not_make_an_old_posting_recent():
+    old_alias = lookup_retry('old-alias', discovered=NOW - timedelta(days=40), attempted=NOW - timedelta(days=20))
+    new_alert = dict(old_alias, record_key='new-alert', discovered_at=NOW - timedelta(days=1),
+                     attempt_count=0, previous_status=None, previous_attempted_at=None)
+    other_recent = lookup_retry('other-recent', discovered=NOW - timedelta(days=10), attempted=NOW - timedelta(days=9))
+    order, selected, stats = retry_order([old_alias, new_alert, other_recent])
+    assert stats['inventory'] == 2 and len(order) == 2
+    assert order[0] == 'other-recent'
+    group = next(j for j in selected if j['exact_posting_key'] == 'exact:old-alias')
+    assert group['daily_queue_first_discovered_at'] == NOW - timedelta(days=40)
+
+
+def test_existing_exclusions_still_apply_to_recent_postings():
+    recent = NOW - timedelta(days=9)
+    applied = lookup_retry('applied', discovered=recent)
+    applied_alias = dict(applied, record_key='applied-alias', application_status='applied')
+    filtered = lookup_retry('filtered', discovered=recent, title='Senior Software Engineer, Quality')
+    completed = lookup_retry('completed', discovered=recent, full=True, ai_score=20, recommendation='skip',
+                             has_current_complete_ai_assessment=True)
+    official = actionable_job(record_key='verified')
+    trusted = dict(lookup_retry('verified', discovered=recent), **{k: official[k] for k in (
+        'official_url_status', 'official_job_url', 'verified_posting_key',
+        'verified_posting_key_source', 'verified_posting_key_trust')})
+    selected, stats = plan([applied, applied_alias, filtered, completed, trusted])
+    assert stats['excluded'] == 3
+    assert all(not j['needs_official_resolution'] for j in selected)
+    assert {j['record_key'] for j in selected} <= {'verified'}
+
+
+def test_fourteen_day_boundary_is_inclusive_and_deterministic():
+    edge = NOW - timedelta(days=RECENT_RETRY_DAYS)
+    on_edge = lookup_retry('on-edge', discovered=edge, attempted=NOW - timedelta(days=8))
+    past_edge = lookup_retry('past-edge', discovered=edge - timedelta(microseconds=1),
+                             attempted=NOW - timedelta(days=30))
+    twin_a = lookup_retry('twin-a', discovered=NOW - timedelta(days=10))
+    twin_b = lookup_retry('twin-b', discovered=NOW - timedelta(days=10))
+    jobs = [past_edge, twin_b, on_edge, twin_a]
+    order = retry_order(jobs)[0]
+    assert order == ['twin-a', 'twin-b', 'on-edge', 'past-edge']
+    assert retry_order(list(reversed(jobs)))[0] == order
+
+
+def test_missing_discovery_timestamp_is_never_recent():
+    undated = lookup_retry('undated', discovered=None, attempted=NOW - timedelta(days=10))
+    partly = lookup_retry('partly', discovered=NOW - timedelta(days=2), attempted=NOW - timedelta(days=20))
+    partly_alias = dict(partly, record_key='partly-alias', discovered_at=None)
+    text_date = lookup_retry('text-date', discovered='2026-11-17T00:00:00+00:00', attempted=NOW - timedelta(days=15))
+    recent = lookup_retry('recent', discovered=NOW - timedelta(days=9), attempted=NOW - timedelta(days=8))
+    _, selected, _ = retry_order([undated, partly, partly_alias, text_date, recent])
+    postings = [j['exact_posting_key'] for j in selected if j['daily_queue_kind'] == 'deferred_retry']
+    # Only the dated recent posting is promoted; the rest keep oldest-attempt order.
+    assert postings == ['exact:recent', 'exact:partly', 'exact:text-date', 'exact:undated']
+    assert all(j['daily_queue_first_discovered_at'] is None for j in selected if j['record_key'] != 'recent')
+
+
 if __name__ == '__main__':
     for name, function in list(globals().items()):
         if name.startswith('test_') and callable(function):
