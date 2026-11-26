@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_TESTS = [
     "src/test_scoring_queue_guards.py",
     "src/test_description_attachment.py",
+    "src/test_job_links.py",
     "src/test_candidate_assessments.py",
     "src/test_scoring_diagnostics.py",
     "src/test_eval_metrics.py",
