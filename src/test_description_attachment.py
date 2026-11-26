@@ -561,27 +561,42 @@ class StreamlitForm(unittest.TestCase):
         self.assertTrue(any(b.proto.url == GD + "gd-1" for b in app.get("link_button")))
         self.assertTrue(any("Senior Data Engineer" in m.value and "Example Co" in m.value for m in app.markdown))
         self.assertTrue(any("Unverified posting" in c.value for c in app.caption))
-        save_button = app.button(key="attach-save-gd-1")
-        self.assertTrue(save_button.disabled)                       # nothing valid pasted yet
-        app.text_area(key="attach-text-gd-1").set_value("Too short.").run()
-        self.assertTrue(any("short or incomplete" in e.value for e in app.error))
-        self.assertTrue(app.button(key="attach-save-gd-1").disabled)
-        app.text_area(key="attach-text-gd-1").set_value(PASTE).run()
-        self.assertFalse(app.button(key="attach-save-gd-1").disabled)
-        self.assertTrue(any("Words:" in c.value for c in app.caption))
-        app.button(key="attach-save-gd-1").click().run()
+        self.assertEqual(len(app.form_submit_button), 1)
+        self.assertFalse(app.form_submit_button(key="attach-save-gd-1").disabled)
+
+        # Submit the latest text and click once: no preliminary .run() to
+        # commit the textarea value. Invalid input stays visible and is not saved.
+        app.text_area(key="attach-text-gd-1").set_value("Too short.")
+        app.form_submit_button(key="attach-save-gd-1").click().run()
         assert not app.exception, app.exception
-        self.assertEqual(app.session_state["save_call"][0], "gd-1")
+        self.assertTrue(any("short or incomplete" in e.value for e in app.error))
+        self.assertNotIn("save_call", app.session_state)
+        self.assertEqual(app.text_area(key="attach-text-gd-1").value, "Too short.")
+
+        # A single Save submit with the new full JD reaches the service.
+        app.text_area(key="attach-text-gd-1").set_value(PASTE)
+        app.form_submit_button(key="attach-save-gd-1").click().run()
+        assert not app.exception, app.exception
+        self.assertEqual(app.session_state["save_call"], ("gd-1", PASTE))
         self.assertTrue(app.session_state["jobs_snapshot_dirty"])   # Jobs + backlog snapshots invalidated
         self.assertTrue(any("Description saved" in s.value for s in app.success))
 
-    def test_wrong_job_warning_is_shown_but_save_stays_enabled(self):
+    def test_empty_submit_shows_error_without_calling_save(self):
+        app = card_app()
+        app.form_submit_button(key="attach-save-gd-1").click().run()
+        assert not app.exception, app.exception
+        self.assertTrue(any("Paste a job description first." in e.value for e in app.error))
+        self.assertNotIn("save_call", app.session_state)
+
+    def test_wrong_job_warning_is_shown_but_does_not_block_one_click_save(self):
         app = card_app()
         nursing = ("Responsibilities: provide patient care, administer medication, chart vitals and coordinate "
                    "with physicians at Mercy Hospital. Requirements: active RN license. ") * 7
-        app.text_area(key="attach-text-gd-1").set_value(nursing).run()
+        app.text_area(key="attach-text-gd-1").set_value(nursing)
+        app.form_submit_button(key="attach-save-gd-1").click().run()
+        assert not app.exception, app.exception
+        self.assertEqual(app.session_state["save_call"], ("gd-1", nursing))
         self.assertTrue(any(attach.WRONG_JOB_WARNING in w.value for w in app.warning))
-        self.assertFalse(app.button(key="attach-save-gd-1").disabled)
 
     def test_replace_and_undo_for_own_paste_and_hidden_states(self):
         app = card_app(description=PASTE, raw_description_word_count=len(PASTE.split()),
@@ -589,6 +604,10 @@ class StreamlitForm(unittest.TestCase):
                        manual_description_has_previous=True, manual_description_status="active")
         self.assertIn("Replace pasted description", [e.label for e in app.expander])
         self.assertTrue(any("user pasted (unverified)" in c.value for c in app.caption))
+        app.text_area(key="attach-text-gd-1").set_value(SECOND_PASTE)
+        app.form_submit_button(key="attach-save-gd-1").click().run()
+        assert not app.exception, app.exception
+        self.assertEqual(app.session_state["save_call"], ("gd-1", SECOND_PASTE))
         app.button(key="attach-undo-gd-1").click().run()
         self.assertEqual(app.session_state["undo_call"], "gd-1")
         for overrides in (dict(ai_score=82, candidate_assessment_id="a1", recommendation="apply"),
@@ -599,7 +618,6 @@ class StreamlitForm(unittest.TestCase):
                 labels = [e.label for e in card_app(**overrides).expander]
                 self.assertNotIn("Attach description", labels)
                 self.assertNotIn("Replace pasted description", labels)
-
 
 if __name__ == "__main__":
     unittest.main()
