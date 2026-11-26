@@ -70,8 +70,10 @@ def select_job_open_target(job: dict[str, Any]) -> JobOpenTarget:
     resolved_url = str(job.get("resolved_candidate_url") or "").strip()
 
     if resolved_url and identity_validation_passed(job):
+        # An identity-matched candidate page is not a verified official posting.
         return JobOpenTarget(
-            label="Open verified job",
+            label=("Open verified job" if official_status == OFFICIAL_FOUND_VERIFIED
+                   else "Open matched posting (not verified)"),
             url=resolved_url,
             note="Resolved page passed identity validation.",
         )
