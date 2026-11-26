@@ -121,12 +121,20 @@ def attach_message_key(record_key):
     return f"attach-message-{record_key}"
 
 
-def save_description_attachment(record_key):
-    """One persistence operation; never scores, enriches or calls a provider."""
+def attach_warning_key(record_key):
+    return f"attach-warning-{record_key}"
+
+
+def save_description_attachment(record_key, title=None, company=None):
+    """Validate the submitted form value, then save without AI or network calls."""
+    submitted = st.session_state.get(attach_text_key(record_key), "")
+    validation = validate_pasted_description(submitted, title=title, company=company)
+    if not validation.accepted:
+        st.session_state[attach_message_key(record_key)] = ("error", validation.reason)
+        return
     try:
         outcome = save_attached_description(
-            record_key, st.session_state.get(attach_text_key(record_key), ""),
-            resume_hash=st.session_state.get("resume_hash"))
+            record_key, submitted, resume_hash=st.session_state.get("resume_hash"))
     except Exception:
         st.session_state[attach_message_key(record_key)] = (
             "error", "The description could not be saved. Nothing was changed.")
@@ -134,6 +142,11 @@ def save_description_attachment(record_key):
     kind = {"saved": "success", "unchanged": "info"}.get(outcome.status, "error")
     st.session_state[attach_message_key(record_key)] = (kind, outcome.message)
     if outcome.status == "saved":
+        # Forms submit the latest text in the same click; retain nonblocking
+        # wrong-job warnings after clearing the text area on success.
+        warning = outcome.warning or validation.warning
+        if warning:
+            st.session_state[attach_warning_key(record_key)] = warning
         st.session_state[attach_text_key(record_key)] = ""
         invalidate_data(st.session_state, "description attached")
 
@@ -159,6 +172,9 @@ def render_attach_description(job: dict, mode: str) -> None:
         message = st.session_state.pop(attach_message_key(record_key), None)
         if message:
             getattr(st, message[0])(message[1])
+        warning = st.session_state.pop(attach_warning_key(record_key), None)
+        if warning:
+            st.warning(f"{warning} Use Undo before scoring if this is the wrong job.")
         st.markdown(f"**{job.get('title') or 'Untitled job'}** · {job.get('company_name') or 'Unknown company'}")
         target = select_job_open_target(job)
         if target.url:
@@ -172,21 +188,25 @@ def render_attach_description(job: dict, mode: str) -> None:
             st.caption(f"Description source: user pasted · {job.get('manual_description_attached_at')}")
         st.caption("Saving makes this job eligible for normal AI scoring if it passes the other "
                    "requirements. It does not verify the employer or posting. No AI request is made now.")
-        text = st.text_area("Paste the complete job description", key=attach_text_key(record_key), height=220)
-        preview = validate_pasted_description(text, title=job.get("title"), company=job.get("company_name"))
-        if text.strip():
-            st.caption(f"Words: {preview.word_count}"
-                       + (f" · {preview.duplicates_removed} repeated block(s) removed"
-                          if preview.duplicates_removed else ""))
-            if not preview.accepted:
-                st.error(preview.reason)
-            elif preview.warning:
-                st.warning(preview.warning)
-            else:
-                st.caption("Complete job description detected.")
-        save_label = "Save description" if mode == "attach" else "Replace description"
-        st.button(save_label, key=f"attach-save-{record_key}", disabled=not preview.accepted,
-                  on_click=save_description_attachment, args=(record_key,))
+        # A form sends the latest paste and the submit event together. Do not
+        # disable Save based on a value the server has not received yet.
+        with st.form(key=f"attach-form-{record_key}", clear_on_submit=False):
+            text = st.text_area("Paste the complete job description", key=attach_text_key(record_key), height=220)
+            preview = validate_pasted_description(text, title=job.get("title"), company=job.get("company_name"))
+            if text.strip():
+                st.caption(f"Words: {preview.word_count}"
+                           + (f" · {preview.duplicates_removed} repeated block(s) removed"
+                              if preview.duplicates_removed else ""))
+                if not preview.accepted:
+                    st.error(preview.reason)
+                elif preview.warning:
+                    st.warning(preview.warning)
+                else:
+                    st.caption("Complete job description detected.")
+            save_label = "Save description" if mode == "attach" else "Replace description"
+            st.form_submit_button(save_label, key=f"attach-save-{record_key}",
+                                  on_click=save_description_attachment,
+                                  args=(record_key, job.get("title"), job.get("company_name")))
         if job.get("manual_description_has_previous"):
             st.button("Undo last paste", key=f"attach-undo-{record_key}",
                       on_click=undo_description_attachment, args=(record_key,))
