@@ -13,6 +13,7 @@ from src.enrichment import official_job_resolver as resolver
 from src.enrichment.ats import ATS_DISCOVERY_CACHE, discover_ats_candidates, ADAPTERS
 from src.enrichment.job_description import extract_job_description_from_html
 from src.enrichment.job_identity import compare_posting_evidence, description_similarity
+from src.test_archive_fixtures import read_archive_fixture
 from src.verified_posting_identity import posting_urls_equivalent, verified_posting_key_from_url
 
 CORP = 'https://examplewidget.com/'
@@ -696,25 +697,28 @@ class Tests(unittest.TestCase):
 class ArchivedPages(unittest.TestCase):
     root = Path('/private/tmp/known-employer-url-diagnosis-q8cydt3q')
 
-    def test_actual_saved_incidents(self):
-        if not self.root.exists():
-            self.skipTest('Private archived public HTML is not installed on this machine')
-        urls = dict(upstart='https://careers.upstart.com/jobs/senior-data-platform-engineer-076371c4-e43b-4489-8132-a304724cc54f',
-                    jack_henry='https://careers.jackhenry.com/en/job/allen/data-engineer-ii/42859/103388183664',
-                    sony='https://sonyglobal.wd1.myworkdayjobs.com/SonyGlobalCareers/job/San-Diego/Expert-Business-Intelligence-Analyst_JR-119921')
-        for case, url in urls.items():
-            with self.subTest(case=case):
-                html = (self.root / (case + '.html')).read_text()
-                parsed = extract_job_description_from_html(url, url, 200, html)
-                self.assertEqual(parsed.status, 'enriched')
-                self.assertGreater(parsed.word_count, 1000)
-                equivalent = posting_urls_equivalent(url, parsed.canonical_url, parsed.resolved_job_id)
-                self.assertEqual(equivalent, case != 'upstart')
-                if case == 'upstart':
-                    job = trusted() | dict(title=parsed.resolved_title, company_name=parsed.resolved_company,
-                            official_job_url=url, verified_posting_key=verified_posting_key_from_url(url))
-                    with httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(200, text=html))) as client:
-                        self.assertEqual(check_job(job, client, Settings()).status, 'UNKNOWN')
+    def check_saved_incident(self, case, url):
+        html = read_archive_fixture(self.root / (case + '.html'))
+        parsed = extract_job_description_from_html(url, url, 200, html)
+        self.assertEqual(parsed.status, 'enriched')
+        self.assertGreater(parsed.word_count, 1000)
+        equivalent = posting_urls_equivalent(url, parsed.canonical_url, parsed.resolved_job_id)
+        self.assertEqual(equivalent, case != 'upstart')
+        if case == 'upstart':
+            job = trusted() | dict(title=parsed.resolved_title, company_name=parsed.resolved_company,
+                                   official_job_url=url, verified_posting_key=verified_posting_key_from_url(url))
+            with httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(200, text=html))) as client:
+                self.assertEqual(check_job(job, client, Settings()).status, 'UNKNOWN')
+
+    # Independent test methods give both unittest and pytest per-file results.
+    def test_saved_upstart(self):
+        self.check_saved_incident('upstart', 'https://careers.upstart.com/jobs/senior-data-platform-engineer-076371c4-e43b-4489-8132-a304724cc54f')
+
+    def test_saved_jack_henry(self):
+        self.check_saved_incident('jack_henry', 'https://careers.jackhenry.com/en/job/allen/data-engineer-ii/42859/103388183664')
+
+    def test_saved_sony(self):
+        self.check_saved_incident('sony', 'https://sonyglobal.wd1.myworkdayjobs.com/SonyGlobalCareers/job/San-Diego/Expert-Business-Intelligence-Analyst_JR-119921')
 
 
 if __name__ == '__main__':
