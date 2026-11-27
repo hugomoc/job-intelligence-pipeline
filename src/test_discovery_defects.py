@@ -19,6 +19,7 @@ from src.enrichment.ats import discover_ats_candidates, ATS_DISCOVERY_CACHE, wor
 from src.enrichment.ats.base import safe_get, anchors_from_html
 from src.enrichment.job_description import extract_job_description_from_html
 from src.enrichment.job_identity import validate_job_identity
+from src.test_archive_fixtures import ArchiveResponseBodies, read_archive_fixture
 from src.verified_posting_identity import (
     breezy_posting_scope, fetched_posting_scope_valid, is_known_official_or_ats_url,
     is_specific_job_posting_url, posting_urls_equivalent, verified_posting_key_from_url,
@@ -246,20 +247,19 @@ class ArchivedDiscoveryTests(unittest.TestCase):
     root = Path('/private/tmp/issue3-http-only-xcvvpzac')
 
     def test_saved_tandem_highmark_and_breezy_candidates(self):
-        if not self.root.exists():
-            self.skipTest('Private recovery archive not installed')
-        ledger=json.loads((self.root/'HTTP_ACCOUNTING.json').read_text())
-        jobs=json.loads((self.root/'ELIGIBLE_22.json').read_text())
-        results=json.loads((self.root/'RESULTS.json').read_text())
+        ledger=json.loads(read_archive_fixture(self.root/'HTTP_ACCOUNTING.json'))
+        jobs=json.loads(read_archive_fixture(self.root/'ELIGIBLE_22.json'))
+        results=json.loads(read_archive_fixture(self.root/'RESULTS.json'))
         def normalize(url):
             p=urlsplit(url);return urlunsplit((p.scheme,p.netloc,p.path or '/',p.query,''))
         rows={normalize(q['url']):q for q in ledger['requests'] if q.get('body_file') and not q.get('provider')}
+        bodies = ArchiveResponseBodies()
         def send(req):
             event=rows.get(normalize(str(req.url)))
             if event is None:raise httpx.ConnectError('Archive miss; no network',request=req)
             headers={'content-type':'text/html; charset=utf-8'}
             if event.get('location'):headers['location']=event['location']
-            return httpx.Response(event['http_status'],headers=headers,content=(self.root/event['body_file']).read_bytes())
+            return httpx.Response(event['http_status'],headers=headers,content=bodies.read(self.root/event['body_file']))
         expected={'EasyPay Finance':True,'Tandem Diabetes Care':True,'Highmark':True}
         keys=set()
         for old in results:
@@ -268,12 +268,17 @@ class ArchivedDiscoveryTests(unittest.TestCase):
             urls=[t['url'] for t in old['candidate_validation_trace'] if t.get('fetch_status')=='enriched']
             if old['company']=='EasyPay Finance':urls=['https://easypayfinance.breezy.hr/p/0393434efbdd-lead-analytics-engineer/apply']
             for url in urls:
+                # Resolve outside subTest: an absent response body must skip
+                # the whole replay, not continue to its aggregate assertion.
+                careers.CAREERS_CACHE.clear()
+                with patch.object(resolver,'fetch_dynamic_job_description',return_value=None), httpx.Client(
+                        transport=httpx.MockTransport(send),follow_redirects=True) as client:
+                    found=resolver.resolve_from_candidates(dict(original),client,
+                        [resolver.OfficialJobCandidate(url,old['title'],resolver.ats_type_for_url(url) or 'search')], 'search')
+                # Even a resolver that swallowed the skip cannot turn an
+                # absent body into a successful negative identity assertion.
+                bodies.require_complete()
                 with self.subTest(company=old['company'],url=url):
-                    careers.CAREERS_CACHE.clear()
-                    with patch.object(resolver,'fetch_dynamic_job_description',return_value=None), httpx.Client(
-                            transport=httpx.MockTransport(send),follow_redirects=True) as client:
-                        found=resolver.resolve_from_candidates(dict(original),client,
-                            [resolver.OfficialJobCandidate(url,old['title'],resolver.ats_type_for_url(url) or 'search')], 'search')
                     different_senior='senior-data-engineer' in url and old['company']=='Highmark'
                     self.assertEqual(found.status=='FOUND_VERIFIED',not different_senior)
                     if found.status=='FOUND_VERIFIED':

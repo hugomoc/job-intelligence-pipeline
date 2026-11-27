@@ -55,6 +55,7 @@ CI_TESTS = [
     "src/test_ats_posting_detail_fallbacks.py",
     "src/test_end_date_default.py",
     "src/test_retrieval_diagnostics.py",
+    "src/test_archive_fixtures.py",
     "src/test_employer_careers.py",
     "src/test_discovery_defects.py",
     "src/test_pinpoint_rippling_ats.py",
